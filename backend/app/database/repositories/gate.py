@@ -227,6 +227,8 @@ class GateRepository:
     def events(self, limit=50, offset=0, container=None, camera_id=None, event_type=None, status=None, start_date=None, end_date=None):
         with self.db.sessions() as session:
             query = select(GateEvent)
+            # Suppress partial twin events: only show twin events when BOTH containers have been read and updated
+            query = query.where(~((GateEvent.is_twin == True) & ((GateEvent.container_number.is_(None)) | (GateEvent.container_number_2.is_(None)))))
             if container:
                 query = query.where((GateEvent.container_number == container.upper()) | (GateEvent.container_number_2 == container.upper()))
             if camera_id:

@@ -13,7 +13,7 @@ import { GateEvent } from './gate-api.service';
     <th>Status</th>
     <th>Evidence & Actions</th>
   </tr></thead>
-  <tbody>@for (event of events(); track event.id) {<tr>
+  <tbody>@for (event of visibleEvents(); track event.id) {<tr>
     <td>{{ event.timestamp | date:'dd MMM, HH:mm:ss' }}</td>
     <td class="mono font-bold">
       @if (event.is_twin) {
@@ -58,4 +58,8 @@ import { GateEvent } from './gate-api.service';
 export class EventTableComponent {
   events = input<GateEvent[]>([]);
   selected = output<string>();
+
+  visibleEvents(): GateEvent[] {
+    return this.events().filter(e => !e.is_twin || (!!e.container_number && !!e.container_number_2));
+  }
 }
