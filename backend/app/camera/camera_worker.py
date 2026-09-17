@@ -174,7 +174,8 @@ class CameraWorker:
                         self._set_status('ONLINE', 'receiving')
                         backoff = self.settings.reconnect_initial_seconds
                         if self.config.source_type == 'file':
-                            self._stop.wait(max(0, 1 / stream.fps - (time.monotonic() - started)))
+                            # Process video files at high throughput (minimal sleep to yield thread without throttling)
+                            self._stop.wait(0.005)
                 except Exception as exc:
                     log.warning('camera_capture_failed', extra={'camera_id': self.config.id, 'error_type': type(exc).__name__})
                     self._set_status('ERROR', 'capture_failed')
