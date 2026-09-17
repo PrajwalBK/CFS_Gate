@@ -333,6 +333,9 @@ class GateRuntime:
             self.videos.assign(camera_id, {**info, 'active': True})
             self.manager.workers[camera_id] = replacement
             self.tracker[camera_id] = TemporalTracker(self.settings.track_ttl_seconds)
+            self.occupancy[camera_id] = ViewOccupancy(self.settings)
+            with self._state_lock:
+                self._tracks = {k: v for k, v in self._tracks.items() if not k.startswith(f'{camera_id}:')}
 
     def control_video(self, camera_id, action):
         with self._camera_locks[camera_id]:
