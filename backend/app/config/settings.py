@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     target_classes: list[str] = ['container', 'trailer', 'truck', 'vehicle', 'feet', 'cointainer', 'container_object']
     ocr_classes: list[str] = ['container', 'trailer', 'cointainer', 'container_object', 'feet']
 
-    ocr_engine: Literal['olmocr', 'easyocr', 'qwen2_vl', 'qwen2vl'] = 'olmocr'
+    ocr_engine: Literal['olmocr', 'easyocr', 'qwen2_vl', 'qwen2vl'] = 'easyocr'
     ocr_model_name: str = 'Qwen/Qwen2-VL-2B-Instruct'
     ocr_gpu: bool = True
     ocr_download_enabled: bool = False

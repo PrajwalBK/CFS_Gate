@@ -409,10 +409,13 @@ class GateRuntime:
             if self._stop.is_set():
                 return
             log.info('models_loaded')
-            for name, target in [('gate-inference', self._inference_loop), ('gate-ocr', self._ocr_loop)]:
-                thread = threading.Thread(target=target, name=name, daemon=True)
-                self._threads.append(thread)
-                thread.start()
+            infer_thread = threading.Thread(target=self._inference_loop, name='gate-inference', daemon=True)
+            self._threads.append(infer_thread)
+            infer_thread.start()
+            for idx in (1, 2):
+                ocr_thread = threading.Thread(target=self._ocr_loop, name=f'gate-ocr-{idx}', daemon=True)
+                self._threads.append(ocr_thread)
+                ocr_thread.start()
         except Exception as exc:
             if self.detector is None:
                 self.model_status['detector'] = 'ERROR'
@@ -557,9 +560,6 @@ class GateRuntime:
                         self.ocr_store.save(job, crop)
                         self.ocr_spool_error = None
                         self.metrics.increment('ocr_jobs_saved')
-                        with self._state_lock:
-                            if job.origin_key in self._tracks:
-                                self._tracks[job.origin_key]['pending'] = False
                         break
                     except Exception as exc:
                         self.ocr_spool_error = type(exc).__name__
@@ -576,6 +576,11 @@ class GateRuntime:
 
     def _process_saved_ocr(self, job_id):
         job, crop, validation = self.ocr_store.load(job_id)
+        with self._state_lock:
+            track_state = self._tracks.get(job.origin_key)
+            if track_state and track_state.get('done'):
+                self.ocr_store.complete(job_id, getattr(job, 'event_id', None))
+                return
         prior = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
         is_rear_slot = getattr(job, 'slot_position', 'FRONT') == 'REAR' or job.origin_key.endswith(':rear')
         if prior.event_id:
@@ -748,6 +753,11 @@ class GateRuntime:
                     state['done'] = False
         if result:
             self._confirm_occupancy(job, result[0])
+            ev = self.repository.event(result[0])
+            if ev and ev.get('status') == 'CONFIRMED':
+                is_done = bool(ev.get('container_number_2')) if getattr(job, 'slot_position', 'FRONT') == 'REAR' else bool(ev.get('container_number'))
+                if is_done:
+                    self.ocr_store.cancel_pending(job.origin_key, result[0])
             self.metrics.increment('events_created' if result[1] else 'evidence_associated')
             self.metrics.latency('event', (utcnow() - job.started_at).total_seconds())
 

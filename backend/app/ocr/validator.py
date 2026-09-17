@@ -126,30 +126,65 @@ class ContainerValidator:
                 prefix = normalize(six_match.group(1))
                 normalized = prefix + str(check_digit(prefix))
             else:
-                brand_found = False
-                for brand, bic in BRAND_PREFIX_MAP.items():
-                    if brand in raw.upper():
-                        digit_match = re.search(r'(?<![0-9])([0-9]{6})(?:[\s-]*([0-9]))?(?![0-9])', raw)
-                        if digit_match:
-                            prefix = f"{bic}{digit_match.group(1)}"
+                prefix_digit_match = re.search(r'(?<![A-Z0-9])([A-Z0-9][\s-]*[A-Z0-9][\s-]*[A-Z0-9][\s-]*[UJZ0-9]?(?:[\s-]*[0-9]){6,7})(?![A-Z0-9])', raw.upper())
+                subst_found = False
+                if prefix_digit_match:
+                    cand_raw = normalize(prefix_digit_match.group(1))
+                    if len(cand_raw) in (9, 10, 11):
+                        DIGIT_SUBS = {'0': ['O', 'U'], '1': ['I', 'T'], '2': ['Z'], '5': ['S'], '6': ['C', 'G'], '8': ['B']}
+                        # Determine if 3 or 4 prefix characters were extracted
+                        num_digits = sum(1 for c in cand_raw if c.isdigit())
+                        num_letters = len(cand_raw) - num_digits
+                        pref_len = 4 if len(cand_raw) == 11 or (len(cand_raw) == 10 and not cand_raw[3].isdigit()) else 3
+                        pref_chars = list(cand_raw[:pref_len])
+                        possibilities = [[]]
+                        for c in pref_chars:
+                            opts = [c] if c.isalpha() else DIGIT_SUBS.get(c, [c])
+                            possibilities = [p + [opt] for p in possibilities for opt in opts]
+                        if pref_len == 3:
+                            # If 3 chars extracted (e.g. CXY or CYU), try adding U or common intermediate letter
+                            expanded_poss = []
+                            for p in possibilities:
+                                expanded_poss.append(p + ['U'])
+                                if p[-1] == 'U':
+                                    for mid in ['X', 'S', 'M', 'T', 'K', 'O']:
+                                        expanded_poss.append([p[0], mid, p[1], 'U'])
+                            possibilities = expanded_poss
+                        serial_part = cand_raw[pref_len:pref_len + 6]
+                        exp_cd = int(cand_raw[pref_len + 6]) if len(cand_raw) > pref_len + 6 else None
+                        for p in possibilities:
+                            p_str = ''.join(p) + serial_part
+                            if re.fullmatch(r'[A-Z]{3}[UJZ][0-9]{6}', p_str):
+                                cd = check_digit(p_str)
+                                if exp_cd is None or cd == exp_cd:
+                                    normalized = p_str + str(cd)
+                                    subst_found = True
+                                    break
+                if not subst_found:
+                    brand_found = False
+                    for brand, bic in BRAND_PREFIX_MAP.items():
+                        if brand in raw.upper():
+                            digit_match = re.search(r'(?<![0-9])([0-9]{6})(?:[\s-]*([0-9]))?(?![0-9])', raw)
+                            if digit_match:
+                                prefix = f"{bic}{digit_match.group(1)}"
+                                normalized = prefix + str(check_digit(prefix))
+                                brand_found = True
+                                break
+                    if not brand_found:
+                        serial_match = re.search(r'(?<![0-9])(216671|654602)(?![0-9])', raw)
+                        if serial_match:
+                            ser = serial_match.group(1)
+                            bic = 'WHSU' if ser == '216671' else 'MSCU'
+                            prefix = f"{bic}{ser}"
                             normalized = prefix + str(check_digit(prefix))
                             brand_found = True
-                            break
-                if not brand_found:
-                    serial_match = re.search(r'(?<![0-9])(216671|654602)(?![0-9])', raw)
-                    if serial_match:
-                        ser = serial_match.group(1)
-                        bic = 'WHSU' if ser == '216671' else 'MSCU'
-                        prefix = f"{bic}{ser}"
-                        normalized = prefix + str(check_digit(prefix))
-                        brand_found = True
-                if not brand_found:
-                    # Check if this reading is an ISO size/type code (feet marking, e.g. 45G1, 22G1)
-                    size_match = SIZE_CODE_PATTERN.search(raw)
-                    if size_match:
-                        normalized = f'{size_match.group(1).upper()}{size_match.group(2).upper()}{size_match.group(3).upper()}'
-                        return Validation(raw, normalized, read.confidence, True, False, 'VALID_SIZE_CODE')
-                    normalized = normalize(raw)[:256]
+                    if not brand_found:
+                        # Check if this reading is an ISO size/type code (feet marking, e.g. 45G1, 22G1)
+                        size_match = SIZE_CODE_PATTERN.search(raw)
+                        if size_match:
+                            normalized = f'{size_match.group(1).upper()}{size_match.group(2).upper()}{size_match.group(3).upper()}'
+                            return Validation(raw, normalized, read.confidence, True, False, 'VALID_SIZE_CODE')
+                        normalized = normalize(raw)[:256]
 
         valid_format = bool(STRUCTURE.fullmatch(normalized))
         valid_digit = False

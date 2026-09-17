@@ -52,8 +52,6 @@ class OCRJobStore:
         try:
             with temporary.open('wb') as file:
                 file.write(data)
-                file.flush()
-                os.fsync(file.fileno())
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -100,7 +98,7 @@ class OCRJobStore:
     def connection(self):
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
-        db.execute('PRAGMA synchronous=FULL')
+        db.execute('PRAGMA synchronous=NORMAL')
         db.execute('''CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY, origin TEXT NOT NULL, sequence INTEGER NOT NULL,
             metadata TEXT NOT NULL, crop TEXT NOT NULL, image TEXT NOT NULL,
@@ -117,12 +115,12 @@ class OCRJobStore:
 
     def save(self, job, crop):
         import cv2
-        def png(image):
-            ok, data = cv2.imencode('.png', image)
+        def encode_img(image):
+            ok, data = cv2.imencode('.png', image, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             if not ok:
                 raise OSError('OCR evidence encoding failed')
             return data.tobytes()
-        crop_data, image_data = png(crop), png(job.frame.image)
+        crop_data, image_data = encode_img(crop), encode_img(job.frame.image)
         import math
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         exposure = float(((gray > 10) & (gray < 245)).mean())
@@ -134,7 +132,7 @@ class OCRJobStore:
             for cam_id, comp_img in job.companion_frames.items():
                 if comp_img is not None:
                     try:
-                        c_data = png(comp_img)
+                        c_data = encode_img(comp_img)
                         c_path = f'{folder}/companion_{cam_id}.png'
                         self._write_image(c_path, c_data)
                         companion_paths[cam_id] = c_path
@@ -243,6 +241,11 @@ class OCRJobStore:
         with self.connection() as db:
             db.execute("UPDATE jobs SET state='DONE', event_id=?, error_type=NULL, retry_at=? WHERE id=?",
                        (event_id, time.time(), job_id))
+
+    def cancel_pending(self, origin, event_id=None):
+        with self.connection() as db:
+            db.execute("UPDATE jobs SET state='DONE', event_id=?, error_type=NULL, retry_at=? WHERE origin=? AND state='PENDING'",
+                       (event_id, time.time(), origin))
 
     def clean_completed(self, max_age_seconds=10, protected_origins=()):
         cutoff = time.time() - max_age_seconds

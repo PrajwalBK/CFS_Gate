@@ -53,35 +53,43 @@ class EasyOCREngine:
         import cv2
         from app.ocr.validator import CANDIDATE, STRUCTURE
         SIX_PREFIX = re.compile(r'(?<![A-Z0-9])([A-Z][\s-]*[A-Z][\s-]*[A-Z][\s-]*[UJZ](?:[\s-]*[0-9]){6})(?![A-Z0-9])')
+        DIGIT_PREFIX = re.compile(r'(?<![A-Z0-9])([A-Z0-9][\s-]*[A-Z0-9][\s-]*[A-Z0-9][\s-]*[UJZ0-9](?:[\s-]*[0-9]){6,7})(?![A-Z0-9])')
         if image is None or getattr(image, 'size', 0) == 0:
             return OCRRead('', 0.0)
 
         h, w = image.shape[:2]
+        # Avoid processing massive full 4K/1080p crops without downscaling
+        proc_img = image
+        if max(h, w) > 1280:
+            scale = 1280.0 / max(h, w)
+            proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            h, w = proc_img.shape[:2]
+
         is_vertical = h > 1.5 * w
 
-        proc_img = image
         if is_vertical:
             if w < 100:
                 scale = min(3.0, 120.0 / max(1, w))
-                proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+                proc_img = cv2.resize(proc_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
             proc_img = cv2.copyMakeBorder(proc_img, 25, 25, 25, 25, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
+        # 1. Fast standard 0-degree pass
         items = self.reader.readtext(
             proc_img, detail=1, paragraph=False,
             allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            rotation_info=[90, 180, 270] if not is_vertical else None,
+            rotation_info=None,
             link_threshold=0.9 if is_vertical else 0.2
         )
 
         txt, conf = _extract_text_from_items(items)
-        if STRUCTURE.search(txt) or CANDIDATE.search(txt) or SIX_PREFIX.search(txt):
+        if STRUCTURE.search(txt) or CANDIDATE.search(txt) or SIX_PREFIX.search(txt) or DIGIT_PREFIX.search(txt):
             return OCRRead(txt, conf)
 
         # If not vertical and no valid code found yet, check vertical post strips
         if not is_vertical and w > 200:
             strips = [
-                image[:, int(w * 0.60):],
-                image[int(h * 0.08):int(h * 0.90), int(w * 0.35):int(w * 0.80)]
+                proc_img[:, int(w * 0.60):],
+                proc_img[int(h * 0.08):int(h * 0.90), int(w * 0.35):int(w * 0.80)]
             ]
             for strip in strips:
                 if strip.shape[0] < 50 or strip.shape[1] < 50:
@@ -92,11 +100,10 @@ class EasyOCREngine:
                     link_threshold=0.9
                 )
                 txt_strip, conf_strip = _extract_text_from_items(items_strip)
-                if STRUCTURE.search(txt_strip) or CANDIDATE.search(txt_strip) or SIX_PREFIX.search(txt_strip):
+                if STRUCTURE.search(txt_strip) or CANDIDATE.search(txt_strip) or SIX_PREFIX.search(txt_strip) or DIGIT_PREFIX.search(txt_strip):
                     return OCRRead(txt_strip, conf_strip)
 
         # For vertical crops: if padded read didn't find a candidate, retry without padding.
-        # EasyOCR is inconsistent at boundaries — one pass may succeed where the other fails.
         if is_vertical:
             base_img = image
             if w < 100:
@@ -108,9 +115,8 @@ class EasyOCREngine:
                 link_threshold=0.9
             )
             txt2, conf2 = _extract_text_from_items(items2)
-            if STRUCTURE.search(txt2) or CANDIDATE.search(txt2) or SIX_PREFIX.search(txt2):
+            if STRUCTURE.search(txt2) or CANDIDATE.search(txt2) or SIX_PREFIX.search(txt2) or DIGIT_PREFIX.search(txt2):
                 return OCRRead(txt2, conf2)
-            # Keep the longer result (more characters extracted)
             if len(txt2) > len(txt):
                 txt, conf = txt2, conf2
 
