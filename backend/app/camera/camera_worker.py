@@ -168,14 +168,16 @@ class CameraWorker:
                         if self.config.source_type == 'file':
                             video_frame += 1
                             self.video_position_seconds = video_frame / stream.fps
-                        if started >= next_publish:
                             self._publish(image)
-                            next_publish = started + 1 / self.config.capture_fps
-                        self._set_status('ONLINE', 'receiving')
-                        backoff = self.settings.reconnect_initial_seconds
-                        if self.config.source_type == 'file':
-                            # Process video files at high throughput (minimal sleep to yield thread without throttling)
-                            self._stop.wait(0.005)
+                            self._set_status('ONLINE', 'receiving')
+                            backoff = self.settings.reconnect_initial_seconds
+                            self._stop.wait(max(0.005, 1 / (self.config.capture_fps * 1.5)))
+                        else:
+                            if started >= next_publish:
+                                self._publish(image)
+                                next_publish = started + 1 / self.config.capture_fps
+                            self._set_status('ONLINE', 'receiving')
+                            backoff = self.settings.reconnect_initial_seconds
                 except Exception as exc:
                     log.warning('camera_capture_failed', extra={'camera_id': self.config.id, 'error_type': type(exc).__name__})
                     self._set_status('ERROR', 'capture_failed')

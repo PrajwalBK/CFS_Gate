@@ -110,7 +110,10 @@ class GateRepository:
                     existing = session.get(GateEvent, event_id)
                     created = False
                     event_id = existing.id
-                is_twin_event = is_rear_slot or obs.origin_key.endswith(':front')
+                size_type = getattr(obs.ocr, 'size_type', None)
+                size_str = str(size_type or '')
+                is_40ft = size_str.startswith('4') or '40' in size_str or '45' in size_str
+                is_twin_event = (is_rear_slot or obs.origin_key.endswith(':front')) and not is_40ft
                 if created:
                     session.add(GateEvent(
                         id=event_id, gate_id=obs.gate_id, timestamp=obs.detection.frame_timestamp,
@@ -124,7 +127,16 @@ class GateRepository:
                     ))
                     session.flush()
                 else:
-                    if is_rear_slot:
+                    if is_40ft:
+                        existing.is_twin = False
+                        existing.container_number_2 = None
+                        existing.iso_code_2 = None
+                        if obs.confirmed or not existing.container_number:
+                            existing.container_number = number
+                            existing.iso_code_1 = size_type or existing.iso_code_1
+                        if obs.confirmed:
+                            existing.status = 'CONFIRMED'
+                    elif is_rear_slot:
                         existing.is_twin = True
                         if (number != existing.container_number or not existing.container_number) and (not existing.container_number_2 or obs.confirmed):
                             existing.container_number_2 = number

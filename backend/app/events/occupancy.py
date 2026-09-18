@@ -111,7 +111,7 @@ class ViewOccupancy:
 
         # 1. Filter raw candidates: must intersect occupancy ROI, not past exit, and realistic container size
         raw_candidates = [(d, b) for d, b in all_boxes
-                          if iou(b, zone) > 0 and not self._past_exit(b, camera) and box_area(b) >= 0.08]
+                          if iou(b, zone) > 0 and not self._past_exit(b, camera) and box_area(b) >= 0.015]
 
         # 2. Suppress nested sub-boxes (e.g. text strips, decals, doors detected inside container body)
         candidates = []
@@ -160,14 +160,25 @@ class ViewOccupancy:
                 ordered = self._order_slots(candidates[:2], camera)
                 front_det, front_b = ordered[0]
                 rear_det, rear_b = ordered[1]
-                if not state.is_twin:
-                    state.is_twin = True
-                    state.closed = False
-                    state.slots['REAR'] = ContainerSlot('REAR', f'{state.origin}:rear', rear_b, center(rear_b), now, now, now, event_id=state.event_id)
-                if 'FRONT' in state.slots:
-                    self._update_slot(state.slots['FRONT'], front_b, now)
-                if 'REAR' in state.slots:
-                    self._update_slot(state.slots['REAR'], rear_b, now)
+                # To be twin containers, they must represent two physical containers (not just two text decals on one container!)
+                is_twin_candidate = (
+                    (box_area(front_b) >= 0.10 or box_area(rear_b) >= 0.10) and
+                    abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.25
+                )
+                if is_twin_candidate:
+                    if not state.is_twin:
+                        state.is_twin = True
+                        state.closed = False
+                        state.slots['REAR'] = ContainerSlot('REAR', f'{state.origin}:rear', rear_b, center(rear_b), now, now, now, event_id=state.event_id)
+                    if 'FRONT' in state.slots:
+                        self._update_slot(state.slots['FRONT'], front_b, now)
+                    if 'REAR' in state.slots:
+                        self._update_slot(state.slots['REAR'], rear_b, now)
+                else:
+                    # Multiple text boxes on the same single container: track the main box in FRONT slot!
+                    best_det, best_b = max(candidates, key=lambda c: c[0].confidence * box_area(c[1]))
+                    if 'FRONT' in state.slots:
+                        self._update_slot(state.slots['FRONT'], best_b, now)
             elif len(candidates) == 1:
                 det, b = candidates[0]
                 front_slot = state.slots.get('FRONT')
@@ -192,20 +203,11 @@ class ViewOccupancy:
                         else:
                             self._update_slot(front_slot, b, now)
                 elif front_slot:
-                    front_coord = center(front_slot.bbox)[axis]
-                    b_coord = center(b)[axis]
-                    other_axis = 1 - axis
-                    front_dim = front_slot.bbox[other_axis + 2] - front_slot.bbox[other_axis]
-                    other_diff = abs(center(b)[other_axis] - center(front_slot.bbox)[other_axis])
-                    same_lane = other_diff < 0.35 if front_dim <= 1.0 else other_diff < (0.35 * front_dim)
-                    is_behind = (b_coord < front_coord) if is_pos else (b_coord > front_coord)
-                    front_match = iou(front_slot.bbox, b)
-
-                    if same_lane and is_behind and (front_match < 0.35 or front_slot.closed):
+                    if front_slot.closed and self._past_exit(front_slot.bbox, camera):
                         state.is_twin = True
                         state.closed = False
                         state.slots['REAR'] = ContainerSlot('REAR', f'{state.origin}:rear', b, center(b), now, now, now, event_id=state.event_id)
-                    elif front_match >= 0.10:
+                    else:
                         self._update_slot(front_slot, b, now)
 
             # Synchronize master state properties

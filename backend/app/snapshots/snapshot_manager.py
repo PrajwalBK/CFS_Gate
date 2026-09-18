@@ -83,7 +83,7 @@ class SnapshotManager:
         crop_img = crop.copy()
         if text:
             cv2.putText(crop_img, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, .65, (0, 255, 0), 2)
-        ok, encoded = cv2.imencode('.png', crop_img)
+        ok, encoded = cv2.imencode('.jpg', crop_img, [cv2.IMWRITE_JPEG_QUALITY, 92])
         if not ok:
             raise OSError('Crop encoding failed')
 

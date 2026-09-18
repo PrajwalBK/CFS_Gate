@@ -512,9 +512,12 @@ class GateRuntime:
                     continue
                 if getattr(camera, 'source_type', 'live') != 'file' and getattr(frame, 'source_id', '') not in ('test', 'file') and wall_since_last < self.settings.ocr_interval_seconds:
                     continue
-                if state.get('samples', 0) >= self.settings.ocr_max_attempts:
-                    if state.get('done') or state.get('samples', 0) >= self.settings.ocr_max_attempts * 2:
-                        continue
+                if state.get('done'):
+                    continue
+                has_text_det = any(d.class_name in ('cointainer', 'feet') for d in detections)
+                max_samples = max(30, self.settings.ocr_max_attempts * 3) if has_text_det else max(15, self.settings.ocr_max_attempts)
+                if state.get('samples', 0) >= max_samples:
+                    continue
                 if track.hits < self.settings.min_track_hits:
                     continue
                 if track.detection.class_name not in self.settings.ocr_classes:
@@ -560,6 +563,9 @@ class GateRuntime:
                         self.ocr_store.save(job, crop)
                         self.ocr_spool_error = None
                         self.metrics.increment('ocr_jobs_saved')
+                        with self._state_lock:
+                            if job.origin_key in self._tracks:
+                                self._tracks[job.origin_key]['pending'] = False
                         break
                     except Exception as exc:
                         self.ocr_spool_error = type(exc).__name__
@@ -787,7 +793,7 @@ class GateRuntime:
             except Exception as exc:
                 self.last_processing_error = type(exc).__name__
                 self.metrics.increment('ocr_job_errors')
-                log.error('saved_ocr_failed', extra={'error_type': type(exc).__name__})
+                log.error('saved_ocr_failed', extra={'error_type': type(exc).__name__}, exc_info=True)
                 if job_id is not None:
                     try:
                         self.ocr_store.retry(job_id, type(exc).__name__)

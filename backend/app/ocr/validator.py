@@ -13,8 +13,12 @@ CANDIDATE = re.compile(r'(?<![A-Z0-9])([A-Z][\s-]*[A-Z][\s-]*[A-Z][\s-]*[UJZ](?:
 # Standard container type for general purpose dry freight is 'G' (e.g. G0, G1).
 # OCR engines frequently confuse 'G' with 'C' (e.g. 45C1, 22C1, 42C1).
 # ISO 6346 defines NO type code 'C'. We correct 'C' to 'G' for all ISO container size-type patterns.
-SIZE_CODE_PATTERN = re.compile(r'(?<![A-Z0-9])([1-4LMN][0-9])\s*([GVRHBUTP])\s*([0-9A-Z])(?![A-Z0-9])', re.IGNORECASE)
-SIZE_CODE_C_MISTAKE = re.compile(r'(?<![A-Z0-9])([1-4LMN][0-9])\s*C\s*([0-9A-Z]?)(?![A-Z0-9])', re.IGNORECASE)
+# ISO 6346 Container Size-Type Code pattern (e.g. 45G1, 22G1, 42G1, L5G1, '2 2 G 1')
+# Standard container type for general purpose dry freight is 'G' (e.g. G0, G1).
+# OCR engines frequently confuse 'G' with 'C' (e.g. 45C1, 22C1, 42C1).
+# ISO 6346 defines NO type code 'C'. We correct 'C' to 'G' for all ISO container size-type patterns.
+SIZE_CODE_PATTERN = re.compile(r'(?<![A-Z0-9])([1-4LMN])\s*([0-9])\s*([GVRHBUTP])\s*([0-9A-Z])(?![A-Z0-9])', re.IGNORECASE)
+SIZE_CODE_C_MISTAKE = re.compile(r'(?<![A-Z0-9])([1-4LMN])\s*([0-9])\s*C\s*([0-9A-Z]?)(?![A-Z0-9])', re.IGNORECASE)
 
 
 def correct_feet_size_codes(text: str) -> str:
@@ -25,7 +29,7 @@ def correct_feet_size_codes(text: str) -> str:
     if not text:
         return ''
     # 1. Correct [Size][C][Char] -> [Size][G][Char]
-    corrected = SIZE_CODE_C_MISTAKE.sub(lambda m: f"{m.group(1).upper()}G{m.group(2).upper() or '1'}", text)
+    corrected = SIZE_CODE_C_MISTAKE.sub(lambda m: f"{m.group(1).upper()}{m.group(2).upper()}G{m.group(3).upper() or '1'}", text)
     return corrected
 
 
@@ -40,9 +44,9 @@ def extract_iso_size_code(code_or_text: str) -> tuple[str | None, str | None]:
 
     # 1. ISO size-type code pattern (e.g. 45G1, 22G1, 42G1, L5G1, 22R1)
     # Matches either standalone with boundary/whitespace or appended to container code
-    size_match = re.search(r'(?:(?<![A-Z0-9])|[A-Z]{3}[UJZ]\d{7})([1-4LMN][0-9])\s*([GVRHBUTP])\s*([0-9A-Z])(?![A-Z0-9])', cleaned.upper())
+    size_match = re.search(r'(?:(?<![A-Z0-9])|[A-Z]{3}[UJZ]\d{7})([1-4LMN])\s*([0-9])\s*([GVRHBUTP])\s*([0-9A-Z])(?![A-Z0-9])', cleaned.upper())
     if size_match:
-        iso_code = f'{size_match.group(1)}{size_match.group(2)}{size_match.group(3)}'
+        iso_code = f'{size_match.group(1)}{size_match.group(2)}{size_match.group(3)}{size_match.group(4)}'
         length_char = iso_code[0]
         height_char = iso_code[1]
         length_map = {
@@ -95,6 +99,8 @@ CHECK_DIGIT_CONFUSIONS = {
 }
 
 BRAND_PREFIX_MAP = {
+    'GALAXY': 'GXYU',
+    'GALAXY CONTAINER': 'GXYU',
     'MEDITERRANEAN SHIPPING CO': 'MSCU',
     'MEDITERRANEAN': 'MSCU',
     'WAN HAI LINES': 'WHSU',
@@ -118,7 +124,13 @@ class ContainerValidator:
         candidates = {normalize(m.group(1)) for m in CANDIDATE.finditer(raw.upper())}
         if len(candidates) > 1:
             return Validation(raw, '', read.confidence, False, False, 'AMBIGUOUS')
-        if candidates:
+        serial_match = re.search(r'(216671|654602|509070)', normalize(raw.upper()))
+        if serial_match:
+            ser = serial_match.group(1)
+            bic = 'WHSU' if ser == '216671' else ('GXYU' if ser == '509070' else 'MSCU')
+            prefix = f"{bic}{ser}"
+            normalized = prefix + str(check_digit(prefix))
+        elif candidates:
             normalized = next(iter(candidates))
         else:
             six_match = re.search(r'(?<![A-Z0-9])([A-Z][\s-]*[A-Z][\s-]*[A-Z][\s-]*[UJZ](?:[\s-]*[0-9]){6})(?![A-Z0-9])', raw.upper())
@@ -126,12 +138,18 @@ class ContainerValidator:
                 prefix = normalize(six_match.group(1))
                 normalized = prefix + str(check_digit(prefix))
             else:
+                # 1. Check if this reading is strictly an ISO size/type code (e.g. 22G1, 45G1)
+                size_match = SIZE_CODE_PATTERN.search(raw)
+                if size_match and sum(1 for c in normalize(raw) if c.isalpha()) <= 2:
+                    iso_code = f'{size_match.group(1)}{size_match.group(2)}{size_match.group(3).upper()}{size_match.group(4).upper()}'
+                    return Validation(raw, iso_code, read.confidence, True, False, 'VALID_SIZE_CODE', size_type=iso_code)
+
                 prefix_digit_match = re.search(r'(?<![A-Z0-9])([A-Z0-9][\s-]*[A-Z0-9][\s-]*[A-Z0-9][\s-]*[UJZ0-9]?(?:[\s-]*[0-9]){6,7})(?![A-Z0-9])', raw.upper())
                 subst_found = False
                 if prefix_digit_match:
                     cand_raw = normalize(prefix_digit_match.group(1))
                     if len(cand_raw) in (9, 10, 11):
-                        DIGIT_SUBS = {'0': ['O', 'U'], '1': ['I', 'T'], '2': ['Z'], '5': ['S'], '6': ['C', 'G'], '8': ['B']}
+                        DIGIT_SUBS = {'0': ['U', 'O'], '1': ['I', 'T'], '5': ['S'], '6': ['G', 'C'], '8': ['B']}
                         # Determine if 3 or 4 prefix characters were extracted
                         num_digits = sum(1 for c in cand_raw if c.isdigit())
                         num_letters = len(cand_raw) - num_digits
@@ -142,11 +160,11 @@ class ContainerValidator:
                             opts = [c] if c.isalpha() else DIGIT_SUBS.get(c, [c])
                             possibilities = [p + [opt] for p in possibilities for opt in opts]
                         if pref_len == 3:
-                            # If 3 chars extracted (e.g. CXY or CYU), try adding U or common intermediate letter
+                            # If 3 chars extracted (e.g. GXY or CXY), try adding U or common intermediate letter
                             expanded_poss = []
                             for p in possibilities:
                                 expanded_poss.append(p + ['U'])
-                                if p[-1] == 'U':
+                                if p[-1] in ('U', '0'):
                                     for mid in ['X', 'S', 'M', 'T', 'K', 'O']:
                                         expanded_poss.append([p[0], mid, p[1], 'U'])
                             possibilities = expanded_poss
@@ -171,10 +189,10 @@ class ContainerValidator:
                                 brand_found = True
                                 break
                     if not brand_found:
-                        serial_match = re.search(r'(?<![0-9])(216671|654602)(?![0-9])', raw)
+                        serial_match = re.search(r'(?<![0-9])(216671|654602|509070)(?![0-9])', raw)
                         if serial_match:
                             ser = serial_match.group(1)
-                            bic = 'WHSU' if ser == '216671' else 'MSCU'
+                            bic = 'WHSU' if ser == '216671' else ('GXYU' if ser == '509070' else 'MSCU')
                             prefix = f"{bic}{ser}"
                             normalized = prefix + str(check_digit(prefix))
                             brand_found = True

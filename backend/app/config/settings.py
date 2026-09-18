@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     model_path: Path = Path('models/best.pt')
     model_device: str = 'cpu'
     model_image_size: int = Field(default=640, ge=32)
-    class_aliases: dict[str, str] = {'cointainer': 'container', 'container_object': 'container', 'feet': 'feet'}
+    class_aliases: dict[str, str] = {'container_object': 'container'}
     target_classes: list[str] = ['container', 'trailer', 'truck', 'vehicle', 'feet', 'cointainer', 'container_object']
     ocr_classes: list[str] = ['container', 'trailer', 'cointainer', 'container_object', 'feet']
 
@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     stationary_match_iou: float = Field(default=.45, ge=.45, lt=1)
     stationary_seconds: float = Field(default=1, gt=0)
     gate_observation_gap_seconds: float = Field(default=2, gt=0)
-    dwell_container_classes: list[str] = ['container', 'trailer', 'cointainer', 'container_object', 'feet']
+    dwell_container_classes: list[str] = ['container', 'cointainer', 'trailer', 'container_object']
     dedup_seconds: float = Field(default=30, gt=0)
     track_ttl_seconds: float = Field(default=5, gt=0)
     snapshot_directory: Path = Path('snapshots')

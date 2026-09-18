@@ -115,3 +115,47 @@ def start_processing(request: Request):
     runtime.start_processing()
     request.app.state.startup_error = None
     return {'models': runtime.model_status}
+
+
+@router.post('/data/clear')
+def clear_all_data(request: Request):
+    import shutil
+    from sqlalchemy import text
+    runtime = request.app.state.runtime
+    for cam in runtime.cameras:
+        try:
+            runtime.control_video(cam.id, 'restore-camera')
+        except Exception:
+            pass
+    try:
+        with runtime.repository.database.sessions.begin() as session:
+            for t in ['gate_events', 'detections', 'snapshots']:
+                try:
+                    session.execute(text(f'DELETE FROM {t}'))
+                except Exception:
+                    pass
+        runtime.repository.sync_cameras(runtime.cameras)
+    except Exception:
+        pass
+    snap_dir = Path(runtime.settings.snapshot_directory)
+    if snap_dir.exists():
+        for f in snap_dir.glob('*'):
+            if f.is_file() and f.name != '.gitkeep':
+                f.unlink(missing_ok=True)
+            elif f.is_dir():
+                shutil.rmtree(f, ignore_errors=True)
+        (snap_dir / '.gitkeep').touch(exist_ok=True)
+    upload_dir = Path(runtime.settings.upload_directory)
+    if upload_dir.exists():
+        for f in upload_dir.glob('*'):
+            if f.is_file() and f.name != 'assignments.json':
+                f.unlink(missing_ok=True)
+    assign_file = upload_dir / 'assignments.json'
+    if assign_file.exists():
+        assign_file.write_text('{}', encoding='utf-8')
+    spool_dir = upload_dir / 'ocr-spool'
+    if spool_dir.exists():
+        shutil.rmtree(spool_dir, ignore_errors=True)
+        spool_dir.mkdir(parents=True, exist_ok=True)
+    return {'status': 'cleared', 'message': 'All events, snapshots, spool, and uploaded videos have been removed.'}
+
