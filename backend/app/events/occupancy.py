@@ -162,7 +162,7 @@ class ViewOccupancy:
                 rear_det, rear_b = ordered[1]
                 # To be twin containers, they must represent two physical containers (not just two text decals on one container!)
                 is_twin_candidate = (
-                    (box_area(front_b) >= 0.10 or box_area(rear_b) >= 0.10) and
+                    box_area(front_b) >= 0.15 and box_area(rear_b) >= 0.15 and
                     abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.25
                 )
                 if is_twin_candidate:
@@ -185,25 +185,37 @@ class ViewOccupancy:
                 rear_slot = state.slots.get('REAR')
 
                 if state.is_twin and rear_slot:
-                    front_coord = center(front_slot.bbox)[axis] if front_slot else 0
-                    rear_coord = center(rear_slot.bbox)[axis] if rear_slot else 0
-                    b_coord = center(b)[axis]
-                    front_match = iou(front_slot.bbox, b) if front_slot else 0.0
-                    rear_match = iou(rear_slot.bbox, b) if rear_slot else 0.0
-
-                    if rear_match > front_match and rear_match >= 0.10:
+                    if front_slot and front_slot.closed:
                         self._update_slot(rear_slot, b, now)
-                    elif front_match >= 0.10:
+                    elif rear_slot.closed:
                         self._update_slot(front_slot, b, now)
                     else:
-                        front_dist = abs(front_coord - b_coord)
-                        rear_dist = abs(rear_coord - b_coord)
-                        if rear_dist < front_dist:
+                        front_coord = center(front_slot.bbox)[axis] if front_slot else 0
+                        rear_coord = center(rear_slot.bbox)[axis] if rear_slot else 0
+                        b_coord = center(b)[axis]
+                        front_match = iou(front_slot.bbox, b) if front_slot else 0.0
+                        rear_match = iou(rear_slot.bbox, b) if rear_slot else 0.0
+
+                        if rear_match > front_match and rear_match >= 0.10:
                             self._update_slot(rear_slot, b, now)
-                        else:
+                        elif front_match >= 0.10:
                             self._update_slot(front_slot, b, now)
+                        else:
+                            front_dist = abs(front_coord - b_coord)
+                            rear_dist = abs(rear_coord - b_coord)
+                            if rear_dist < front_dist:
+                                self._update_slot(rear_slot, b, now)
+                            else:
+                                self._update_slot(front_slot, b, now)
                 elif front_slot:
-                    if front_slot.closed and self._past_exit(front_slot.bbox, camera):
+                    is_sequential_twin = (
+                        camera.gate_exit_axis is not None and
+                        self._past_exit(front_slot.bbox, camera) and
+                        not self._past_exit(b, camera) and
+                        iou(front_slot.bbox, b) < 0.20 and
+                        abs(center(front_slot.bbox)[axis] - center(b)[axis]) >= 0.25
+                    )
+                    if is_sequential_twin:
                         state.is_twin = True
                         state.closed = False
                         state.slots['REAR'] = ContainerSlot('REAR', f'{state.origin}:rear', b, center(b), now, now, now, event_id=state.event_id)

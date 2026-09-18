@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     stationary_match_iou: float = Field(default=.45, ge=.45, lt=1)
     stationary_seconds: float = Field(default=1, gt=0)
     gate_observation_gap_seconds: float = Field(default=2, gt=0)
-    dwell_container_classes: list[str] = ['container', 'cointainer', 'trailer', 'container_object']
+    dwell_container_classes: list[str] = ['container', 'trailer', 'container_object']
     dedup_seconds: float = Field(default=30, gt=0)
     track_ttl_seconds: float = Field(default=5, gt=0)
     snapshot_directory: Path = Path('snapshots')

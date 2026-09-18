@@ -95,9 +95,6 @@ scratch_*.py
 backend/scratch_*.py
 backend/test_spool_status.py
 test_spool_status.py
-backend/tests/test_targeted_ocr.py
-backend/tests/test_dwell.py
-backend/tests/test_twin_occupancy.py
 feet_*.png
 feet_*.jpg
 feet_crop_*.jpg

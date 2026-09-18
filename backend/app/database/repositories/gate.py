@@ -56,7 +56,7 @@ class GateRepository:
                         GateEvent.gate_id == obs.gate_id,
                         (GateEvent.container_number == number) |
                         (GateEvent.container_number_2 == number) |
-                        (GateEvent.container_number.is_(None)),
+                        (GateEvent.container_number_2.is_(None) if is_rear_slot else GateEvent.container_number.is_(None)),
                         direction_match,
                         GateEvent.timestamp >= obs.detection.frame_timestamp - delta,
                         GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
