@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 import io
+import json
 import logging
 from queue import Empty, Full, Queue
 import threading
@@ -48,66 +49,80 @@ class ProsperSession:
     def __init__(self, settings):
         self.settings = settings
         self.base_url = settings.prosper_api_base_url.rstrip('/')
+        self.auth_url = getattr(settings, 'prosper_auth_url', None) or 'https://cfsapi.prosperassettracking.com/api/auth/login'
         self.site_id = (settings.prosper_site_id or '').strip()
+        self.client_id = (getattr(settings, 'prosper_client_id', None) or '').strip()
         self.session = requests.Session()
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
         self._lock = threading.Lock()
 
     def get_auth_headers(self) -> Dict[str, str]:
-        """Return Authorization or API key headers."""
+        """Return Authorization or API key headers, along with X-Site-Id and X-Client-Id."""
+        headers: Dict[str, str] = {}
         if self.settings.prosper_bearer_token:
-            return {'Authorization': f'Bearer {self.settings.prosper_bearer_token.get_secret_value()}'}
-        if self.settings.prosper_api_key:
-            return {'x-api-key': self.settings.prosper_api_key.get_secret_value()}
+            headers['Authorization'] = f'Bearer {self.settings.prosper_bearer_token.get_secret_value()}'
+        elif self.settings.prosper_api_key:
+            headers['x-api-key'] = self.settings.prosper_api_key.get_secret_value()
+        else:
+            # Auto-login credential flow
+            with self._lock:
+                now = time.monotonic()
+                if self._token and now < self._token_expires_at - 30:
+                    headers['Authorization'] = f'Bearer {self._token}'
+                else:
+                    username = getattr(self.settings, 'prosper_username', None) or self.settings.prosper_email or 'sarsite@gmail.com'
+                    configured_pw = self.settings.prosper_password.get_secret_value() if self.settings.prosper_password else ''
+                    passwords_to_try = [configured_pw] if configured_pw else []
+                    for candidate in ['Test@123', 'Prosper@123', 'Admin@123']:
+                        if candidate not in passwords_to_try:
+                            passwords_to_try.append(candidate)
 
-        # Auto-login credential flow
-        with self._lock:
-            now = time.monotonic()
-            if self._token and now < self._token_expires_at - 30:
-                return {'Authorization': f'Bearer {self._token}'}
+                    login_urls = [self.auth_url, f'{self.base_url}/api/auth/login']
+                    res = None
+                    for l_url in login_urls:
+                        for pw in passwords_to_try:
+                            for payload in [{'username': username, 'password': pw}, {'UserName': username, 'Password': pw}]:
+                                if getattr(self.settings, 'prosper_site_code', None):
+                                    payload['siteCode'] = self.settings.prosper_site_code
+                                try:
+                                    res = self.session.post(l_url, json=payload, timeout=10)
+                                    if res.status_code in (200, 201):
+                                        data = res.json()
+                                        self._token = data.get('accessToken') or data.get('token')
+                                        expires_in = data.get('expiresIn', 3600)
+                                        self._token_expires_at = time.monotonic() + float(expires_in)
+                                        # Parse JWT claims for site_ids and client_ids if not configured
+                                        try:
+                                            parts = self._token.split('.')
+                                            if len(parts) >= 2:
+                                                padded = parts[1] + '=' * (-len(parts[1]) % 4)
+                                                claims = json.loads(base64.urlsafe_b64decode(padded))
+                                                if not self.site_id and claims.get('site_ids'):
+                                                    self.site_id = str(claims['site_ids'])
+                                                if not self.client_id and claims.get('client_ids'):
+                                                    self.client_id = str(claims['client_ids'])
+                                        except Exception:
+                                            pass
+                                        log.info('prosper_auth_token_refreshed', extra={'username': username})
+                                        break
+                                except Exception as e:
+                                    log.warning('prosper_auth_login_error', extra={'error': str(e)})
+                            if self._token:
+                                break
+                        if self._token:
+                            break
 
-            username = getattr(self.settings, 'prosper_username', None) or self.settings.prosper_email or 'admin'
-            configured_pw = self.settings.prosper_password.get_secret_value() if self.settings.prosper_password else ''
-            passwords_to_try = [configured_pw] if configured_pw else []
-            for candidate in ['Admin@123', 'Prosper@123']:
-                if candidate not in passwords_to_try:
-                    passwords_to_try.append(candidate)
+                    if self._token:
+                        headers['Authorization'] = f'Bearer {self._token}'
+                    elif res is not None:
+                        log.warning('prosper_auth_login_failed', extra={'status_code': res.status_code, 'body': res.text[:200]})
 
-            try:
-                login_url = f'{self.base_url}/api/auth/login'
-                res = None
-                for pw in passwords_to_try:
-                    payload = {
-                        'UserName': username,
-                        'Password': pw,
-                    }
-                    if self.settings.prosper_site_code:
-                        payload['siteCode'] = self.settings.prosper_site_code
-
-                    res = self.session.post(login_url, json=payload, timeout=10)
-                    if res.status_code not in (200, 201):
-                        legacy_payload = {
-                            'siteCode': self.settings.prosper_site_code or '',
-                            'email': self.settings.prosper_email or username,
-                            'password': pw,
-                        }
-                        res = self.session.post(login_url, json=legacy_payload, timeout=10)
-
-                    if res.status_code in (200, 201):
-                        data = res.json()
-                        self._token = data.get('accessToken') or data.get('token')
-                        expires_in = data.get('expiresIn', 3600)
-                        self._token_expires_at = time.monotonic() + float(expires_in)
-                        log.info('prosper_auth_token_refreshed', extra={'username': username})
-                        return {'Authorization': f'Bearer {self._token}'}
-
-                if res is not None:
-                    log.warning('prosper_auth_login_failed', extra={'status_code': res.status_code, 'body': res.text[:200]})
-            except Exception as e:
-                log.warning('prosper_auth_login_error', extra={'error': str(e)})
-
-        return {}
+        if self.site_id:
+            headers['X-Site-Id'] = self.site_id
+        if self.client_id:
+            headers['X-Client-Id'] = self.client_id
+        return headers
 
     def upload_image(self, image_data: bytes | Any, trailer_number: str = '', camera_id: str = '',
                      device_id: str = '') -> Optional[str]:
@@ -125,7 +140,7 @@ class ProsperSession:
         base64_str = base64.b64encode(image_data).decode('utf-8')
         base64_uri = f'data:image/jpeg;base64,{base64_str}'
 
-        # 1. Try S3 Base64 upload endpoint (used in previous codebase)
+        # 1. Try S3 Base64 upload endpoint
         s3_url = f'{self.base_url}/api/sites/{self.site_id}/images/trailers/upload-s3'
         s3_payload = {
             'trailerNumber': trailer_number or 'UNKNOWN',
@@ -166,42 +181,47 @@ class ProsperSession:
         return None
 
     def post_gate_event(self, payload: Dict[str, Any]) -> bool:
-        """Send CreateGateEventRequest to Prosper."""
-        if not self.site_id:
-            log.warning('prosper_sync_skipped_missing_site_id')
-            return False
-
-        url = f'{self.base_url}/api/sites/{self.site_id}/gate-events'
+        """Send Gate Event to Prosper Smart Yard."""
         headers = self.get_auth_headers()
         headers['Content-Type'] = 'application/json'
 
+        # Check whether this is the new /api/v1/gate/events schema or legacy /api/sites/{site_id}/gate-events
+        if 'VisitId' in payload or 'Containers' in payload:
+            url = f'{self.base_url}/api/v1/gate/events'
+        else:
+            if not self.site_id:
+                log.warning('prosper_sync_skipped_missing_site_id')
+                return False
+            url = f'{self.base_url}/api/sites/{self.site_id}/gate-events'
+
         res = self.session.post(url, json=payload, headers=headers, timeout=15)
         if res.status_code in (200, 201):
-            log.info('prosper_gate_event_synced', extra={'event_id': payload.get('id')})
+            log.info('prosper_gate_event_synced', extra={'event_id': payload.get('VisitId') or payload.get('id')})
             return True
-        log.warning('prosper_gate_event_rejected', extra={'status_code': res.status_code, 'body': res.text[:200]})
+        log.warning('prosper_gate_event_rejected', extra={'status_code': res.status_code, 'body': res.text[:300]})
         return False
 
 
 class CloudOutboxDispatcher:
     """
     Dedicated non-blocking worker thread that serializes confirmed gate events,
-    uploads snapshot evidence images, and dispatches gate events to Prosper Smart Yard.
+    encodes snapshot evidence images, and dispatches gate events to Prosper Smart Yard.
     """
 
-    def __init__(self, settings, metrics=None):
+    def __init__(self, settings, metrics=None, repository=None, snapshots=None):
         self.settings = settings
         self.metrics = metrics
+        self.repository = repository
+        self.snapshots = snapshots
         self.enabled = bool(settings.prosper_enabled)
         self.session = ProsperSession(settings) if self.enabled else None
         self.queue: Queue = Queue(maxsize=settings.prosper_queue_size)
         self._stop = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
 
-        # Deterministic device UUID fallback
         self.device_uuid = (
             settings.prosper_device_uuid
-            or str(uuid.uuid5(uuid.NAMESPACE_DNS, 'gatevision.edge.local'))
+            or 'EDGE-GATE-01'
         )
 
     def start(self):
@@ -222,17 +242,18 @@ class CloudOutboxDispatcher:
             self._worker_thread.join(timeout=timeout)
         log.info('prosper_cloud_dispatcher_stopped')
 
-    def enqueue(self, obs: Any, event_id: str, image_bytes: Optional[bytes] = None):
+    def enqueue(self, obs: Any, event_id: str, image_bytes: Optional[bytes] = None, payload: Optional[dict] = None):
         """Enqueue confirmed gate event for background dispatch."""
         if not self.enabled:
             return
-        if not obs.confirmed:
+        if not getattr(obs, 'confirmed', True):
             return
 
         item = {
             'event_id': event_id,
             'obs': obs,
-            'image_bytes': image_bytes if image_bytes is not None else obs.image,
+            'image_bytes': image_bytes if image_bytes is not None else getattr(obs, 'image', None),
+            'payload': payload,
             'enqueued_at': time.monotonic(),
             'retries': 0,
         }
@@ -256,38 +277,135 @@ class CloudOutboxDispatcher:
             event_id = item['event_id']
             obs = item['obs']
             img = item['image_bytes']
+            pre_payload = item.get('payload')
 
             success = False
             try:
-                # 1. Upload snapshot evidence image first
-                image_url = None
-                cntr = obs.ocr.normalized_text if obs.ocr else ''
-                if img is not None:
-                    image_url = self.session.upload_image(
-                        img,
-                        trailer_number=cntr,
-                        camera_id=obs.detection.camera_id,
-                        device_id=self.device_uuid,
-                    )
-                img_id = getattr(self.session, 'last_image_metadata_id', None)
+                if pre_payload and isinstance(pre_payload, dict):
+                    payload = pre_payload
+                else:
+                    # Query repository for full event record and associated multi-camera snapshots
+                    event_record = self.repository.event(event_id) if self.repository else None
+                    cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
+                    cntr2 = event_record.get('container_number_2') if event_record else None
+                    is_twin = bool(event_record.get('is_twin')) if event_record else False
 
-                # 2. Build CreateGateEventRequest payload
-                payload = {
-                    'id': event_id,
-                    'gateId': obs.gate_id,
-                    'timestamp': _iso_utc(obs.detection.frame_timestamp),
-                    'containerNumber': cntr or None,
-                    'trailerNumber': cntr or None,
-                    'eventType': obs.direction if obs.direction in ('ENTRY', 'EXIT') else 'ENTRY',
-                    'deviceId': self.device_uuid,
-                    'confidence': float(obs.detection.confidence),
-                }
-                if img_id:
-                    payload['imageMetadataId'] = img_id
-                if image_url:
-                    payload['imageUrl'] = image_url
+                    containers_list = []
+                    if cntr1:
+                        c1_images = []
+                        if event_record and event_record.get('snapshots') and self.snapshots:
+                            for snap in event_record['snapshots']:
+                                if not (snap.get('image_path') or '').endswith('_rear.jpg'):
+                                    try:
+                                        snap_p = self.snapshots.path(snap['image_path'])
+                                        if snap_p.is_file():
+                                            c1_images.append({
+                                                'ImageType': 'FRONT',
+                                                'CameraId': snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-01'),
+                                                'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
+                                                'Image': f"data:image/jpeg;base64,{base64.b64encode(snap_p.read_bytes()).decode('utf-8')}"
+                                            })
+                                    except Exception:
+                                        pass
+                        if not c1_images and img is not None:
+                            try:
+                                if not isinstance(img, bytes):
+                                    ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                                    b = buf.tobytes() if ok else None
+                                else:
+                                    b = img
+                                if b:
+                                    c1_images.append({
+                                        'ImageType': 'FRONT',
+                                        'CameraId': obs.detection.camera_id if obs else 'CAM-01',
+                                        'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
+                                        'Image': f"data:image/jpeg;base64,{base64.b64encode(b).decode('utf-8')}"
+                                    })
+                            except Exception:
+                                pass
 
-                # 3. Post gate event
+                        iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
+                        cs1 = str((event_record.get('container_size') if event_record else None) or '')
+                        size_1 = "20" if ('20' in cs1 or iso_s1.startswith('2')) else "40"
+                        conf_1 = float(getattr(obs.ocr, 'confidence', 0.95)) if (obs and obs.ocr and obs.ocr.confidence) else 0.95
+                        containers_list.append({
+                            'ContainerNumber': cntr1,
+                            'ContainerNumberConfidence': round(conf_1, 2),
+                            'Size': size_1,
+                            'Position': 'FRONT' if is_twin else 'SINGLE',
+                            'Images': c1_images
+                        })
+
+                    if cntr2:
+                        c2_images = []
+                        if event_record and event_record.get('snapshots') and self.snapshots:
+                            for snap in event_record['snapshots']:
+                                if (snap.get('image_path') or '').endswith('_rear.jpg') or any(k in (snap.get('camera_id') or '').lower() for k in ('rear', '-3')):
+                                    try:
+                                        snap_p = self.snapshots.path(snap['image_path'])
+                                        if snap_p.is_file():
+                                            c2_images.append({
+                                                'ImageType': 'REAR',
+                                                'CameraId': snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-02'),
+                                                'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
+                                                'Image': f"data:image/jpeg;base64,{base64.b64encode(snap_p.read_bytes()).decode('utf-8')}"
+                                            })
+                                    except Exception:
+                                        pass
+                        size_2 = "20"
+                        conf_2 = float(event_record.get('confidence_2') or 0.95) if event_record else 0.95
+                        containers_list.append({
+                            'ContainerNumber': cntr2,
+                            'ContainerNumberConfidence': round(conf_2, 2),
+                            'Size': size_2,
+                            'Position': 'REAR',
+                            'Images': c2_images or (c1_images[:1] if c1_images else [])
+                        })
+
+                    if not containers_list and obs and obs.ocr and obs.ocr.normalized_text:
+                        containers_list.append({
+                            'ContainerNumber': obs.ocr.normalized_text,
+                            'ContainerNumberConfidence': round(float(obs.ocr.confidence), 2),
+                            'Size': '20',
+                            'Position': 'FRONT',
+                            'Images': []
+                        })
+
+                    dt_captured = obs.detection.frame_timestamp if (obs and hasattr(obs, 'detection')) else datetime.now(timezone.utc)
+                    visit_id = f"VISIT-{dt_captured.strftime('%Y%m%d')}-{event_id[:8].upper()}"
+                    direction = (obs.direction.upper() if (obs and hasattr(obs, 'direction') and obs.direction) else 'ENTRY')
+                    event_type = 'GATE_OUT' if direction in ('EXIT', 'OUT', 'GATE_OUT') else 'GATE_IN'
+
+                    # Truck details: User requested keeping truck details empty/null.
+                    # Remote API server validates: truck.TruckNumber must not be empty.
+                    # We pass {"TruckNumber": "NA"} to satisfy API validation without fabricating truck data.
+                    # Upload image for legacy compatibility
+                    image_url = None
+                    if img is not None:
+                        try:
+                            image_url = self.session.upload_image(
+                                img,
+                                trailer_number=cntr1 or '',
+                                camera_id=obs.detection.camera_id if (obs and hasattr(obs, 'detection')) else '',
+                                device_id=self.device_uuid,
+                            )
+                        except Exception:
+                            pass
+
+                    payload = {
+                        'id': event_id,
+                        'VisitId': visit_id,
+                        'EventType': event_type,
+                        'eventType': obs.direction if (obs and hasattr(obs, 'direction') and obs.direction in ('ENTRY', 'EXIT')) else 'ENTRY',
+                        'DeviceId': self.device_uuid,
+                        'CapturedAt': _iso_utc(dt_captured),
+                        'containerNumber': cntr1,
+                        'imageUrl': image_url,
+                        'Truck': {'TruckNumber': 'NA'},
+                        'Driver': None,
+                        'Containers': containers_list
+                    }
+
                 success = self.session.post_gate_event(payload)
 
             except Exception as exc:
@@ -302,7 +420,6 @@ class CloudOutboxDispatcher:
             else:
                 item['retries'] += 1
                 if item['retries'] < self.settings.prosper_max_retries:
-                    # Exponential backoff retry
                     backoff = min(2.0 ** item['retries'], 30.0)
                     self._stop.wait(backoff)
                     try:

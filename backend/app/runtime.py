@@ -79,7 +79,7 @@ class GateRuntime:
         self.detector_factory = detector_factory
         self.ocr_factory = ocr_factory or create_ocr_engine
         self.metrics = Metrics()
-        self.dispatcher = CloudOutboxDispatcher(settings, self.metrics)
+        self.dispatcher = CloudOutboxDispatcher(settings, self.metrics, repository=self.repository, snapshots=self.snapshots)
         self.events = EventManager(settings, repository, snapshots, dispatcher=self.dispatcher)
         self.validator = ContainerValidator()
         self.tracker = {c.id: TemporalTracker(settings.track_ttl_seconds) for c in cameras}

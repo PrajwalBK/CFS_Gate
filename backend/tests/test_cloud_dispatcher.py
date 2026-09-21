@@ -147,3 +147,47 @@ def test_cloud_dispatcher_enqueue_and_sync(mock_settings):
         assert call_payload['eventType'] == 'ENTRY'
         assert call_payload['imageUrl'] == 'https://img.test/1.jpg'
         assert metrics.increment.called
+
+
+def test_syapi_gate_event_schema(mock_settings):
+    dispatcher = CloudOutboxDispatcher(mock_settings)
+    dummy_img = np.zeros((32, 32, 3), dtype=np.uint8)
+    det = Detection(
+        camera_id='CAM-01',
+        frame_timestamp=utcnow(),
+        class_name='container',
+        confidence=0.96,
+        bbox=(5.0, 5.0, 25.0, 25.0),
+    )
+    val = Validation(raw_text='MSCU 111111 1', normalized_text='MSCU1111111',
+                     confidence=0.96, valid_format=True, valid_check_digit=True,
+                     validation_status='VALID', size_type='22G1')
+    obs = Observation('origin-syapi', 'LANE-1', 10, det, val, 'ENTRY', dummy_img, utcnow(), confirmed=True)
+
+    with patch.object(dispatcher.session, 'post_gate_event', return_value=True) as mock_post:
+        dispatcher.start()
+        dispatcher.enqueue(obs, 'event-uuid-888')
+
+        for _ in range(20):
+            if dispatcher.queue.empty() and mock_post.called:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+        assert mock_post.called
+        payload = mock_post.call_args[0][0]
+        assert 'VisitId' in payload
+        assert payload['EventType'] == 'GATE_IN'
+        assert payload['DeviceId'] == 'EDGE-GATE-01'
+        assert payload['Truck'] == {'TruckNumber': 'NA'}
+        assert payload['Driver'] is None
+        assert len(payload['Containers']) == 1
+        container = payload['Containers'][0]
+        assert container['ContainerNumber'] == 'MSCU1111111'
+        assert container['ContainerNumberConfidence'] == 0.96
+        assert container['Size'] == '20'
+        assert container['Position'] == 'SINGLE'
+        assert len(container['Images']) >= 1
+        assert container['Images'][0]['CameraId'] == 'CAM-01'
+        assert container['Images'][0]['Image'].startswith('data:image/jpeg;base64,')
