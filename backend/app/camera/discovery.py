@@ -94,25 +94,51 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def stream_uri(device, username='', password=''):
+    from datetime import timedelta
     host, endpoint = device['host'], device['endpoint']
     passwords = HTTPPasswordMgrWithDefaultRealm()
     passwords.add_password(None, endpoint, username, password)
     ctx = ssl._create_unverified_context()
     opener = build_opener(ProxyHandler({}), NoRedirect(), HTTPDigestAuthHandler(passwords), HTTPSHandler(context=ctx))
 
-    def soap(url, namespace, operation, content=''):
+    time_offset = [0.0]
+
+    def soap(url, namespace, operation, content='', allow_retry=True):
         same_host_url(url, host)
         passwords.add_password(None, url, username, password)
         security = ''
         if username:
             nonce = os.urandom(16)
-            created = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            created_dt = datetime.now(timezone.utc) + timedelta(seconds=time_offset[0])
+            created = created_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
             digest = base64.b64encode(hashlib.sha1(nonce + created.encode() + password.encode()).digest()).decode()
             security = f'''<wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"><wsse:UsernameToken><wsse:Username>{escape(username)}</wsse:Username><wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{digest}</wsse:Password><wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">{base64.b64encode(nonce).decode()}</wsse:Nonce><wsu:Created>{created}</wsu:Created></wsse:UsernameToken></wsse:Security>'''
-        body = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:m="{namespace}" xmlns:tt="http://www.onvif.org/ver10/schema"><s:Header>{security}</s:Header><s:Body><m:{operation}>{content}</m:{operation}></s:Body></s:Envelope>'
+        body = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:m="{namespace}" xmlns:trt="{MEDIA}" xmlns:tt="http://www.onvif.org/ver10/schema"><s:Header>{security}</s:Header><s:Body><m:{operation}>{content}</m:{operation}></s:Body></s:Envelope>'
         req = Request(url, data=body.encode(), headers={'Content-Type': f'application/soap+xml; charset=utf-8; action="{namespace}/{operation}"'})
-        with opener.open(req, timeout=3) as response:
-            root = xml(response.read(1024 * 1024 + 1))
+        try:
+            with opener.open(req, timeout=3) as response:
+                root = xml(response.read(1024 * 1024 + 1))
+        except Exception as exc:
+            err_body = getattr(exc, 'read', lambda: b'')() if hasattr(exc, 'read') else b''
+            if allow_retry and (b'time check failed' in err_body.lower() or b'notauthorized' in err_body.lower()):
+                try:
+                    time_body = '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:d="http://www.onvif.org/ver10/device/wsdl"><s:Body><d:GetSystemDateAndTime/></s:Body></s:Envelope>'
+                    time_req = Request(endpoint, data=time_body.encode(), headers={'Content-Type': 'application/soap+xml; charset=utf-8; action="http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime"'})
+                    with opener.open(time_req, timeout=3) as r:
+                        t_root = xml(r.read(1024 * 1024 + 1))
+                        year = int(t_root.findtext('.//{*}Date/{*}Year') or 0)
+                        month = int(t_root.findtext('.//{*}Date/{*}Month') or 0)
+                        day = int(t_root.findtext('.//{*}Date/{*}Day') or 0)
+                        hour = int(t_root.findtext('.//{*}Time/{*}Hour') or 0)
+                        minute = int(t_root.findtext('.//{*}Time/{*}Minute') or 0)
+                        second = int(t_root.findtext('.//{*}Time/{*}Second') or 0)
+                        if year > 2000:
+                            cam_dt = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+                            time_offset[0] = (cam_dt - datetime.now(timezone.utc)).total_seconds()
+                    return soap(url, namespace, operation, content, allow_retry=False)
+                except Exception:
+                    pass
+            raise
         if root.find('.//{*}Fault') is not None:
             raise ValueError('Camera service rejected the request')
         return root
@@ -124,11 +150,14 @@ def stream_uri(device, username='', password=''):
     profile = profiles.find('.//{*}Profiles')
     if profile is None or not profile.get('token'):
         raise ValueError('No camera media profile')
-    result = soap(media, MEDIA, 'GetStreamUri', '<m:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></m:StreamSetup><m:ProfileToken>' + escape(profile.get('token')) + '</m:ProfileToken>')
+    result = soap(media, MEDIA, 'GetStreamUri', '<trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>' + escape(profile.get('token')) + '</trt:ProfileToken>')
     uri = result.findtext('.//{*}Uri', '')
     same_host_url(uri, host, ('rtsp', 'rtsps'))
     parsed = urlsplit(uri)
     authority = parsed.netloc
     if username:
         authority = quote(username, safe='') + ':' + quote(password, safe='') + '@' + authority
-    return urlunsplit((parsed.scheme, authority, parsed.path, parsed.query, ''))
+    scheme = parsed.scheme
+    if endpoint.startswith('https') and scheme == 'rtsp':
+        scheme = 'rtsps'
+    return urlunsplit((scheme, authority, parsed.path, parsed.query, ''))

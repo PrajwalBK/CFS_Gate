@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from app.domain import Frame, utcnow
 
-log = logging.getLogger('gate')
+log = logging.getLogger('gate.camera')
 
 
 class CameraWorker:
@@ -179,8 +179,8 @@ class CameraWorker:
                             self._set_status('ONLINE', 'receiving')
                             backoff = self.settings.reconnect_initial_seconds
                 except Exception as exc:
-                    log.warning('camera_capture_failed', extra={'camera_id': self.config.id, 'error_type': type(exc).__name__})
-                    self._set_status('ERROR', 'capture_failed')
+                    log.warning('camera_capture_failed', extra={'camera_id': self.config.id, 'error_type': type(exc).__name__}, exc_info=True)
+                    self._set_status('ERROR', f'capture_failed: {type(exc).__name__}')
                 finally:
                     if stream is not None:
                         try:

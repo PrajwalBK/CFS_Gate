@@ -7,76 +7,64 @@ camera_sources:
     name: PoE Camera 2 (IN Left)
     source_env: CAMERA_2_RTSP
   - id: poe-camera-3
-    name: PoE Camera 3 (IN Right)
+    name: PoE Camera 3 (IN Rear)
     source_env: CAMERA_3_RTSP
   - id: poe-camera-4
-    name: PoE Camera 4 (IN Rear)
+    name: PoE Camera 4 (OUT Front/Top)
     source_env: CAMERA_4_RTSP
   - id: poe-camera-5
-    name: PoE Camera 5 (OUT Front/Top)
+    name: PoE Camera 5 (OUT Left)
     source_env: CAMERA_5_RTSP
   - id: poe-camera-6
-    name: PoE Camera 6 (OUT Left)
+    name: PoE Camera 6 (OUT Rear)
     source_env: CAMERA_6_RTSP
-  - id: poe-camera-7
-    name: PoE Camera 7 (OUT Right)
-    source_env: CAMERA_7_RTSP
-  - id: poe-camera-8
-    name: PoE Camera 8 (OUT Rear)
-    source_env: CAMERA_8_RTSP
 
-# Up to 8 cameras configured across physical lanes:
-# 4 cameras configured for the IN gate (gate_id: lane-in) capture 1 unified event at a time.
-# 4 cameras configured for the OUT gate (gate_id: lane-out) capture 1 unified event at a time.
+# 3 cameras per gate:
+# 3 cameras configured for the IN gate (gate_id: lane-in): Front/Top, Left, Dedicated Rear
+# 3 cameras configured for the OUT gate (gate_id: lane-out): Front/Top, Left, Dedicated Rear
 cameras:
-  # --- GATE IN (4 CAMERAS) ---
+  # --- GATE IN (3 CAMERAS) ---
   - id: gate-in-1
     name: Gate IN 1 (Front/Top)
     gate_id: lane-in
     source_env: CAMERA_1_RTSP
     direction: ENTRY
+    role: FRONT_TOP
     capture_fps: 25
   - id: gate-in-2
     name: Gate IN 2 (Left)
     gate_id: lane-in
     source_env: CAMERA_2_RTSP
     direction: ENTRY
+    role: LEFT
     capture_fps: 25
   - id: gate-in-3
-    name: Gate IN 3 (Right)
+    name: Gate IN 3 (Rear)
     gate_id: lane-in
     source_env: CAMERA_3_RTSP
     direction: ENTRY
-    capture_fps: 25
-  - id: gate-in-4
-    name: Gate IN 4 (Rear)
-    gate_id: lane-in
-    source_env: CAMERA_4_RTSP
-    direction: ENTRY
+    role: REAR
     capture_fps: 25
 
-  # --- GATE OUT (4 CAMERAS) ---
+  # --- GATE OUT (3 CAMERAS) ---
   - id: gate-out-1
     name: Gate OUT 1 (Front/Top)
     gate_id: lane-out
-    source_env: CAMERA_5_RTSP
+    source_env: CAMERA_4_RTSP
     direction: EXIT
+    role: FRONT_TOP
     capture_fps: 25
   - id: gate-out-2
     name: Gate OUT 2 (Left)
     gate_id: lane-out
-    source_env: CAMERA_6_RTSP
+    source_env: CAMERA_5_RTSP
     direction: EXIT
+    role: LEFT
     capture_fps: 25
   - id: gate-out-3
-    name: Gate OUT 3 (Right)
+    name: Gate OUT 3 (Rear)
     gate_id: lane-out
-    source_env: CAMERA_7_RTSP
+    source_env: CAMERA_6_RTSP
     direction: EXIT
-    capture_fps: 25
-  - id: gate-out-4
-    name: Gate OUT 4 (Rear)
-    gate_id: lane-out
-    source_env: CAMERA_8_RTSP
-    direction: EXIT
+    role: REAR
     capture_fps: 25

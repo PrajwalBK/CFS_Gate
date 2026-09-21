@@ -45,6 +45,11 @@ class EventManager:
             return None
         if not confirmed and not any(getattr(r, 'raw_text', None) for r in evidence.reads if r):
             return None
+        if not confirmed:
+            # Let the truck complete its entrance before publishing an unconfirmed / NEEDS_REVIEW event!
+            is_entrance_done = getattr(job, 'entrance_complete', True) or getattr(job, 'is_stationary', True)
+            if not is_entrance_done:
+                return None
         selected = max((r for r in good if r.normalized_text == best), key=lambda r: r.confidence) if confirmed else validation
         proof = proof_job or job
         obs = Observation(job.origin_key, job.gate_id, job.track_id, proof.detection, selected,

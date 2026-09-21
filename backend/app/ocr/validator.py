@@ -118,9 +118,41 @@ BRAND_PREFIX_MAP = {
 }
 
 
+# Camera OSD watermark and timestamp patterns (e.g. 'CP IP Cam', 'CPIPCAM', '16-09-2026 15:28:10')
+OSD_WATERMARK_PATTERN = re.compile(
+    r'\b(?:CP\s*IP\s*CAM|CPIPCAM|CPIP|IP\s*CAM|CAM|PROOF(?::\s*[A-Z0-9\s()_-]+)?|GATE[-_ ]?(?:IN|OUT)[-_ ]?\d*|ENTRY|EXIT)\b',
+    re.IGNORECASE
+)
+OSD_TIMESTAMP_PATTERN = re.compile(
+    r'\b\d{2}[-./]\d{2}[-./]\d{4}(?:\s+\d{2}[:.]\d{2}[:.]\d{2})?\b|\b\d{2}[:.]\d{2}[:.]\d{2}\b'
+)
+
+
+def sanitize_ocr_text(text: str) -> str:
+    """Strip camera OSD watermarks and timestamps from OCR text."""
+    if not text:
+        return ''
+    has_watermark = bool(
+        OSD_WATERMARK_PATTERN.search(text) or
+        OSD_TIMESTAMP_PATTERN.search(text) or
+        re.search(r'\b(?:1[0-9]|2[0-9]|3[01])(?:0[1-9]|1[0-2])202\d{7,10}\b', text)
+    )
+    if not has_watermark:
+        return text
+    cleaned = OSD_WATERMARK_PATTERN.sub(' ', text)
+    cleaned = OSD_TIMESTAMP_PATTERN.sub(' ', cleaned)
+    cleaned = re.sub(r'\b(?:1[0-9]|2[0-9]|3[01])(?:0[1-9]|1[0-2])202\d{7,10}\b', ' ', cleaned)
+    return cleaned.strip()
+
+
 class ContainerValidator:
     def validate(self, read: OCRRead) -> Validation:
-        raw = correct_feet_size_codes(read.raw_text[:4096])
+        raw_input = read.raw_text[:4096] if read and read.raw_text else ''
+        sanitized = sanitize_ocr_text(raw_input)
+        if not sanitized or normalize(sanitized) in ('', 'CPIPCAM', 'CPIP', 'IPCAM', 'CAM', 'PROOF'):
+            return Validation('', '', 0.0, False, False, 'INVALID_FORMAT')
+
+        raw = correct_feet_size_codes(sanitized)
         candidates = {normalize(m.group(1)) for m in CANDIDATE.finditer(raw.upper())}
         if len(candidates) > 1:
             return Validation(raw, '', read.confidence, False, False, 'AMBIGUOUS')

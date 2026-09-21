@@ -46,6 +46,8 @@ class OCRJob:
     companion_frames: dict = field(default_factory=dict)
     slot_position: str = 'FRONT'
     event_id: str | None = None
+    is_stationary: bool = True
+    entrance_complete: bool = True
 
 
 
@@ -534,10 +536,13 @@ class GateRuntime:
                             if other_latest and other_latest.image is not None:
                                 companion_frames[other_cam.id] = other_latest.image.copy()
 
+                is_stat = bool((active_slot_obj and active_slot_obj.stationary) or getattr(occupancy, 'stationary', False))
+                ent_done = bool(getattr(occupancy, 'entrance_complete', False) or is_stat)
+
                 job = OCRJob(origin, camera.gate_id, track.id, track.detection, frame, direction,
                              occupancy.first_seen, camera.ocr_roi, tuple(detections), camera.role,
                              companion_frames=companion_frames, slot_position=slot_pos,
-                             event_id=event_id)
+                             event_id=event_id, is_stationary=is_stat, entrance_complete=ent_done)
                 try:
                     self.queue.put_nowait(job)
                     state['pending'] = True

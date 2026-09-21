@@ -145,6 +145,8 @@ class OCRJobStore:
             'proof_quality': quality,
             'direction': job.direction, 'role': job.role, 'started_at': job.started_at.isoformat(),
             'slot_position': getattr(job, 'slot_position', 'FRONT'),
+            'is_stationary': getattr(job, 'is_stationary', True),
+            'entrance_complete': getattr(job, 'entrance_complete', True),
             'roi': job.roi, 'detection': asdict(job.detection),
             'all_detections': [asdict(d) for d in job.all_detections],
             'frame': {'camera_id': job.frame.camera_id, 'timestamp': job.frame.timestamp.isoformat(),
@@ -199,7 +201,9 @@ class OCRJobStore:
                      frame, data['direction'], datetime.fromisoformat(data['started_at']), tuple(data['roi']),
                      tuple(detection(d) for d in data['all_detections']), data['role'],
                      companion_frames=comp_frames, slot_position=data.get('slot_position', 'FRONT'),
-                     event_id=data.get('event_id'))
+                     event_id=data.get('event_id'),
+                     is_stationary=data.get('is_stationary', True),
+                     entrance_complete=data.get('entrance_complete', True))
         validation = Validation(**json.loads(row['validation'])) if row['validation'] else None
         return job, decode(row['crop']), validation
 

@@ -26,7 +26,7 @@ def create_app(settings=None, database=None, camera_configs=None, runtime_factor
 
     @asynccontextmanager
     async def lifespan(app):
-        configure_logging()
+        configure_logging(settings.log_directory)
         db = database or Database(settings.database_url.get_secret_value())
         configs = camera_configs if camera_configs is not None else settings.cameras()
         sources = camera_sources if camera_sources is not None else settings.camera_sources(configs)

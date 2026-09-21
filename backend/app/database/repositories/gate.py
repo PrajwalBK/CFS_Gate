@@ -127,22 +127,31 @@ class GateRepository:
                     ))
                     session.flush()
                 else:
+                    prior_best_conf = session.scalar(
+                        select(func.max(OCRResult.confidence))
+                        .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
+                        .where(DetectionRecord.event_id == existing.id, OCRResult.valid_check_digit == True)
+                    ) or 0.0
+                    obs_conf = getattr(obs.ocr, 'confidence', 0.0) or 0.0
                     if is_40ft:
                         existing.is_twin = False
                         existing.container_number_2 = None
                         existing.iso_code_2 = None
-                        if obs.confirmed or not existing.container_number:
+                        if obs.confirmed:
+                            if not existing.container_number or obs_conf >= prior_best_conf:
+                                existing.container_number = number
+                                existing.iso_code_1 = size_type or existing.iso_code_1
+                            existing.status = 'CONFIRMED'
+                        elif not existing.container_number:
                             existing.container_number = number
                             existing.iso_code_1 = size_type or existing.iso_code_1
-                        if obs.confirmed:
-                            existing.status = 'CONFIRMED'
                     elif is_rear_slot:
                         existing.is_twin = True
-                        if (number != existing.container_number or not existing.container_number) and (not existing.container_number_2 or obs.confirmed):
+                        if (number != existing.container_number or not existing.container_number) and (not existing.container_number_2 or obs.confirmed or obs_conf >= prior_best_conf):
                             existing.container_number_2 = number
                             existing.iso_code_2 = getattr(obs.ocr, 'size_type', None) or '22G1'
                     else:
-                        if (number != existing.container_number_2 or not existing.container_number_2) and (not existing.container_number or obs.confirmed):
+                        if (number != existing.container_number_2 or not existing.container_number_2) and (not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf)):
                             existing.container_number = number
                             existing.iso_code_1 = getattr(obs.ocr, 'size_type', None)
                         if obs.origin_key.endswith(':front'):
@@ -302,7 +311,32 @@ class GateRepository:
             result['ocr_results'] = [serialize(o) for o in session.scalars(select(OCRResult).where(
                 OCRResult.detection_id.in_([d.id for d in detections])))]
             snapshots_list = [serialize(s) for s in session.scalars(select(Snapshot).where(Snapshot.event_id == event_id))]
-            primary_cam = detections[0].camera_id if detections else (snapshots_list[0]['camera_id'] if snapshots_list else None)
+            # Select best primary camera based on OCR validation quality, check digit, and confidence:
+            best_cam = None
+            best_score = -1.0
+            for d in detections:
+                d_ocr = [o for o in result['ocr_results'] if o.get('detection_id') == d.id]
+                score = 0.0
+                if d_ocr:
+                    for o in d_ocr:
+                        c = float(o.get('confidence') or 0.0)
+                        if o.get('valid_check_digit'):
+                            s = 100.0 + c
+                        elif o.get('valid_format'):
+                            s = 50.0 + c
+                        else:
+                            s = c
+                        if s > score:
+                            score = s
+                else:
+                    score = float(getattr(d, 'confidence', 0.0) or 0.0)
+                if any(k in (d.camera_id or '').lower() for k in ('-3', 'rear', '-2', 'side')):
+                    score += 0.05
+                if score > best_score:
+                    best_score = score
+                    best_cam = d.camera_id
+
+            primary_cam = best_cam or (detections[0].camera_id if detections else (snapshots_list[0]['camera_id'] if snapshots_list else None))
             front_snap = next((s for s in snapshots_list if not (s.get('image_path') or '').endswith('_rear.jpg') and s['camera_id'] == primary_cam), (snapshots_list[0] if snapshots_list else None))
             rear_snap = next((s for s in snapshots_list if (s.get('image_path') or '').endswith('_rear.jpg')), None)
             result['primary_camera_id'] = primary_cam

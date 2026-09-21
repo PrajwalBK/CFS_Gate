@@ -64,6 +64,7 @@ class Occupancy:
     slots: dict = field(default_factory=dict)
     active_slot: str = 'FRONT'
     provisional_event_id: str | None = None
+    entrance_complete: bool = False
 
 
 class ViewOccupancy:
@@ -162,8 +163,8 @@ class ViewOccupancy:
                 rear_det, rear_b = ordered[1]
                 # To be twin containers, they must represent two physical containers (not just two text decals on one container!)
                 is_twin_candidate = (
-                    box_area(front_b) >= 0.15 and box_area(rear_b) >= 0.15 and
-                    abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.25
+                    box_area(front_b) >= 0.08 and box_area(rear_b) >= 0.04 and
+                    abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.18
                 )
                 if is_twin_candidate:
                     if not state.is_twin:
@@ -224,6 +225,10 @@ class ViewOccupancy:
 
             # Synchronize master state properties
             state.stationary = any(s.stationary for s in state.slots.values()) if state.slots else False
+            state.entrance_complete = state.stationary or (
+                (now - state.first_seen).total_seconds() >= self.settings.gate_observation_gap_seconds and
+                box_area(state.bbox) >= 0.08
+            )
             state.closed = all(s.closed for s in state.slots.values()) if state.slots else False
             if 'FRONT' in state.slots:
                 state.bbox = state.slots['FRONT'].bbox
@@ -329,4 +334,5 @@ class ViewOccupancy:
                 'OCCUPIED' if state.event_id else 'TRACKING',
                 'stationary': state.stationary, 'event_id': state.event_id,
                 'bbox_normalized': state.bbox, 'clear_pending': state.clear_since is not None,
-                'is_twin': getattr(state, 'is_twin', False)}
+                'is_twin': getattr(state, 'is_twin', False),
+                'entrance_complete': getattr(state, 'entrance_complete', False)}

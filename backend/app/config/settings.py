@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     track_ttl_seconds: float = Field(default=5, gt=0)
     snapshot_directory: Path = Path('snapshots')
     upload_directory: Path = Path('uploads')
+    log_directory: Path = Path('logs')
     max_upload_mb: int = Field(default=2048, ge=1, le=20480)
     camera_discovery_enabled: bool = True
     camera_discovery_interval_seconds: int = Field(default=60, ge=15, le=3600)
