@@ -62,7 +62,8 @@ class GateRepository:
                         GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
                     ).order_by(GateEvent.timestamp.desc()))
                     if existing:
-                        if is_rear_slot:
+                        is_twin_active = existing.is_twin or getattr(obs, 'is_twin', False)
+                        if is_rear_slot and is_twin_active:
                             existing.is_twin = True
                             if (number != existing.container_number or not existing.container_number) and (not existing.container_number_2 or obs.confirmed):
                                 existing.container_number_2 = number
@@ -71,7 +72,7 @@ class GateRepository:
                             if (number != existing.container_number_2 or not existing.container_number_2) and (not existing.container_number or obs.confirmed):
                                 existing.container_number = number
                                 existing.iso_code_1 = getattr(obs.ocr, 'size_type', None)
-                        if obs.confirmed:
+                        if obs.confirmed and (not existing.is_twin or (existing.container_number and existing.container_number_2)):
                             existing.status = 'CONFIRMED'
                         if existing.event_type == 'UNKNOWN' and obs.direction != 'UNKNOWN':
                             existing.event_type = obs.direction
@@ -113,14 +114,16 @@ class GateRepository:
                 size_type = getattr(obs.ocr, 'size_type', None)
                 size_str = str(size_type or '')
                 is_40ft = size_str.startswith('4') or '40' in size_str or '45' in size_str
-                is_twin_event = (is_rear_slot or obs.origin_key.endswith(':front')) and not is_40ft
+                obs_is_twin = getattr(obs, 'is_twin', False)
+                is_twin_event = (obs_is_twin or (obs.origin_key.endswith(':front') and not obs.origin_key.endswith(':single'))) and not is_40ft
                 if created:
+                    assign_to_rear = is_twin_event and is_rear_slot
                     session.add(GateEvent(
                         id=event_id, gate_id=obs.gate_id, timestamp=obs.detection.frame_timestamp,
-                        container_number=number if not is_rear_slot else None,
-                        container_number_2=number if is_rear_slot else None,
-                        iso_code_1=getattr(obs.ocr, 'size_type', None) if not is_rear_slot else None,
-                        iso_code_2=getattr(obs.ocr, 'size_type', None) if is_rear_slot else None,
+                        container_number=number if not assign_to_rear else None,
+                        container_number_2=number if assign_to_rear else None,
+                        iso_code_1=getattr(obs.ocr, 'size_type', None) if not assign_to_rear else None,
+                        iso_code_2=getattr(obs.ocr, 'size_type', None) if assign_to_rear else None,
                         is_twin=is_twin_event,
                         event_type=obs.direction,
                         status='CONFIRMED' if (obs.confirmed and not is_twin_event) else 'NEEDS_REVIEW',
@@ -145,17 +148,32 @@ class GateRepository:
                         elif not existing.container_number:
                             existing.container_number = number
                             existing.iso_code_1 = size_type or existing.iso_code_1
-                    elif is_rear_slot:
+                    elif is_twin_event or existing.is_twin:
                         existing.is_twin = True
-                        if (number != existing.container_number or not existing.container_number) and (not existing.container_number_2 or obs.confirmed or obs_conf >= prior_best_conf):
-                            existing.container_number_2 = number
-                            existing.iso_code_2 = getattr(obs.ocr, 'size_type', None) or '22G1'
+                        if is_rear_slot:
+                            if (number != existing.container_number or not existing.container_number) and (not existing.container_number_2 or obs.confirmed or obs_conf >= prior_best_conf):
+                                existing.container_number_2 = number
+                                existing.iso_code_2 = getattr(obs.ocr, 'size_type', None) or '22G1'
+                        else:
+                            if (number != existing.container_number_2 or not existing.container_number_2) and (not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf)):
+                                existing.container_number = number
+                                existing.iso_code_1 = getattr(obs.ocr, 'size_type', None)
                     else:
-                        if (number != existing.container_number_2 or not existing.container_number_2) and (not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf)):
-                            existing.container_number = number
-                            existing.iso_code_1 = getattr(obs.ocr, 'size_type', None)
-                        if obs.origin_key.endswith(':front'):
-                            existing.is_twin = True
+                        # Single container: ALWAYS populate container_number, NEVER container_number_2
+                        if not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf):
+                            existing.container_number = number or existing.container_number
+                            existing.iso_code_1 = size_type or existing.iso_code_1
+                        existing.container_number_2 = None
+                        existing.iso_code_2 = None
+                        existing.is_twin = False
+
+                    # Recovery safeguard: If not twin, ensure container_number is never null while container_number_2 has value
+                    if not existing.is_twin and not existing.container_number and existing.container_number_2:
+                        existing.container_number = existing.container_number_2
+                        existing.iso_code_1 = existing.iso_code_2 or existing.iso_code_1
+                        existing.container_number_2 = None
+                        existing.iso_code_2 = None
+
                     if existing.is_twin:
                         if existing.container_number and existing.container_number_2:
                             existing.status = 'CONFIRMED'

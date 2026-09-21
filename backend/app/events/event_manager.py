@@ -36,7 +36,7 @@ class EventManager:
             evidence.reads.append(validation)
             evidence.last_sequence = job.frame.sequence
         evidence.reads = evidence.reads[-self.settings.ocr_max_attempts:]
-        good = [r for r in evidence.reads if r and r.valid_check_digit]
+        good = [r for r in evidence.reads if r and r.valid_check_digit and getattr(r, 'confidence', 1.0) >= self.settings.ocr_min_confidence]
         votes = Counter(r.normalized_text for r in good)
         best, count = votes.most_common(1)[0] if votes else (None, 0)
         tied = sum(v == count for v in votes.values()) > 1
@@ -56,7 +56,8 @@ class EventManager:
                           job.direction, proof.frame.image, job.started_at, confirmed,
                           all_detections=list(getattr(proof, 'all_detections', [])),
                           slot_position=getattr(job, 'slot_position', 'FRONT'),
-                          event_id=getattr(job, 'event_id', None))
+                          event_id=getattr(job, 'event_id', None),
+                          is_twin=getattr(job, 'is_twin', False))
 
         target_event_id = ongoing_event_id or evidence.event_id or getattr(job, 'event_id', None)
         options = {'ongoing_event_id': target_event_id} if target_event_id else {}

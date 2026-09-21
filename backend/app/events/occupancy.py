@@ -296,7 +296,7 @@ class ViewOccupancy:
         else:
             detection, box = non_overlapping[0]
             slots = {
-                'FRONT': ContainerSlot('FRONT', f'{base_origin}:front', box, center(box), now, now, now, event_id=None)
+                'FRONT': ContainerSlot('FRONT', f'{base_origin}:single', box, center(box), now, now, now, event_id=None)
             }
             self.current = Occupancy(frame.source_id, base_origin, box, center(box),
                                      now, now, now, event_id=None, is_twin=False, slots=slots, active_slot='FRONT',
@@ -309,7 +309,7 @@ class ViewOccupancy:
         state = self.current
         matched = False
         for s_id, slot in state.slots.items():
-            if slot.origin == origin or (s_id == 'FRONT' and (origin == state.origin or origin.endswith(':front'))) or (s_id == 'REAR' and origin.endswith(':rear')):
+            if slot.origin == origin or (s_id == 'FRONT' and (origin == state.origin or origin.endswith(':front') or origin.endswith(':single'))) or (s_id == 'REAR' and origin.endswith(':rear')):
                 slot.event_id = event_id
                 slot.container_number = container_number
                 slot.closed = True

@@ -57,4 +57,5 @@ class Observation:
     all_detections: list[Detection] | None = None
     slot_position: str = 'FRONT'
     event_id: str | None = None
+    is_twin: bool = False
 

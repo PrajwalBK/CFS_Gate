@@ -48,6 +48,7 @@ class OCRJob:
     event_id: str | None = None
     is_stationary: bool = True
     entrance_complete: bool = True
+    is_twin: bool = False
 
 
 
@@ -542,7 +543,8 @@ class GateRuntime:
                 job = OCRJob(origin, camera.gate_id, track.id, track.detection, frame, direction,
                              occupancy.first_seen, camera.ocr_roi, tuple(detections), camera.role,
                              companion_frames=companion_frames, slot_position=slot_pos,
-                             event_id=event_id, is_stationary=is_stat, entrance_complete=ent_done)
+                             event_id=event_id, is_stationary=is_stat, entrance_complete=ent_done,
+                             is_twin=bool(getattr(occupancy, 'is_twin', False)))
                 try:
                     self.queue.put_nowait(job)
                     state['pending'] = True

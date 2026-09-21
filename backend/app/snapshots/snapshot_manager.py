@@ -115,25 +115,19 @@ class SnapshotManager:
                     flabel = f'{d.class_name.upper()} ({int(d.confidence * 100)}%)'
                     cv2.putText(image, flabel, (max(5, fx1), max(20, fy1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, .55, (0, 215, 255), 2)
 
-        # 2. Draw primary container detection with prominent high-contrast banner
+        # 2. Draw primary container detection cleanly
         x1, y1, x2, y2 = map(int, observation.detection.bbox)
-        cv2.rectangle(image, (x1, y1), (x2, y2), box_color, 3)
+        cv2.rectangle(image, (x1, y1), (x2, y2), box_color, 2)
         label = f"{observation.detection.camera_id} | {slot_name}" + (f" | {container_num}" if container_num else "")
-        (tw, th), tb = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        by1 = max(0, y1 - th - 16)
-        by2 = max(th + 16, y1)
-        bx1 = max(0, x1)
-        bx2 = min(image.shape[1], x1 + tw + 20)
-        cv2.rectangle(image, (bx1, by1), (bx2, by2), (15, 15, 15), -1)
-        cv2.rectangle(image, (bx1, by1), (bx2, by2), box_color, 2)
-        cv2.putText(image, label, (bx1 + 10, by2 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Black outline + white text for high contrast without blocking the image
+        text_y = max(24, y1 - 8)
+        cv2.putText(image, label, (max(5, x1), text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3)
+        cv2.putText(image, label, (max(5, x1), text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
-        # 3. Top-left prominent watermarked badge
+        # 3. Top-left unobtrusive watermark badge
         top_label = f"PROOF: {slot_name}" + (f" - {container_num}" if container_num else "")
-        (top_tw, top_th), _ = cv2.getTextSize(top_label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-        cv2.rectangle(image, (15, 15), (15 + top_tw + 24, 15 + top_th + 20), (20, 20, 20), -1)
-        cv2.rectangle(image, (15, 15), (15 + top_tw + 24, 15 + top_th + 20), box_color, 2)
-        cv2.putText(image, top_label, (25, 15 + top_th + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
+        cv2.putText(image, top_label, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+        cv2.putText(image, top_label, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, box_color, 2)
 
         ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 88])
         if not ok:
