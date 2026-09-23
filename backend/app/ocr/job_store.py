@@ -163,14 +163,22 @@ class OCRJobStore:
             size = db.execute('SELECT COALESCE(SUM(payload_bytes),0) FROM jobs').fetchone()[0]
             payload_bytes = len(crop_data) + len(image_data) + len(encoded.encode()) + companion_bytes
             if size + payload_bytes > self.max_bytes:
-                raise OSError('OCR spool capacity reached')
+                # Spool capacity reached: purge oldest processed (DONE) jobs to make room for active jobs
+                old_done = db.execute("SELECT id, payload_bytes FROM jobs WHERE state='DONE' ORDER BY id ASC LIMIT 200").fetchall()
+                if old_done:
+                    del_ids = [r['id'] for r in old_done]
+                    db.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?' for _ in del_ids)})", del_ids)
+                else:
+                    # If still full and no DONE jobs to purge, prune oldest 50 jobs
+                    db.execute("DELETE FROM jobs WHERE id IN (SELECT id FROM jobs ORDER BY id ASC LIMIT 50)")
+
             paths = self._save_images(job.origin_key, job.frame.sequence, crop_data, image_data, folder=folder)
             return db.execute('INSERT INTO jobs(origin,sequence,metadata,crop,image,payload_bytes) VALUES(?,?,?,?,?,?)',
                               (job.origin_key, job.frame.sequence, encoded, *paths, payload_bytes)).lastrowid
 
     def next_id(self):
         with self.connection() as db:
-            row = db.execute("SELECT id FROM jobs WHERE state='PENDING' AND retry_at<=? ORDER BY id LIMIT 1",
+            row = db.execute("SELECT id FROM jobs WHERE state='PENDING' AND retry_at<=? ORDER BY id DESC LIMIT 1",
                              (time.time(),)).fetchone()
             return row['id'] if row else None
 
@@ -254,35 +262,9 @@ class OCRJobStore:
                        (event_id, time.time(), origin))
 
     def clean_completed(self, max_age_seconds=10, protected_origins=()):
-        cutoff = time.time() - max_age_seconds
-        with self.connection() as db:
-            rows = db.execute(
-                "SELECT id, origin, crop, image, metadata FROM jobs j WHERE state='DONE' AND retry_at<=? "
-                "AND NOT EXISTS (SELECT 1 FROM jobs p WHERE p.origin=j.origin AND p.state='PENDING')",
-                (cutoff,)
-            ).fetchall()
-        for row in rows:
-            if row['origin'] in protected_origins:
-                continue
-            try:
-                img_p = self.image_path(row['image'])
-                crop_p = self.image_path(row['crop'])
-                img_p.unlink(missing_ok=True)
-                crop_p.unlink(missing_ok=True)
-                meta = json.loads(row['metadata']) if row['metadata'] else {}
-                for comp_rel in meta.get('companion_images', {}).values():
-                    try:
-                        self.image_path(comp_rel).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                parent = img_p.parent
-                if parent != self.image_root and parent.is_relative_to(self.image_root):
-                    try:
-                        parent.rmdir()
-                    except OSError:
-                        pass
-            except Exception:
-                pass
+        # User requirement: Keep every process completed screenshot/snapshot and upload on local disk.
+        # Do not delete or unlink detection images/crops after processing.
+        pass
 
     def retry(self, job_id, error_type):
         with self.connection() as db:

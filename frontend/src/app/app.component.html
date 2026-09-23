@@ -20,6 +20,14 @@
     }
   </nav>
   <div class="header-context">
+    <div class="buzzer-controls-strip">
+      <button type="button" class="buzzer-toggle-chip" [class.muted]="!buzzerEnabled()" (click)="buzzerEnabled.set(!buzzerEnabled())" [title]="buzzerEnabled() ? 'Mute audible buzzer' : 'Enable audible buzzer'">
+        {{ buzzerEnabled() ? '🔊 Buzzer ON' : '🔇 Buzzer MUTED' }}
+      </button>
+      <button type="button" class="buzzer-test-chip" (click)="testBuzzer()" title="Test buzzer tone">
+        Test Buzzer 🔔
+      </button>
+    </div>
     <div><small>SITE</small><span>Panvel CFS</span></div>
     <div class="admin-context">
       <span class="avatar">A</span>
@@ -29,6 +37,25 @@
 </header>
 
 <main>
+  @if (activeAlert(); as a) {
+    <div class="alert alert-buzzer" [class.alert-danger]="a.level === 'ERROR'" role="alert">
+      <div class="alert-content-row">
+        <span class="buzzer-badge-icon">🚨</span>
+        <div class="alert-body">
+          <strong class="alert-title">{{ a.title }}</strong>
+          <span class="alert-sep">—</span>
+          <span class="alert-desc">{{ a.message }}</span>
+          @if (a.container_number) {
+            <span class="alert-container-pill">{{ a.container_number }}</span>
+          }
+          <small class="alert-time">{{ a.timestamp | date:'HH:mm:ss' }}</small>
+        </div>
+      </div>
+      <div class="alert-btn-group">
+        <button type="button" class="btn-ack-alert" (click)="dismissAlert(a.id)">Dismiss / Mute</button>
+      </div>
+    </div>
+  }
   @if (error()) {
     <div class="alert bad" role="alert">{{ error() }}</div>
   }

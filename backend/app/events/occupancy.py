@@ -106,13 +106,19 @@ class ViewOccupancy:
 
     def update(self, camera, frame, detections):
         now = frame.timestamp
+        dwell_classes = getattr(self.settings, 'dwell_container_classes', None) or ['container', 'container_number', 'iso_code']
         all_boxes = [(d, normalized(d.bbox, frame.image.shape)) for d in detections
-                     if d.class_name in self.settings.dwell_container_classes]
+                     if d.class_name in dwell_classes]
         zone = camera.occupancy_roi
 
-        # 1. Filter raw candidates: must intersect occupancy ROI, not past exit, and realistic container size
-        raw_candidates = [(d, b) for d, b in all_boxes
-                          if iou(b, zone) > 0 and not self._past_exit(b, camera) and box_area(b) >= 0.015]
+        # 1. Filter raw candidates: must intersect occupancy ROI, center within ROI, not past exit, and realistic container/text size
+        raw_candidates = []
+        for d, b in all_boxes:
+            cx, cy = center(b)
+            if iou(b, zone) > 0 and (zone[0] <= cx <= zone[2] and zone[1] <= cy <= zone[3]) and not self._past_exit(b, camera):
+                min_area = 0.015 if d.class_name == 'container' else 0.0001
+                if box_area(b) >= min_area:
+                    raw_candidates.append((d, b))
 
         # 2. Suppress nested sub-boxes (e.g. text strips, decals, doors detected inside container body)
         candidates = []
@@ -161,10 +167,16 @@ class ViewOccupancy:
                 ordered = self._order_slots(candidates[:2], camera)
                 front_det, front_b = ordered[0]
                 rear_det, rear_b = ordered[1]
-                # To be twin containers, they must represent two physical containers (not just two text decals on one container!)
+                # To be twin containers, they must represent two physical containers on the trailer chassis:
+                # Must have comparable scale (not a background container) and aligned on the passage axis
+                area_front = box_area(front_b)
+                area_rear = box_area(rear_b)
+                area_ratio = min(area_front, area_rear) / max(area_front, area_rear) if max(area_front, area_rear) > 0 else 0
                 is_twin_candidate = (
-                    box_area(front_b) >= 0.08 and box_area(rear_b) >= 0.04 and
-                    abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.18
+                    area_front >= 0.08 and area_rear >= 0.04 and
+                    area_ratio >= 0.25 and
+                    abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.18 and
+                    abs(center(front_b)[1 - axis] - center(rear_b)[1 - axis]) <= 0.35
                 )
                 if is_twin_candidate:
                     if not state.is_twin:
@@ -227,7 +239,7 @@ class ViewOccupancy:
             state.stationary = any(s.stationary for s in state.slots.values()) if state.slots else False
             state.entrance_complete = state.stationary or (
                 (now - state.first_seen).total_seconds() >= self.settings.gate_observation_gap_seconds and
-                box_area(state.bbox) >= 0.08
+                (box_area(state.bbox) >= 0.015 or len(candidates) > 0)
             )
             state.closed = all(s.closed for s in state.slots.values()) if state.slots else False
             if 'FRONT' in state.slots:
@@ -241,9 +253,10 @@ class ViewOccupancy:
             front_slot = state.slots.get('FRONT')
             rear_slot = state.slots.get('REAR')
 
-            front_cand = max(((d, b) for d, b in candidates if front_slot and iou(front_slot.bbox, b) >= 0.10),
+            axis = 1 if camera.gate_exit_axis == 'y' else 0
+            front_cand = max(((d, b) for d, b in candidates if front_slot and (iou(front_slot.bbox, b) >= 0.05 or abs(center(front_slot.bbox)[axis] - center(b)[axis]) < 0.25)),
                              key=lambda item: iou(front_slot.bbox, item[1]), default=None)
-            rear_cand = max(((d, b) for d, b in candidates if rear_slot and iou(rear_slot.bbox, b) >= 0.10),
+            rear_cand = max(((d, b) for d, b in candidates if rear_slot and (iou(rear_slot.bbox, b) >= 0.05 or abs(center(rear_slot.bbox)[axis] - center(b)[axis]) < 0.25)),
                             key=lambda item: iou(rear_slot.bbox, item[1]), default=None)
 
             target = None
@@ -285,14 +298,34 @@ class ViewOccupancy:
             ordered = self._order_slots(non_overlapping, camera)
             front_det, front_b = ordered[0]
             rear_det, rear_b = ordered[1]
-            slots = {
-                'FRONT': ContainerSlot('FRONT', f'{base_origin}:front', front_b, center(front_b), now, now, now, event_id=None),
-                'REAR': ContainerSlot('REAR', f'{base_origin}:rear', rear_b, center(rear_b), now, now, now, event_id=None),
-            }
-            self.current = Occupancy(frame.source_id, base_origin, front_b, center(front_b),
-                                     now, now, now, event_id=None, is_twin=True, slots=slots, active_slot='FRONT',
-                                     provisional_event_id=prov_id)
-            return front_det
+            axis = 1 if camera.gate_exit_axis == 'y' else 0
+            area_front = box_area(front_b)
+            area_rear = box_area(rear_b)
+            area_ratio = min(area_front, area_rear) / max(area_front, area_rear) if max(area_front, area_rear) > 0 else 0
+            is_twin = (
+                area_front >= 0.08 and area_rear >= 0.04 and
+                area_ratio >= 0.25 and
+                abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.18 and
+                abs(center(front_b)[1 - axis] - center(rear_b)[1 - axis]) <= 0.35
+            )
+            if is_twin:
+                slots = {
+                    'FRONT': ContainerSlot('FRONT', f'{base_origin}:front', front_b, center(front_b), now, now, now, event_id=None),
+                    'REAR': ContainerSlot('REAR', f'{base_origin}:rear', rear_b, center(rear_b), now, now, now, event_id=None),
+                }
+                self.current = Occupancy(frame.source_id, base_origin, front_b, center(front_b),
+                                         now, now, now, event_id=None, is_twin=True, slots=slots, active_slot='FRONT',
+                                         provisional_event_id=prov_id)
+                return front_det
+            else:
+                detection, box = non_overlapping[0]
+                slots = {
+                    'FRONT': ContainerSlot('FRONT', f'{base_origin}:single', box, center(box), now, now, now, event_id=None)
+                }
+                self.current = Occupancy(frame.source_id, base_origin, box, center(box),
+                                         now, now, now, event_id=None, is_twin=False, slots=slots, active_slot='FRONT',
+                                         provisional_event_id=prov_id)
+                return detection
         else:
             detection, box = non_overlapping[0]
             slots = {

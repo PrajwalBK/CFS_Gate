@@ -51,9 +51,9 @@ def test_targeted_subcrop_ocr_priority(tmp_path):
     )
 
     # Test validator on text extraction
-    read_text = validator.validate(OCRRead('TIIU 507766 9', 0.95))
+    read_text = validator.validate(OCRRead('BMOU 412845 5', 0.95))
     assert read_text.valid_check_digit is True
-    assert read_text.normalized_text == 'TIIU5077669'
+    assert read_text.normalized_text == 'BMOU4128455'
 
     feet_code, human_size = extract_iso_size_code('45G1')
     assert feet_code == '45G1'

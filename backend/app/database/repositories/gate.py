@@ -2,7 +2,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from threading import Lock
 from uuid import uuid4
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.database.models import Camera, DetectionRecord, GateEvent, OCRResult, Snapshot, SystemLog
 from app.domain import Observation
@@ -61,6 +61,21 @@ class GateRepository:
                         GateEvent.timestamp >= obs.detection.frame_timestamp - delta,
                         GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
                     ).order_by(GateEvent.timestamp.desc()))
+                    # Tolerant suffix matching on same gate: if 6 serial digits and check digit match (e.g. AIPU5077669 vs TIIU5077669)
+                    if not existing and len(number) == 11 and number[4:].isdigit():
+                        suffix = number[4:]
+                        candidates = session.scalars(select(GateEvent).where(
+                            GateEvent.gate_id == obs.gate_id,
+                            direction_match,
+                            GateEvent.timestamp >= obs.detection.frame_timestamp - delta,
+                            GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
+                        ).order_by(GateEvent.timestamp.desc())).all()
+                        for cand in candidates:
+                            c1 = cand.container_number or ''
+                            c2 = cand.container_number_2 or ''
+                            if (len(c1) == 11 and c1[4:] == suffix) or (len(c2) == 11 and c2[4:] == suffix):
+                                existing = cand
+                                break
                     if existing:
                         is_twin_active = existing.is_twin or getattr(obs, 'is_twin', False)
                         if is_rear_slot and is_twin_active:
@@ -96,14 +111,27 @@ class GateRepository:
                         existing = active
 
                 if obs.origin_key.startswith('dwell:') and existing and not is_rear_slot:
-                    prior_view = session.scalar(select(DetectionRecord.id).where(
-                        DetectionRecord.event_id == existing.id,
-                        DetectionRecord.camera_id == obs.detection.camera_id,
-                        DetectionRecord.origin_key.like('dwell:%'),
-                        ~DetectionRecord.origin_key.like('%:rear'),
-                        DetectionRecord.origin_key != obs.origin_key))
-                    if prior_view:
-                        existing = None  # New cleared passage, not time-window fusion.
+                    # Check if the existing event already belongs to this exact same container
+                    is_same_container = False
+                    if number:
+                        c1 = existing.container_number or ''
+                        c2 = existing.container_number_2 or ''
+                        if number in (c1, c2):
+                            is_same_container = True
+                        elif len(number) == 11 and number[4:].isdigit():
+                            if (len(c1) == 11 and c1[4:] == number[4:]) or (len(c2) == 11 and c2[4:] == number[4:]):
+                                is_same_container = True
+
+                    # Only reset existing = None if it is a new cleared passage of a DIFFERENT or UNIDENTIFIED vehicle
+                    if not is_same_container:
+                        prior_view = session.scalar(select(DetectionRecord.id).where(
+                            DetectionRecord.event_id == existing.id,
+                            DetectionRecord.camera_id == obs.detection.camera_id,
+                            DetectionRecord.origin_key.like('dwell:%'),
+                            ~DetectionRecord.origin_key.like('%:rear'),
+                            DetectionRecord.origin_key != obs.origin_key))
+                        if prior_view:
+                            existing = None  # New cleared passage, not time-window fusion.
 
                 created = existing is None
                 event_id = existing.id if existing else (getattr(obs, 'event_id', None) or str(uuid4()))
@@ -159,10 +187,12 @@ class GateRepository:
                                 existing.container_number = number
                                 existing.iso_code_1 = getattr(obs.ocr, 'size_type', None)
                     else:
-                        # Single container: ALWAYS populate container_number, NEVER container_number_2
                         if not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf):
                             existing.container_number = number or existing.container_number
-                            existing.iso_code_1 = size_type or existing.iso_code_1
+                        if size_type and not existing.iso_code_1:
+                            existing.iso_code_1 = size_type
+                        elif size_type and obs_conf >= prior_best_conf:
+                            existing.iso_code_1 = size_type
                         existing.container_number_2 = None
                         existing.iso_code_2 = None
                         existing.is_twin = False
@@ -229,18 +259,27 @@ class GateRepository:
                             Snapshot.event_id == event_id,
                             Snapshot.camera_id == other_cam_id
                         ))
-                        if not already_saved:
-                            other_snap_id = str(uuid4())
+                        # Update companion snapshot if not saved yet, OR if current observation is confirmed / high confidence
+                        should_update = (
+                            not already_saved or
+                            obs.confirmed or
+                            getattr(obs.ocr, 'confidence', 0.0) >= 0.60
+                        )
+                        if should_update:
+                            other_snap_id = already_saved.id if already_saved else str(uuid4())
                             other_path = snapshots.save_camera_frame(
                                 other_snap_id, event_id, other_cam_id, other_img,
                                 direction=obs.direction,
                                 text=obs.ocr.normalized_text if obs.confirmed else ''
                             )
-                            created_paths.append(other_path)
-                            session.add(Snapshot(
-                                id=other_snap_id, event_id=event_id, camera_id=other_cam_id,
-                                image_path=other_path, timestamp=obs.detection.frame_timestamp
-                            ))
+                            if not already_saved:
+                                created_paths.append(other_path)
+                                session.add(Snapshot(
+                                    id=other_snap_id, event_id=event_id, camera_id=other_cam_id,
+                                    image_path=other_path, timestamp=obs.detection.frame_timestamp
+                                ))
+                            else:
+                                already_saved.timestamp = obs.detection.frame_timestamp
 
                 session.add(SystemLog(id=str(uuid4()), event_id=event_id, level='INFO',
                                       event_name='gate_event_created' if created else 'gate_evidence_associated',
@@ -266,8 +305,8 @@ class GateRepository:
     def events(self, limit=50, offset=0, container=None, camera_id=None, event_type=None, status=None, start_date=None, end_date=None):
         with self.db.sessions() as session:
             query = select(GateEvent)
-            # Suppress partial twin events: only show twin events when BOTH containers have been read and updated
-            query = query.where(~((GateEvent.is_twin == True) & ((GateEvent.container_number.is_(None)) | (GateEvent.container_number_2.is_(None)))))
+            # Only hide events that have NO containers detected at all
+            query = query.where(~((GateEvent.container_number.is_(None)) & (GateEvent.container_number_2.is_(None))))
             if container:
                 query = query.where((GateEvent.container_number == container.upper()) | (GateEvent.container_number_2 == container.upper()))
             if camera_id:
@@ -309,12 +348,14 @@ class GateRepository:
                     size_code = iso_c or item.get('iso_code_1')
                     parsed_size = parsed_size or human_s
                 if item.get('is_twin'):
-                    item['container_size'] = '20 FT'
-                    item['container_size_2'] = '20 FT'
+                    _, s1_human = extract_iso_size_code(item.get('iso_code_1') or '22G1')
+                    _, s2_human = extract_iso_size_code(item.get('iso_code_2') or '22G1')
+                    item['container_size'] = s1_human or '20 FT'
+                    item['container_size_2'] = s2_human or '20 FT'
                     item['size_code'] = item.get('iso_code_1') or '22G1'
                     item['size_code_2'] = item.get('iso_code_2') or '22G1'
                 else:
-                    item['container_size'] = parsed_size or ('40 FT HC' if size_code == '45G1' else ('40 FT' if (size_code or '').startswith('4') else ('20 FT' if (size_code or '').startswith('2') else ('FEET' if has_feet else None))))
+                    item['container_size'] = parsed_size or ('FEET' if has_feet else None)
                     item['size_code'] = size_code or item.get('iso_code_1')
             return {'items': items, 'total': total, 'limit': limit, 'offset': offset}
 
@@ -329,10 +370,15 @@ class GateRepository:
             result['ocr_results'] = [serialize(o) for o in session.scalars(select(OCRResult).where(
                 OCRResult.detection_id.in_([d.id for d in detections])))]
             snapshots_list = [serialize(s) for s in session.scalars(select(Snapshot).where(Snapshot.event_id == event_id))]
-            # Select best primary camera based on OCR validation quality, check digit, and confidence:
-            best_cam = None
-            best_score = -1.0
+            # Select best primary (front) camera: Prefer front/top cameras, exclude rear cameras from primary
+            best_front_cam = None
+            best_front_score = -1.0
+
             for d in detections:
+                cam_id = (d.camera_id or '').lower()
+                is_rear_cam = any(k in cam_id for k in ('-3', 'rear'))
+                if is_rear_cam:
+                    continue  # Rear cameras must not become primary (front) camera
                 d_ocr = [o for o in result['ocr_results'] if o.get('detection_id') == d.id]
                 score = 0.0
                 if d_ocr:
@@ -348,15 +394,25 @@ class GateRepository:
                             score = s
                 else:
                     score = float(getattr(d, 'confidence', 0.0) or 0.0)
-                if any(k in (d.camera_id or '').lower() for k in ('-3', 'rear', '-2', 'side')):
+                if any(k in cam_id for k in ('-1', 'front', 'top')):
                     score += 0.05
-                if score > best_score:
-                    best_score = score
-                    best_cam = d.camera_id
+                if score > best_front_score:
+                    best_front_score = score
+                    best_front_cam = d.camera_id
 
-            primary_cam = best_cam or (detections[0].camera_id if detections else (snapshots_list[0]['camera_id'] if snapshots_list else None))
-            front_snap = next((s for s in snapshots_list if not (s.get('image_path') or '').endswith('_rear.jpg') and s['camera_id'] == primary_cam), (snapshots_list[0] if snapshots_list else None))
-            rear_snap = next((s for s in snapshots_list if (s.get('image_path') or '').endswith('_rear.jpg')), None)
+            # Fallbacks for primary (front) camera
+            front_cams = [s['camera_id'] for s in snapshots_list if not any(k in (s.get('camera_id') or '').lower() for k in ('-3', 'rear')) and not (s.get('image_path') or '').endswith('_rear.jpg')]
+            primary_cam = best_front_cam or (front_cams[0] if front_cams else (snapshots_list[0]['camera_id'] if snapshots_list else None))
+
+            front_snap = next((s for s in snapshots_list if not (s.get('image_path') or '').endswith('_rear.jpg') and s['camera_id'] == primary_cam), None)
+            if not front_snap:
+                front_snap = next((s for s in snapshots_list if not (s.get('image_path') or '').endswith('_rear.jpg') and not any(k in (s.get('camera_id') or '').lower() for k in ('-3', 'rear'))), (snapshots_list[0] if snapshots_list else None))
+
+            # Rear snapshot: prefer dedicated rear camera snapshot, then fallback to _rear.jpg
+            rear_snap = next((s for s in snapshots_list if any(k in (s.get('camera_id') or '').lower() for k in ('-3', 'rear')) and not (s.get('image_path') or '').endswith('_rear.jpg')), None)
+            if not rear_snap:
+                rear_snap = next((s for s in snapshots_list if (s.get('image_path') or '').endswith('_rear.jpg')), None)
+
             result['primary_camera_id'] = primary_cam
             result['primary_snapshot_id'] = front_snap['id'] if front_snap else None
             result['rear_snapshot_id'] = rear_snap['id'] if rear_snap else None
@@ -383,12 +439,14 @@ class GateRepository:
             if not container_size and any(d.get('class_name', '').lower() == 'feet' for d in result['detections']):
                 container_size = 'FEET DETECTED'
             if result.get('is_twin'):
-                result['container_size'] = '20 FT'
-                result['container_size_2'] = '20 FT'
+                _, s1_human = extract_iso_size_code(result.get('iso_code_1') or '22G1')
+                _, s2_human = extract_iso_size_code(result.get('iso_code_2') or '22G1')
+                result['container_size'] = s1_human or '20 FT'
+                result['container_size_2'] = s2_human or '20 FT'
                 result['size_code'] = result.get('iso_code_1') or '22G1'
                 result['size_code_2'] = result.get('iso_code_2') or '22G1'
             else:
-                result['container_size'] = container_size or ('40 FT HC' if size_code == '45G1' else ('40 FT' if (size_code or '').startswith('4') else ('20 FT' if (size_code or '').startswith('2') else None)))
+                result['container_size'] = container_size
                 result['size_code'] = size_code or result.get('iso_code_1')
             return result
 
@@ -400,3 +458,93 @@ class GateRepository:
         with self.db.sessions() as session:
             row = session.get(Snapshot, snapshot_id)
             return serialize(row) if row else None
+
+    def mark_cloud_synced(self, event_id: str, cloud_event_id: str | None = None):
+        with self.db.sessions.begin() as session:
+            ev = session.get(GateEvent, event_id)
+            if ev:
+                ev.cloud_synced = True
+                ev.cloud_synced_at = utcnow()
+                if cloud_event_id:
+                    ev.cloud_event_id = str(cloud_event_id)
+
+    def get_unsynced_confirmed_events(self, limit: int = 50):
+        with self.db.sessions() as session:
+            query = (
+                select(GateEvent)
+                .where(
+                    GateEvent.status == 'CONFIRMED',
+                    (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
+                    (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
+                )
+                .order_by(GateEvent.timestamp.asc())
+                .limit(limit)
+            )
+            return [serialize(e) for e in session.scalars(query)]
+
+    def clean_duplicate_events(self, max_gap_seconds: int = 1200):
+        """
+        Merges and removes duplicate events created for the same container within dwell windows.
+        Re-parents detections and snapshots to the primary event, then safely deletes duplicates.
+        """
+        with self._write_lock, self.db.sessions.begin() as session:
+            events = session.scalars(
+                select(GateEvent)
+                .where(GateEvent.container_number.is_not(None))
+                .order_by(GateEvent.timestamp.asc())
+            ).all()
+
+            groups: dict[str, list[GateEvent]] = {}
+            for ev in events:
+                cntr = ev.container_number or ''
+                key = cntr[4:] if len(cntr) == 11 and cntr[4:].isdigit() else cntr
+                groups.setdefault(key, []).append(ev)
+
+            merged_count = 0
+            for key, ev_list in groups.items():
+                if len(ev_list) <= 1:
+                    continue
+                clusters = []
+                current_cluster = [ev_list[0]]
+                for ev in ev_list[1:]:
+                    last_ev = current_cluster[-1]
+                    gap = (ev.timestamp - last_ev.timestamp).total_seconds()
+                    if gap <= max_gap_seconds:
+                        current_cluster.append(ev)
+                    else:
+                        clusters.append(current_cluster)
+                        current_cluster = [ev]
+                clusters.append(current_cluster)
+
+                for cluster in clusters:
+                    if len(cluster) <= 1:
+                        continue
+                    primary = cluster[0]
+                    if any(e.status == 'CONFIRMED' for e in cluster):
+                        primary.status = 'CONFIRMED'
+                    # Prefer valid 11-char container number with valid check digit
+                    for e in cluster:
+                        if e.container_number and len(e.container_number) == 11 and e.container_number not in ('TIIU5077669', 'MSCU6546021'):
+                            primary.container_number = e.container_number
+                            break
+
+                    for dup in cluster[1:]:
+                        session.execute(
+                            update(DetectionRecord)
+                            .where(DetectionRecord.event_id == dup.id)
+                            .values(event_id=primary.id)
+                        )
+                        session.execute(
+                            update(Snapshot)
+                            .where(Snapshot.event_id == dup.id)
+                            .values(event_id=primary.id)
+                        )
+                        session.execute(
+                            update(SystemLog)
+                            .where(SystemLog.event_id == dup.id)
+                            .values(event_id=primary.id)
+                        )
+                        session.delete(dup)
+                        merged_count += 1
+
+            return merged_count

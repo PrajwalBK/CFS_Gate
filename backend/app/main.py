@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.api import cameras, detections, events, health, videos
+from app.api import alerts, cameras, detections, events, health, videos
 from app.config.settings import Settings
 from app.database.database import Database
 from app.database.repositories.gate import GateRepository
@@ -69,7 +69,7 @@ def create_app(settings=None, database=None, camera_configs=None, runtime_factor
             return JSONResponse({'detail': 'Request origin is not allowed'}, status_code=403)
         return await call_next(request)
 
-    for router in (cameras.router, events.router, detections.router, health.router, videos.router):
+    for router in (cameras.router, events.router, detections.router, health.router, videos.router, alerts.router):
         app.include_router(router)
 
     @app.exception_handler(SQLAlchemyError)

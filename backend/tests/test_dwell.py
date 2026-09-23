@@ -123,9 +123,20 @@ def test_new_cleared_passage_not_merged_by_short_dedup_window(repository, snapsh
     from tests.test_events_database import observation
     first = make_job(origin='dwell:camera-1:first')
     second = make_job(origin='dwell:camera-1:second', timestamp=first.frame.timestamp + timedelta(seconds=10))
-    one = repository.save_observation(observation(first), snapshots, 30)[0]
-    two = repository.save_observation(observation(second), snapshots, 30)[0]
+    one = repository.save_observation(observation(first, text='CSQU3054383'), snapshots, 30)[0]
+    two = repository.save_observation(observation(second, text='TEMU4518441'), snapshots, 30)[0]
     assert one != two
+
+
+def test_same_container_repeated_dwell_cycles_merged(repository, snapshots, make_job):
+    from tests.test_events_database import observation
+    first = make_job(origin='dwell:camera-1:cycle1')
+    second = make_job(origin='dwell:camera-1:cycle2', timestamp=first.frame.timestamp + timedelta(seconds=25))
+    one, created1 = repository.save_observation(observation(first, text='BMOU4128455'), snapshots, 300)
+    two, created2 = repository.save_observation(observation(second, text='BMOU4128455'), snapshots, 300)
+    assert one == two
+    assert created1 is True
+    assert created2 is False
 
 
 def test_active_lane_association_beyond_time_window(repository, snapshots, camera, make_job):
@@ -168,3 +179,18 @@ def test_queued_jobs_after_confirmation_skip_ocr(settings, repository, snapshots
         runtime._process_saved_ocr(key)
     assert runtime.ocr.read.call_count == 1
     assert repository.events()['total'] == 1
+
+
+def test_container_number_alone_triggers_occupancy(settings, camera):
+    """Ensure that detecting container_number alone (without outer container class) successfully triggers occupancy."""
+    view = ViewOccupancy(settings)
+    ts = datetime(2026, 9, 11)
+    frame = Frame('camera-1', ts, 1, np.zeros((720, 1280, 3), dtype=np.uint8), 'source')
+    # Small vertical container number box (e.g. 10x100 pixels)
+    det = Detection(frame.camera_id, ts, 'container_number', 0.85, (600, 100, 620, 250))
+    selected = view.update(camera, frame, [det])
+    assert selected is not None
+    assert selected.class_name == 'container_number'
+    assert view.current is not None
+    assert view.status()['state'] in ('TRACKING', 'OCCUPIED')
+

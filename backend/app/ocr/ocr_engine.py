@@ -153,8 +153,9 @@ class OlmOCREngine:
             device_map=self.device
         )
         self.prompt = (
-            "You are an industrial container OCR system. Read all container markings on this image: the container owner code, serial number, check digit, and ISO size-type code or feet markings (e.g. TIIU 507766 9 45G1 or MSCU 654602 1 22G1). "
-            "Output the letters and digits separated by spaces. Do not output explanations."
+            "You are an industrial container OCR system. Read all container markings on this image: "
+            "the 4-letter owner code (ending in U, J, or Z), 6-digit serial number, 1-digit check digit, and 4-character ISO size-type code (e.g. 45G1, 22G1). "
+            "Output ONLY the letters and digits visible on the container separated by spaces. Do NOT invent or guess codes. If no container markings are clearly visible, output empty."
         )
         log.info(f'oLmOCR model loaded successfully on {self.device}.')
 
@@ -169,7 +170,14 @@ class OlmOCREngine:
             return OCRRead('', 0.0)
 
         try:
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            h, w = image.shape[:2]
+            if max(h, w) > 768:
+                scale = 768.0 / max(h, w)
+                proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            else:
+                proc_img = image
+
+            rgb_image = cv2.cvtColor(proc_img, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(rgb_image)
 
             messages = [

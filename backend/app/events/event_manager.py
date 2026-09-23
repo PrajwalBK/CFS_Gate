@@ -18,10 +18,12 @@ class Evidence:
 
 class EventManager:
     """Called only by the OCR worker; commit succeeds before marking a track done."""
-    def __init__(self, settings, repository, snapshots, dispatcher=None):
+    def __init__(self, settings, repository, snapshots, dispatcher=None, runtime=None):
         self.settings, self.repository, self.snapshots = settings, repository, snapshots
         self.dispatcher = dispatcher
+        self.runtime = runtime
         self.evidence: dict[str, Evidence] = {}
+        self._dispatched_events: set[str] = set()
 
     def prune(self, active_origins):
         self.evidence = {key: value for key, value in self.evidence.items() if key in active_origins}
@@ -65,8 +67,26 @@ class EventManager:
             obs, self.snapshots, self.settings.dedup_seconds, additional_frames, **options)
         evidence.event_id = event_id
         evidence.confirmed = confirmed
-        if self.dispatcher and obs.confirmed:
+
+        # Only dispatch to cloud and buzz for new events or newly confirmed events that haven't been dispatched yet
+        should_dispatch = obs.confirmed and (event_id not in self._dispatched_events)
+        if self.dispatcher and should_dispatch:
+            self._dispatched_events.add(event_id)
             self.dispatcher.enqueue(obs, event_id)
+        if self.runtime and obs.direction in ('EXIT', 'OUT', 'GATE_OUT') and should_dispatch:
+            try:
+                cntr = obs.ocr.normalized_text if (obs and obs.ocr and obs.confirmed) else 'Unconfirmed'
+                self.runtime.emit_alert(
+                    alert_type='GATE_OUT',
+                    title='Gate OUT Movement',
+                    message=f'Container {cntr} exiting on lane {obs.gate_id}',
+                    level='WARNING',
+                    container_number=cntr if obs.confirmed else None,
+                    event_id=event_id,
+                    buzzer=True
+                )
+            except Exception:
+                pass
         log.info('gate_event_created' if created else 'gate_evidence_associated',
                  extra={'camera_id': job.detection.camera_id, 'event_id': event_id})
         return event_id, created

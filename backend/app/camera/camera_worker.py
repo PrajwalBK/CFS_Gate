@@ -161,10 +161,19 @@ class CameraWorker:
                         started = time.monotonic()
                         ok, image = stream.read()
                         if not ok or image is None:
-                            if self.config.source_type == 'file' and not self.config.loop_file:
-                                self._set_status('OFFLINE', 'file_completed')
-                                return
-                            raise ConnectionError('Read failed')
+                            if self.config.source_type == 'file':
+                                if self.config.loop_file:
+                                    if hasattr(stream, 'rewind') and stream.rewind():
+                                        video_frame = 0
+                                        ok, image = stream.read()
+                                    if not ok or image is None:
+                                        self._set_status('OFFLINE', 'file_completed')
+                                        return
+                                else:
+                                    self._set_status('OFFLINE', 'file_completed')
+                                    return
+                            else:
+                                raise ConnectionError('Read failed')
                         if self.config.source_type == 'file':
                             video_frame += 1
                             self.video_position_seconds = video_frame / stream.fps

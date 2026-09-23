@@ -35,5 +35,11 @@ class OpenCVStream:
     def read(self):
         return self.cap.read()
 
+    def rewind(self):
+        if getattr(self, 'cap', None) and self.cap.isOpened():
+            self.cap.set(self.cv2.CAP_PROP_POS_FRAMES, 0)
+            return True
+        return False
+
     def close(self):
         self.cap.release()

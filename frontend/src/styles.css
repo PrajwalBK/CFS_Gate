@@ -313,3 +313,34 @@ footer { display: flex; justify-content: space-between; gap: 12px; padding: 9px 
 @media (max-width: 768px) {
   .twin-hero-boxes { grid-template-columns: 1fr; }
 }
+
+/* Buzzer Controls & Alarm Alerts */
+.buzzer-controls-strip { display: flex; align-items: center; gap: 8px; margin-right: 15px; }
+.buzzer-toggle-chip { padding: 4px 10px; font-size: 11px; font-weight: 700; border-radius: 20px; border: 1px solid #48bb78; background: #22543d; color: #9ae6b4; cursor: pointer; transition: all 0.2s; }
+.buzzer-toggle-chip:hover { opacity: 0.9; }
+.buzzer-toggle-chip.muted { background: #4a5568; border-color: #718096; color: #cbd5e0; }
+.buzzer-test-chip { padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 20px; border: 1px solid #4a5568; background: #2d3748; color: #e2e8f0; cursor: pointer; }
+.buzzer-test-chip:hover { background: #3b485f; color: #fff; }
+
+.alert-buzzer { background: #fff5f5; border: 1.5px solid #feb2b2; border-left: 5px solid #e53e3e; box-shadow: 0 4px 12px rgba(229, 62, 62, 0.15); animation: buzzerPulse 1.5s infinite alternate; }
+.alert-buzzer.alert-danger { background: #fff5f5; border-color: #e53e3e; }
+.alert-content-row { display: flex; align-items: center; gap: 12px; }
+.buzzer-badge-icon { font-size: 24px; line-height: 1; animation: bellShake 0.6s infinite alternate; }
+.alert-body { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: #742a2a; }
+.alert-title { font-size: 13px; color: #9b2c2c; font-weight: 700; }
+.alert-desc { color: #4a5568; font-weight: 500; }
+.alert-container-pill { background: #fed7d7; color: #9b2c2c; font-family: monospace; font-weight: 700; padding: 2px 7px; border-radius: 4px; font-size: 12px; }
+.alert-time { color: #a0aec0; font-size: 11px; margin-left: 6px; }
+.alert-btn-group { display: flex; gap: 8px; }
+.btn-ack-alert { background: #e53e3e; color: #fff; border: 1px solid #c53030; font-weight: 700; font-size: 11px; padding: 5px 12px; border-radius: 4px; cursor: pointer; }
+.btn-ack-alert:hover { background: #c53030; }
+
+@keyframes buzzerPulse {
+  0% { transform: scale(1); box-shadow: 0 2px 6px rgba(229, 62, 62, 0.2); }
+  100% { transform: scale(1.005); box-shadow: 0 4px 16px rgba(229, 62, 62, 0.4); }
+}
+@keyframes bellShake {
+  0% { transform: rotate(-8deg); }
+  100% { transform: rotate(8deg); }
+}
+

@@ -79,8 +79,9 @@ class GateRuntime:
         self.detector_factory = detector_factory
         self.ocr_factory = ocr_factory or create_ocr_engine
         self.metrics = Metrics()
-        self.dispatcher = CloudOutboxDispatcher(settings, self.metrics, repository=self.repository, snapshots=self.snapshots)
-        self.events = EventManager(settings, repository, snapshots, dispatcher=self.dispatcher)
+        self.alerts = deque(maxlen=30)
+        self.dispatcher = CloudOutboxDispatcher(settings, self.metrics, repository=self.repository, snapshots=self.snapshots, runtime=self)
+        self.events = EventManager(settings, repository, snapshots, dispatcher=self.dispatcher, runtime=self)
         self.validator = ContainerValidator()
         self.tracker = {c.id: TemporalTracker(settings.track_ttl_seconds) for c in cameras}
         self.queue = Queue(maxsize=settings.ocr_queue_size)
@@ -136,6 +137,25 @@ class GateRuntime:
             thread = threading.Thread(target=self._initialize_pipeline, name='gate-model-loader', daemon=True)
             self._threads.append(thread)
             thread.start()
+
+    def emit_alert(self, alert_type: str, title: str, message: str, level: str = 'WARNING',
+                   container_number: str | None = None, event_id: str | None = None,
+                   buzzer: bool = True):
+        from app.api.alerts import trigger_hardware_buzzer
+        alert = {
+            'id': str(uuid4()),
+            'alert_type': alert_type,
+            'level': level,
+            'title': title,
+            'message': message,
+            'container_number': container_number,
+            'event_id': event_id,
+            'timestamp': datetime.now(timezone.utc).isoformat() + 'Z'
+        }
+        with self._state_lock:
+            self.alerts.appendleft(alert)
+        if buzzer:
+            trigger_hardware_buzzer('gate_out' if alert_type == 'GATE_OUT' else 'cloud_error')
 
     def camera_status(self):
         result = self.manager.status()
@@ -327,7 +347,7 @@ class GateRuntime:
         with self._camera_locks[camera_id]:
             original = next(c for c in self.cameras if c.id == camera_id)
             previous = self.manager.workers[camera_id]
-            config = original.model_copy(update={'source_type': 'file', 'enabled': True, 'loop_file': False})
+            config = original.model_copy(update={'source_type': 'file', 'enabled': True, 'loop_file': True})
             replacement = CameraWorker(config, str(self.videos.path(info['stored_name'])), self.settings, previous.stream_factory)
             replacement.prepare_video()
             previous.stop()
@@ -517,7 +537,7 @@ class GateRuntime:
                     continue
                 if state.get('done'):
                     continue
-                has_text_det = any(d.class_name in ('cointainer', 'feet') for d in detections)
+                has_text_det = any(d.class_name in ('container_number', 'iso_code') for d in detections)
                 max_samples = max(30, self.settings.ocr_max_attempts * 3) if has_text_det else max(15, self.settings.ocr_max_attempts)
                 if state.get('samples', 0) >= max_samples:
                     continue
@@ -601,6 +621,8 @@ class GateRuntime:
             if prior_ev and prior_ev.get('status') == 'CONFIRMED':
                 if is_rear_slot and not prior_ev.get('container_number_2'):
                     pass  # Keep processing to extract container_number_2
+                elif not prior_ev.get('iso_code_1') and not prior_ev.get('container_size'):
+                    pass  # Keep processing to extract ISO size/type code from feet markings
                 elif not is_rear_slot and prior_ev.get('container_number'):
                     self.ocr_store.complete(job_id, prior.event_id)
                     self._confirm_occupancy(job, prior.event_id)
@@ -639,12 +661,10 @@ class GateRuntime:
                     d_h = max(1.0, d.bbox[3] - d.bbox[1])
                     d_area = d_w * d_h
 
-                    if cls_name == 'cointainer':
+                    if cls_name == 'container_number':
                         cointainer_candidates.append(d)
-                    elif cls_name == 'feet':
+                    elif cls_name == 'iso_code':
                         feet_candidates.append(d)
-                    elif cls_name in ('container_object', 'container') and d_area < 0.6 * c_area:
-                        cointainer_candidates.append(d)
 
                 cointainer_candidates.sort(key=lambda d: d.confidence, reverse=True)
                 feet_candidates.sort(key=lambda d: d.confidence, reverse=True)
@@ -716,6 +736,20 @@ class GateRuntime:
                 if validation is None or main_val.valid_check_digit or main_val.confidence > validation.confidence:
                     read = main_read
                     validation = main_val
+
+            # 3. FALLBACK TO COMPANION CAMERA FRAMES (e.g. Side or Rear cameras):
+            # If the primary camera didn't yield a valid container check digit, attempt OCR on companion camera frames
+            if validation is None or not validation.valid_check_digit:
+                companion_dict = dict(getattr(job, 'companion_frames', {}) or {})
+                for other_cam_id, comp_img in companion_dict.items():
+                    if comp_img is not None and getattr(comp_img, 'size', 0) > 0:
+                        comp_read = self.ocr.read(comp_img)
+                        comp_val = self.validator.validate(comp_read)
+                        if comp_val.valid_check_digit or (validation is None or comp_val.confidence > validation.confidence):
+                            read = comp_read
+                            validation = comp_val
+                            if validation.valid_check_digit:
+                                break
 
             self.metrics.latency('ocr', time.monotonic() - started)
             self.ocr_store.save_validation(job_id, validation)

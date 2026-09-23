@@ -1,0 +1,1416 @@
+{
+  "x-generator": "NSwag v14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))",
+  "openapi": "3.0.0",
+  "info": {
+    "title": "CFS Admin API",
+    "version": "v1"
+  },
+  "servers": [
+    {
+      "url": "https://cfsapi.prosperassettracking.com"
+    }
+  ],
+  "paths": {
+    "/api/users/{UserId}/client-roles": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersAssignClientRoleEndpoint",
+        "parameters": [
+          {
+            "name": "UserId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          }
+        ],
+        "requestBody": {
+          "x-name": "AssignClientRoleRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsUsersAssignClientRoleRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/users/{UserId}/site-roles": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersAssignSiteRoleEndpoint",
+        "parameters": [
+          {
+            "name": "UserId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          }
+        ],
+        "requestBody": {
+          "x-name": "AssignSiteRoleRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsUsersAssignSiteRoleRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/users": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersCreateUserEndpoint",
+        "requestBody": {
+          "x-name": "CreateUserRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsUsersCreateUserRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin",
+              "User"
+            ]
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersGetUsersEndpoint",
+        "parameters": [
+          {
+            "name": "ClientId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "SiteId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "guid",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin",
+              "User"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/users/{UserId}": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersGetUserEndpoint",
+        "parameters": [
+          {
+            "name": "UserId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin",
+              "User"
+            ]
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersUpdateUserEndpoint",
+        "parameters": [
+          {
+            "name": "UserId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          }
+        ],
+        "requestBody": {
+          "x-name": "UpdateUserRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsUsersUpdateUserRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin",
+              "User"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/users/{UserId}/client-roles/{ClientId}/{Role}": {
+      "delete": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersRemoveClientRoleEndpoint",
+        "parameters": [
+          {
+            "name": "UserId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "ClientId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "Role",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/users/{UserId}/site-roles/{SiteId}/{Role}": {
+      "delete": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersRemoveSiteRoleEndpoint",
+        "parameters": [
+          {
+            "name": "UserId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "SiteId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "Role",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/users/{UserId}/system-admin/{Active}": {
+      "patch": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersSetSystemAdminEndpoint",
+        "parameters": [
+          {
+            "name": "UserId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "Active",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/users/{UserId}/active/{Active}": {
+      "patch": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "CFSAdminApiEndpointsUsersSetUserActiveEndpoint",
+        "parameters": [
+          {
+            "name": "UserId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "Active",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin",
+              "User"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/sites": {
+      "post": {
+        "tags": [
+          "Sites"
+        ],
+        "operationId": "CFSAdminApiEndpointsSitesCreateSiteEndpoint",
+        "requestBody": {
+          "x-name": "CreateSiteRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsSitesCreateSiteRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin"
+            ]
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Sites"
+        ],
+        "operationId": "CFSAdminApiEndpointsSitesGetSitesEndpoint",
+        "parameters": [
+          {
+            "name": "ClientId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "guid",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin",
+              "User"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/sites/{SiteId}/active/{Active}": {
+      "patch": {
+        "tags": [
+          "Sites"
+        ],
+        "operationId": "CFSAdminApiEndpointsSitesSetSiteActiveEndpoint",
+        "parameters": [
+          {
+            "name": "SiteId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "Active",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/sites/{SiteId}": {
+      "put": {
+        "tags": [
+          "Sites"
+        ],
+        "operationId": "CFSAdminApiEndpointsSitesUpdateSiteEndpoint",
+        "parameters": [
+          {
+            "name": "SiteId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          }
+        ],
+        "requestBody": {
+          "x-name": "UpdateSiteRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsSitesUpdateSiteRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/roles": {
+      "get": {
+        "tags": [
+          "Roles"
+        ],
+        "operationId": "CFSAdminApiEndpointsRolesGetRolesEndpoint",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin",
+              "SiteAdmin",
+              "User"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/clients": {
+      "post": {
+        "tags": [
+          "Clients"
+        ],
+        "operationId": "CFSAdminApiEndpointsClientsCreateClientEndpoint",
+        "requestBody": {
+          "x-name": "CreateClientRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsClientsCreateClientRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin"
+            ]
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Clients"
+        ],
+        "operationId": "CFSAdminApiEndpointsClientsGetClientsEndpoint",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin",
+              "ClientAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/clients/{ClientId}/active/{Active}": {
+      "patch": {
+        "tags": [
+          "Clients"
+        ],
+        "operationId": "CFSAdminApiEndpointsClientsSetClientActiveEndpoint",
+        "parameters": [
+          {
+            "name": "ClientId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          },
+          {
+            "name": "Active",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/clients/{ClientId}": {
+      "put": {
+        "tags": [
+          "Clients"
+        ],
+        "operationId": "CFSAdminApiEndpointsClientsUpdateClientEndpoint",
+        "parameters": [
+          {
+            "name": "ClientId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "guid"
+            }
+          }
+        ],
+        "requestBody": {
+          "x-name": "UpdateClientRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsClientsUpdateClientRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": [
+              "SystemAdmin"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/auth/change-password": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationChangePasswordEndpoint",
+        "requestBody": {
+          "x-name": "ChangePasswordRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsAuthenticationChangePasswordRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/auth/context": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationContextEndpoint",
+        "requestBody": {
+          "x-name": "ContextRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsAuthenticationContextRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/auth/forgot-password": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationForgotPasswordEndpoint",
+        "requestBody": {
+          "x-name": "ForgotPasswordRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsAuthenticationForgotPasswordRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    },
+    "/.well-known/jwks.json": {
+      "get": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationJwksEndpoint",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationLoginEndpoint",
+        "requestBody": {
+          "x-name": "LoginRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsAuthenticationLoginRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationLogoutEndpoint",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationMeEndpoint",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/auth/me/permissions": {
+      "get": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationMyPermissionsEndpoint",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/auth/me/sites": {
+      "get": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationMySitesEndpoint",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "JWTBearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/auth/refresh": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationRefreshEndpoint",
+        "requestBody": {
+          "x-name": "RefreshRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsAuthenticationRefreshRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    },
+    "/api/auth/reset-password": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "CFSAdminApiEndpointsAuthenticationResetPasswordEndpoint",
+        "requestBody": {
+          "x-name": "ResetPasswordRequest",
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CFSAdminApiEndpointsAuthenticationResetPasswordRequest"
+              }
+            }
+          },
+          "required": true,
+          "x-position": 1
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CFSAdminApiEndpointsUsersAssignClientRoleRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ClientId": {
+            "type": "string",
+            "format": "guid"
+          },
+          "Role": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsUsersAssignSiteRoleRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "SiteId": {
+            "type": "string",
+            "format": "guid"
+          },
+          "Role": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsUsersCreateUserRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "UserName": {
+            "type": "string"
+          },
+          "Password": {
+            "type": "string"
+          },
+          "FirstName": {
+            "type": "string"
+          },
+          "LastName": {
+            "type": "string"
+          },
+          "Email": {
+            "type": "string",
+            "nullable": true
+          },
+          "MobileNumber": {
+            "type": "string",
+            "nullable": true
+          },
+          "ClientId": {
+            "type": "string",
+            "format": "guid",
+            "nullable": true
+          },
+          "SiteId": {
+            "type": "string",
+            "format": "guid",
+            "nullable": true
+          },
+          "Role": {
+            "type": "string",
+            "nullable": true
+          },
+          "SiteRoles": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/CFSAdminApiEndpointsUsersUserSiteAssignmentRequest"
+            }
+          }
+        }
+      },
+      "CFSAdminApiEndpointsUsersUserSiteAssignmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "SiteId": {
+            "type": "string",
+            "format": "guid"
+          },
+          "Role": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsUsersGetUserRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsUsersGetUsersRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsUsersRemoveClientRoleRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsUsersRemoveSiteRoleRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsUsersSetSystemAdminRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsUsersSetUserActiveRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsUsersUpdateUserRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "FirstName": {
+            "type": "string"
+          },
+          "LastName": {
+            "type": "string"
+          },
+          "Email": {
+            "type": "string",
+            "nullable": true
+          },
+          "MobileNumber": {
+            "type": "string",
+            "nullable": true
+          },
+          "SiteRoles": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/CFSAdminApiEndpointsUsersUserSiteAssignmentRequest"
+            }
+          }
+        }
+      },
+      "CFSAdminApiEndpointsSitesCreateSiteRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ClientId": {
+            "type": "string",
+            "format": "guid"
+          },
+          "Name": {
+            "type": "string"
+          },
+          "Code": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsSitesGetSitesRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsSitesSetSiteActiveRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsSitesUpdateSiteRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ClientId": {
+            "type": "string",
+            "format": "guid"
+          },
+          "Name": {
+            "type": "string"
+          },
+          "Code": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsClientsCreateClientRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "Name": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsClientsSetClientActiveRequest": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CFSAdminApiEndpointsClientsUpdateClientRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "Name": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsAuthenticationChangePasswordRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "CurrentPassword": {
+            "type": "string"
+          },
+          "NewPassword": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsAuthenticationContextRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ClientId": {
+            "type": "string",
+            "format": "guid"
+          },
+          "SiteId": {
+            "type": "string",
+            "format": "guid",
+            "nullable": true
+          }
+        }
+      },
+      "CFSAdminApiEndpointsAuthenticationForgotPasswordRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "UserNameOrEmail": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsAuthenticationLoginRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "UserName": {
+            "type": "string"
+          },
+          "Password": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsAuthenticationRefreshRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "RefreshToken": {
+            "type": "string"
+          }
+        }
+      },
+      "CFSAdminApiEndpointsAuthenticationResetPasswordRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "Token": {
+            "type": "string"
+          },
+          "NewPassword": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "JWTBearerAuth": {
+        "type": "http",
+        "description": "Enter a JWT token to authorize the requests...",
+        "scheme": "Bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  }
+}

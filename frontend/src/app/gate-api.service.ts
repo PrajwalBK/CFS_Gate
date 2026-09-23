@@ -48,6 +48,16 @@ export interface Metrics { cpu_percent: number; memory_percent: number; gpu_util
 }
 export interface UploadState { busy: boolean; progress: number; message: string; error: boolean; }
 export type PlaybackAction = 'play' | 'pause' | 'restart' | 'restore-camera';
+export interface SystemAlert {
+  id: string;
+  alert_type: string;
+  level: string;
+  title: string;
+  message: string;
+  container_number?: string | null;
+  event_id?: string | null;
+  timestamp: string;
+}
 
 @Injectable({providedIn: 'root'})
 export class GateApi {
@@ -61,6 +71,9 @@ export class GateApi {
   health() { return this.http.get<Health>('/api/health').pipe(catchError((error: HttpErrorResponse) =>
     error.status === 503 && error.error?.database ? of(error.error as Health) : throwError(() => error))); }
   metrics() { return this.http.get<Metrics>('/api/metrics'); }
+  alerts() { return this.http.get<SystemAlert[]>('/api/alerts'); }
+  testBuzzer(pattern: string = 'gate_out') { return this.http.post('/api/alerts/test?pattern=' + encodeURIComponent(pattern), {}); }
+  clearAlerts() { return this.http.post('/api/alerts/clear', {}); }
   events(offset: number, container: string, type: string) {
     let params = new HttpParams().set('limit', 25).set('offset', offset);
     if (container.trim()) params = params.set('container', container.trim().toUpperCase());

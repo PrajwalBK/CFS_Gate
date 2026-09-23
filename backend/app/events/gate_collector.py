@@ -77,8 +77,8 @@ class GateCollector:
         Returns:
             (snapshot, is_ready): The current GateSnapshot and True if ready for scene analysis.
         """
-        container_classes = {'container', 'trailer', 'container_object', 'truck'}
-        text_classes = {'cointainer', 'feet'}
+        container_classes = {'container'}
+        text_classes = {'container_number', 'iso_code'}
 
         container_boxes = []
         text_boxes = []

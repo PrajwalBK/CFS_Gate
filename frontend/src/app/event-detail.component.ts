@@ -46,7 +46,7 @@ import { EventDetail } from './gate-api.service';
                 <div class="twin-box-card">
                   <div class="twin-box-header">
                     <span class="slot-tag front">FRONT CONTAINER (SLOT 1)</span>
-                    <span class="size-pill feet">📏 20 FT {{ item.size_code ? '(' + item.size_code + ')' : '' }}</span>
+                    <span class="size-pill feet">📏 {{ item.container_size || '20 FT' }} {{ item.size_code ? '(' + item.size_code + ')' : '' }}</span>
                   </div>
                   <div class="hero-container-title">
                     <span class="container-badge mono">{{ item.container_number || 'UNCONFIRMED' }}</span>
@@ -57,7 +57,7 @@ import { EventDetail } from './gate-api.service';
                 <div class="twin-box-card">
                   <div class="twin-box-header">
                     <span class="slot-tag rear">REAR CONTAINER (SLOT 2)</span>
-                    <span class="size-pill feet">📏 20 FT {{ item.size_code_2 ? '(' + item.size_code_2 + ')' : '' }}</span>
+                    <span class="size-pill feet">📏 {{ item.container_size_2 || '20 FT' }} {{ item.size_code_2 ? '(' + item.size_code_2 + ')' : '' }}</span>
                   </div>
                   <div class="hero-container-title">
                     <span class="container-badge mono">{{ item.container_number_2 || 'UNCONFIRMED' }}</span>

@@ -95,6 +95,27 @@ def test_real_opencv_recorded_video_eof(settings, camera, tmp_path):
         assert worker.join()
 
 
+def test_real_opencv_recorded_video_looping(settings, camera, tmp_path):
+    import cv2
+    path = str(tmp_path / 'loop.avi')
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'MJPG'), 20, (100, 100))
+    assert writer.isOpened()
+    for _ in range(4):
+        writer.write(np.zeros((100, 100, 3), dtype=np.uint8))
+    writer.release()
+    camera.source_type = 'file'
+    camera.loop_file = True
+    worker = CameraWorker(camera, path, settings, OpenCVStream)
+    worker.start()
+    try:
+        wait_until(lambda: worker.status()['frames_captured'] >= 8)
+        assert worker.status()['status'] == 'ONLINE'
+        assert worker.status()['reconnect_count'] == 0
+    finally:
+        worker.stop()
+        assert worker.join()
+
+
 def test_four_camera_frames_to_database_and_snapshot(settings, repository, snapshots):
     configs = [CameraConfig(id=f'camera-{i}', name=f'View {i}', gate_id=f'lane-{(i-1)//2}', source_env=f'CAMERA_{i}_RTSP', capture_fps=60) for i in range(1, 5)]
     repository.sync_cameras(configs)

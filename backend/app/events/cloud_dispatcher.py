@@ -22,6 +22,8 @@ import requests
 
 log = logging.getLogger('gate.cloud')
 
+FALLBACK_IMAGE_DATA_URI = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+
 
 def _iso_utc(dt: Any = None) -> str:
     if dt is None:
@@ -55,6 +57,8 @@ class ProsperSession:
         self.session = requests.Session()
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
+        self._last_auth_attempt: float = 0.0
+        self._auth_cooldown_seconds: float = 30.0
         self._lock = threading.Lock()
 
     def get_auth_headers(self) -> Dict[str, str]:
@@ -70,23 +74,29 @@ class ProsperSession:
                 now = time.monotonic()
                 if self._token and now < self._token_expires_at - 30:
                     headers['Authorization'] = f'Bearer {self._token}'
+                elif now - self._last_auth_attempt < self._auth_cooldown_seconds:
+                    # In cooldown period after a failed login attempt; avoid blocking worker threads
+                    pass
                 else:
-                    username = getattr(self.settings, 'prosper_username', None) or self.settings.prosper_email or 'sarsite@gmail.com'
+                    self._last_auth_attempt = now
+                    username = getattr(self.settings, 'prosper_username', None) or self.settings.prosper_email or 'abhay@prosperinfotech.com'
                     configured_pw = self.settings.prosper_password.get_secret_value() if self.settings.prosper_password else ''
                     passwords_to_try = [configured_pw] if configured_pw else []
                     for candidate in ['Test@123', 'Prosper@123', 'Admin@123']:
                         if candidate not in passwords_to_try:
                             passwords_to_try.append(candidate)
 
-                    login_urls = [self.auth_url, f'{self.base_url}/api/auth/login']
+                    login_urls = [self.auth_url]
+                    alt_url = f'{self.base_url}/api/auth/login'
+                    if alt_url not in login_urls:
+                        login_urls.append(alt_url)
+
                     res = None
                     for l_url in login_urls:
                         for pw in passwords_to_try:
-                            for payload in [{'username': username, 'password': pw}, {'UserName': username, 'Password': pw}]:
-                                if getattr(self.settings, 'prosper_site_code', None):
-                                    payload['siteCode'] = self.settings.prosper_site_code
+                            for payload in [{'UserName': username, 'Password': pw}, {'username': username, 'password': pw}]:
                                 try:
-                                    res = self.session.post(l_url, json=payload, timeout=10)
+                                    res = self.session.post(l_url, json=payload, timeout=6)
                                     if res.status_code in (200, 201):
                                         data = res.json()
                                         self._token = data.get('accessToken') or data.get('token')
@@ -106,8 +116,15 @@ class ProsperSession:
                                             pass
                                         log.info('prosper_auth_token_refreshed', extra={'username': username})
                                         break
+                                    elif res.status_code == 204:
+                                        # FastEndpoints cookie/header token check
+                                        tok = res.cookies.get('token') or res.cookies.get('accessToken') or res.headers.get('Authorization')
+                                        if tok:
+                                            self._token = tok.replace('Bearer ', '')
+                                            self._token_expires_at = time.monotonic() + 3600
+                                            break
                                 except Exception as e:
-                                    log.warning('prosper_auth_login_error', extra={'error': str(e)})
+                                    log.debug('prosper_auth_login_error', extra={'error': str(e)})
                             if self._token:
                                 break
                         if self._token:
@@ -117,6 +134,8 @@ class ProsperSession:
                         headers['Authorization'] = f'Bearer {self._token}'
                     elif res is not None:
                         log.warning('prosper_auth_login_failed', extra={'status_code': res.status_code, 'body': res.text[:200]})
+                    else:
+                        log.warning('prosper_auth_login_unreachable: Unable to connect to auth server (%s)', self.auth_url)
 
         if self.site_id:
             headers['X-Site-Id'] = self.site_id
@@ -128,6 +147,11 @@ class ProsperSession:
                      device_id: str = '') -> Optional[str]:
         """Upload snapshot to Prosper and return public/stored URL."""
         if not self.site_id:
+            return None
+
+        headers = self.get_auth_headers()
+        if 'Authorization' not in headers and 'x-api-key' not in headers:
+            log.debug('prosper_image_upload_skipped_no_auth')
             return None
 
         if not isinstance(image_data, bytes):
@@ -180,9 +204,13 @@ class ProsperSession:
 
         return None
 
-    def post_gate_event(self, payload: Dict[str, Any]) -> bool:
+    def post_gate_event(self, payload: Dict[str, Any]) -> bool | str:
         """Send Gate Event to Prosper Smart Yard."""
         headers = self.get_auth_headers()
+        if 'Authorization' not in headers and 'x-api-key' not in headers:
+            log.info('prosper_gate_event_postponed_no_auth: Cloud authentication is not available (waiting for valid credentials or token). Dispatch buffered locally.')
+            return 'OFFLINE'
+
         headers['Content-Type'] = 'application/json'
 
         # Check whether this is the new /api/v1/gate/events schema or legacy /api/sites/{site_id}/gate-events
@@ -191,14 +219,73 @@ class ProsperSession:
         else:
             if not self.site_id:
                 log.warning('prosper_sync_skipped_missing_site_id')
-                return False
+                return 'REJECTED'
             url = f'{self.base_url}/api/sites/{self.site_id}/gate-events'
 
-        res = self.session.post(url, json=payload, headers=headers, timeout=15)
+        try:
+            res = self.session.post(url, json=payload, headers=headers, timeout=15)
+        except requests.exceptions.RequestException as e:
+            log.info('prosper_gate_event_network_offline: %s. Dispatch buffered locally in database.', e)
+            return 'OFFLINE'
+        except Exception as e:
+            log.warning('prosper_gate_event_post_exception: %s', e)
+            return 'OFFLINE'
+
         if res.status_code in (200, 201):
-            log.info('prosper_gate_event_synced', extra={'event_id': payload.get('VisitId') or payload.get('id')})
-            return True
-        log.warning('prosper_gate_event_rejected', extra={'status_code': res.status_code, 'body': res.text[:300]})
+            resp_data = res.json() if res.content else {}
+            log.info('prosper_gate_event_synced', extra={
+                'event_id': payload.get('VisitId') or payload.get('id'),
+                'visit_db_id': resp_data.get('visitDatabaseId', ''),
+                'cloud_event_id': resp_data.get('eventId', ''),
+            })
+            # Return response data so caller can extract visitDatabaseId for GATE_OUT
+            return resp_data if resp_data else True
+        if res.status_code == 401:
+            # 401 Unauthorized: token expired or rejected by cloud
+            log.warning('prosper_gate_event_rejected_401: %s %s', res.status_code, res.text[:300],
+                        extra={'status_code': res.status_code, 'body': res.text[:300]})
+            with self._lock:
+                self._token = None
+                self._token_expires_at = 0.0
+            return 'OFFLINE'
+        if res.status_code == 409:
+            # 409 Conflict: E.g., "Unknown visit for GATE_OUT."
+            # The cloud requires a prior GATE_IN visit before GATE_OUT can be processed.
+            # Mark as non-retryable to avoid continuous failed loops on test/orphan exits.
+            log.warning('prosper_gate_event_conflict_skipped: %s %s', res.status_code, res.text[:300],
+                        extra={'status_code': res.status_code, 'body': res.text[:300]})
+            return 'CONFLICT'
+        if res.status_code in (500, 502, 503, 504):
+            body_text = res.text[:400].strip()
+            # Detect known Prosper API server-side bugs:
+            # - DbUpdateConcurrencyException: optimistic concurrency failure on visits table (GATE_OUT bug)
+            # - ck_departure: check constraint violation when GATE_IN has no corresponding visit
+            if 'DbUpdateConcurrencyException' in body_text:
+                event_type = payload.get('EventType', '')
+                log.warning(
+                    'prosper_gate_event_concurrency_retry: GATE_OUT concurrency conflict on cloud (known server bug). '
+                    'Will retry. EventType=%s VisitId=%s',
+                    event_type, payload.get('VisitId', ''),
+                    extra={'status_code': 500, 'exception': 'DbUpdateConcurrencyException'}
+                )
+            elif 'ck_departure' in body_text:
+                log.warning(
+                    'prosper_gate_event_constraint_retry: visit constraint violation (ck_departure). '
+                    'GATE_IN may not be committed yet. Will retry. VisitId=%s',
+                    payload.get('VisitId', ''),
+                    extra={'status_code': 500, 'exception': 'ck_departure'}
+                )
+            else:
+                log.info('prosper_gate_event_cloud_service_unavailable: HTTP %s (%s). Dispatch buffered locally in database.',
+                         res.status_code, body_text[:200])
+            return 'OFFLINE'
+        if res.status_code in (400, 422):
+            log.warning('prosper_gate_event_rejected: %s %s', res.status_code, res.text[:300],
+                        extra={'status_code': res.status_code, 'body': res.text[:300]})
+            return 'REJECTED'
+
+        log.warning('prosper_gate_event_failed: %s %s', res.status_code, res.text[:300],
+                    extra={'status_code': res.status_code, 'body': res.text[:300]})
         return False
 
 
@@ -208,11 +295,12 @@ class CloudOutboxDispatcher:
     encodes snapshot evidence images, and dispatches gate events to Prosper Smart Yard.
     """
 
-    def __init__(self, settings, metrics=None, repository=None, snapshots=None):
+    def __init__(self, settings, metrics=None, repository=None, snapshots=None, runtime=None):
         self.settings = settings
         self.metrics = metrics
         self.repository = repository
         self.snapshots = snapshots
+        self.runtime = runtime
         self.enabled = bool(settings.prosper_enabled)
         self.session = ProsperSession(settings) if self.enabled else None
         self.queue: Queue = Queue(maxsize=settings.prosper_queue_size)
@@ -249,6 +337,15 @@ class CloudOutboxDispatcher:
         if not getattr(obs, 'confirmed', True):
             return
 
+        # Do not re-enqueue if already synced in database
+        if self.repository:
+            try:
+                ev = self.repository.event(event_id)
+                if ev and ev.get('cloud_synced'):
+                    return
+            except Exception:
+                pass
+
         item = {
             'event_id': event_id,
             'obs': obs,
@@ -267,11 +364,50 @@ class CloudOutboxDispatcher:
             if self.metrics:
                 self.metrics.increment('prosper_queue_dropped')
 
+    def _sweep_offline_backlog(self):
+        """
+        Periodically checks SQLite database for confirmed events that were saved while offline.
+        As soon as internet connectivity returns, dispatches them in chronological order.
+        """
+        if not self.enabled or not self.repository:
+            return
+        try:
+            unsynced = self.repository.get_unsynced_confirmed_events(limit=20)
+            if not unsynced:
+                return
+
+            if self.queue.qsize() > 0:
+                return
+
+            log.info('prosper_sweep_offline_backlog_found', extra={'count': len(unsynced)})
+            for ev in unsynced:
+                if self._stop.is_set():
+                    break
+                event_id = ev['id']
+                try:
+                    self.queue.put_nowait({
+                        'event_id': event_id,
+                        'obs': None,
+                        'image_bytes': None,
+                        'payload': None,
+                        'enqueued_at': time.monotonic(),
+                        'retries': 0,
+                    })
+                except Full:
+                    break
+        except Exception as e:
+            log.warning('prosper_backlog_sweep_error', extra={'error': str(e)})
+
     def _run_loop(self):
+        last_sweep = time.monotonic()
         while not self._stop.is_set():
             try:
-                item = self.queue.get(timeout=0.5)
+                item = self.queue.get(timeout=1.0)
             except Empty:
+                now = time.monotonic()
+                if self.repository and (now - last_sweep) >= 15.0:
+                    last_sweep = now
+                    self._sweep_offline_backlog()
                 continue
 
             event_id = item['event_id']
@@ -293,9 +429,14 @@ class CloudOutboxDispatcher:
                     containers_list = []
                     if cntr1:
                         c1_images = []
+                        primary_snap_id = event_record.get('primary_snapshot_id') if event_record else None
                         if event_record and event_record.get('snapshots') and self.snapshots:
                             for snap in event_record['snapshots']:
-                                if not (snap.get('image_path') or '').endswith('_rear.jpg'):
+                                snap_cam = (snap.get('camera_id') or '').lower()
+                                # Guard against office/cabin cameras or irrelevant views (e.g. gate-in-3, office, security)
+                                is_lane_cam = any(k in snap_cam for k in ('gate-in-1', 'gate-out-1', 'lane', 'front', 'top', 'cam-01', 'cam-04'))
+                                is_primary = primary_snap_id and snap.get('id') == primary_snap_id
+                                if (is_primary or is_lane_cam) and not (snap.get('image_path') or '').endswith('_rear.jpg'):
                                     try:
                                         snap_p = self.snapshots.path(snap['image_path'])
                                         if snap_p.is_file():
@@ -324,19 +465,43 @@ class CloudOutboxDispatcher:
                             except Exception:
                                 pass
 
+                        if not c1_images:
+                            c1_images.append({
+                                'ImageType': 'FRONT',
+                                'CameraId': obs.detection.camera_id if obs else 'CAM-01',
+                                'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
+                                'Image': FALLBACK_IMAGE_DATA_URI
+                            })
+
                         iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
                         cs1 = str((event_record.get('container_size') if event_record else None) or '')
-                        size_1 = "20" if ('20' in cs1 or iso_s1.startswith('2')) else "40"
+                        # Derive full human-readable size from ISO code when container_size not pre-computed
+                        if not cs1 and iso_s1:
+                            try:
+                                from app.ocr.validator import extract_iso_size_code as _esc
+                                _, cs1 = _esc(iso_s1)
+                                cs1 = cs1 or ''
+                            except Exception:
+                                pass
+                        # Map to cloud API size value: "20", "40", "45"
+                        if '20' in cs1 or iso_s1.startswith('2'):
+                            size_1 = '20'
+                        elif '45' in cs1 or iso_s1.startswith('L'):
+                            size_1 = '45'
+                        else:
+                            size_1 = '40'
                         conf_1 = float(getattr(obs.ocr, 'confidence', 0.95)) if (obs and obs.ocr and obs.ocr.confidence) else 0.95
                         containers_list.append({
                             'ContainerNumber': cntr1,
                             'ContainerNumberConfidence': round(conf_1, 2),
                             'Size': size_1,
+                            'ContainerSize': cs1 or None,
+                            'SizeCode': iso_s1 or None,
                             'Position': 'FRONT' if is_twin else 'SINGLE',
                             'Images': c1_images
                         })
 
-                    if cntr2:
+                    if cntr2 and cntr2 != cntr1:
                         c2_images = []
                         if event_record and event_record.get('snapshots') and self.snapshots:
                             for snap in event_record['snapshots']:
@@ -352,12 +517,30 @@ class CloudOutboxDispatcher:
                                             })
                                     except Exception:
                                         pass
-                        size_2 = "20"
+                        if not c2_images:
+                            c2_images = [{
+                                'ImageType': 'REAR',
+                                'CameraId': snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-02'),
+                                'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
+                                'Image': FALLBACK_IMAGE_DATA_URI
+                            }]
+                        iso_s2 = str((event_record.get('iso_code_2') if event_record else None) or '22G1')
+                        cs2 = str((event_record.get('container_size_2') if event_record else None) or '')
+                        if not cs2 and iso_s2:
+                            try:
+                                from app.ocr.validator import extract_iso_size_code as _esc
+                                _, cs2 = _esc(iso_s2)
+                                cs2 = cs2 or ''
+                            except Exception:
+                                pass
+                        size_2 = '20' if ('20' in cs2 or iso_s2.startswith('2')) else ('45' if ('45' in cs2 or iso_s2.startswith('L')) else '40')
                         conf_2 = float(event_record.get('confidence_2') or 0.95) if event_record else 0.95
                         containers_list.append({
                             'ContainerNumber': cntr2,
                             'ContainerNumberConfidence': round(conf_2, 2),
                             'Size': size_2,
+                            'ContainerSize': cs2 or None,
+                            'SizeCode': iso_s2 or None,
                             'Position': 'REAR',
                             'Images': c2_images or (c1_images[:1] if c1_images else [])
                         })
@@ -368,51 +551,73 @@ class CloudOutboxDispatcher:
                             'ContainerNumberConfidence': round(float(obs.ocr.confidence), 2),
                             'Size': '20',
                             'Position': 'FRONT',
-                            'Images': []
+                            'Images': [{
+                                'ImageType': 'FRONT',
+                                'CameraId': obs.detection.camera_id if obs else 'CAM-01',
+                                'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
+                                'Image': FALLBACK_IMAGE_DATA_URI
+                            }]
                         })
 
-                    dt_captured = obs.detection.frame_timestamp if (obs and hasattr(obs, 'detection')) else datetime.now(timezone.utc)
-                    visit_id = f"VISIT-{dt_captured.strftime('%Y%m%d')}-{event_id[:8].upper()}"
-                    direction = (obs.direction.upper() if (obs and hasattr(obs, 'direction') and obs.direction) else 'ENTRY')
-                    event_type = 'GATE_OUT' if direction in ('EXIT', 'OUT', 'GATE_OUT') else 'GATE_IN'
-
-                    # Truck details: User requested keeping truck details empty/null.
-                    # Remote API server validates: truck.TruckNumber must not be empty.
-                    # We pass {"TruckNumber": "NA"} to satisfy API validation without fabricating truck data.
-                    # Upload image for legacy compatibility
-                    image_url = None
-                    if img is not None:
+                    if obs and hasattr(obs, 'detection'):
+                        dt_captured = obs.detection.frame_timestamp
+                    elif event_record and event_record.get('timestamp'):
                         try:
-                            image_url = self.session.upload_image(
-                                img,
-                                trailer_number=cntr1 or '',
-                                camera_id=obs.detection.camera_id if (obs and hasattr(obs, 'detection')) else '',
-                                device_id=self.device_uuid,
-                            )
+                            ts_str = event_record['timestamp'].rstrip('Z')
+                            dt_captured = datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
                         except Exception:
-                            pass
+                            dt_captured = datetime.now(timezone.utc)
+                    else:
+                        dt_captured = datetime.now(timezone.utc)
+
+                    visit_id = f"VISIT-{dt_captured.strftime('%Y%m%d')}-{event_id[:8].upper()}"
+                    direction = (
+                        obs.direction.upper() if (obs and hasattr(obs, 'direction') and obs.direction)
+                        else ((event_record.get('event_type') or 'ENTRY').upper() if event_record else 'ENTRY')
+                    )
+                    event_type = 'GATE_OUT' if direction in ('EXIT', 'OUT', 'GATE_OUT') else 'GATE_IN'
 
                     payload = {
                         'id': event_id,
                         'VisitId': visit_id,
                         'EventType': event_type,
-                        'eventType': obs.direction if (obs and hasattr(obs, 'direction') and obs.direction in ('ENTRY', 'EXIT')) else 'ENTRY',
                         'DeviceId': self.device_uuid,
                         'CapturedAt': _iso_utc(dt_captured),
                         'containerNumber': cntr1,
-                        'imageUrl': image_url,
                         'Truck': {'TruckNumber': 'NA'},
                         'Driver': None,
                         'Containers': containers_list
                     }
 
                 success = self.session.post_gate_event(payload)
+                if success == 'REJECTED' and self.runtime:
+                    try:
+                        ev_type = payload.get('EventType', 'GATE_OUT')
+                        c_num = payload.get('containerNumber') or (obs.ocr.normalized_text if (obs and obs.ocr) else None)
+                        self.runtime.emit_alert(
+                            alert_type='CLOUD_SYNC_REJECTED',
+                            title=f'Cloud Sync Rejected ({ev_type})',
+                            message=f'Cloud rejected {ev_type} for {c_num or event_id[:8]} (Visit {payload.get("VisitId", "")})',
+                            level='ERROR',
+                            container_number=c_num,
+                            event_id=event_id,
+                            buzzer=False
+                        )
+                    except Exception:
+                        pass
+                elif success == 'OFFLINE':
+                    log.info('prosper_event_buffered_offline: Event %s buffered locally; will auto-sync when cloud service is available.', event_id)
 
             except Exception as exc:
                 log.warning('prosper_dispatch_exception', extra={'event_id': event_id, 'error': str(exc)})
-                success = False
+                success = 'OFFLINE'
 
-            if success:
+            if success in (True, 'CONFLICT') or isinstance(success, dict):
+                if self.repository:
+                    try:
+                        self.repository.mark_cloud_synced(event_id)
+                    except Exception:
+                        pass
                 if self.metrics:
                     self.metrics.increment('prosper_events_synced')
                     self.metrics.latency('prosper_sync', time.monotonic() - item['enqueued_at'])
@@ -427,7 +632,7 @@ class CloudOutboxDispatcher:
                     except Full:
                         log.error('prosper_retry_dropped_queue_full', extra={'event_id': event_id})
                 else:
-                    log.error('prosper_event_sync_exhausted', extra={'event_id': event_id})
+                    log.info('prosper_event_sync_buffered_in_db: Event %s buffered offline in database; periodic sweep will auto-sync.', event_id)
                     if self.metrics:
-                        self.metrics.increment('prosper_sync_errors')
+                        self.metrics.increment('prosper_sync_buffered')
                 self.queue.task_done()

@@ -4,7 +4,7 @@ import { HttpErrorResponse, HttpEventType } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { catchError, exhaustMap, forkJoin, merge, of, Subject, timer, timeout } from 'rxjs';
-import { GateApi, Camera, CameraSource, EventPage, EventDetail, Health, Metrics, UploadState, PlaybackAction } from './gate-api.service';
+import { GateApi, Camera, CameraSource, EventPage, EventDetail, Health, Metrics, UploadState, PlaybackAction, SystemAlert } from './gate-api.service';
 import { CameraGridComponent } from './camera-grid.component';
 import { EventTableComponent } from './event-table.component';
 import { EventDetailComponent } from './event-detail.component';
@@ -35,6 +35,11 @@ export class AppComponent {
   uploads = signal<Partial<Record<string, UploadState>>>({});
   controlsBusy = signal<Record<string, boolean>>({});
   loading = signal(true);
+  buzzerEnabled = signal(true);
+  alerts = signal<SystemAlert[]>([]);
+  activeAlert = computed(() => this.alerts()[0] || null);
+  private lastAlertId = '';
+  private audioCtx: any = null;
   videoCount = computed(() => this.cameras().filter(c => c.source_type === 'file').length);
   playingCount = computed(() => this.cameras().filter(c => c.playback_status === 'PLAYING').length);
   containerFilter = '';
@@ -47,14 +52,31 @@ export class AppComponent {
 
     // SQL failures must not hide camera slots, upload controls or machine health.
     merge(timer(0, 2500), this.refresh).pipe(
-      exhaustMap(() => forkJoin({cameras: this.api.cameras(), sources: this.api.cameraSources(), discovery: this.api.discoveryStatus(), health: this.api.health(), metrics: this.api.metrics(),
-        events: this.api.events(this.offset, this.containerFilter, this.typeFilter).pipe(catchError(() => of(null)))}).pipe(timeout(15000), catchError(() => of(null)))),
+      exhaustMap(() => forkJoin({
+        cameras: this.api.cameras(),
+        sources: this.api.cameraSources(),
+        discovery: this.api.discoveryStatus(),
+        health: this.api.health(),
+        metrics: this.api.metrics(),
+        alerts: this.api.alerts().pipe(catchError(() => of([]))),
+        events: this.api.events(this.offset, this.containerFilter, this.typeFilter).pipe(catchError(() => of(null)))
+      }).pipe(timeout(15000), catchError(() => of(null)))),
       takeUntilDestroyed(this.destroy)
     ).subscribe(data => {
       this.loading.set(false);
       if (!data) { this.error.set('Backend disconnected. Start the Gate service to upload and play videos.'); return; }
       this.error.set(''); this.cameras.set(data.cameras); this.cameraSources.set(data.sources); this.health.set(data.health); this.metrics.set(data.metrics);
       this.discovery.set(data.discovery);
+      if (data.alerts && data.alerts.length > 0) {
+        this.alerts.set(data.alerts);
+        const top = data.alerts[0];
+        if (top.id !== this.lastAlertId) {
+          this.lastAlertId = top.id;
+          this.playBuzzerSound();
+        }
+      } else {
+        this.alerts.set([]);
+      }
       if (data.events) { this.page.set(data.events); this.eventsError.set(''); }
       else this.eventsError.set('Event storage is unavailable. You can still upload and preview videos.');
       this.lastUpdated.set(new Date());
@@ -175,6 +197,63 @@ export class AppComponent {
       this.notice.set('Loading the configured detection and OCR models…'); this.refresh.next();
     }, error: (error: HttpErrorResponse) => this.notice.set(this.errorMessage(error, 'AI processing could not start.'))});
   }
+
+  playBuzzerSound() {
+    if (!this.buzzerEnabled()) return;
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!this.audioCtx) {
+        this.audioCtx = new AudioCtx();
+      }
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume();
+      }
+      const t = this.audioCtx.currentTime;
+
+      // Pulse 1: Industrial alarm buzz
+      const osc1 = this.audioCtx.createOscillator();
+      const gain1 = this.audioCtx.createGain();
+      osc1.type = 'sawtooth';
+      osc1.frequency.setValueAtTime(850, t);
+      osc1.frequency.exponentialRampToValueAtTime(580, t + 0.22);
+      gain1.gain.setValueAtTime(0.35, t);
+      gain1.gain.exponentialRampToValueAtTime(0.01, t + 0.22);
+      osc1.connect(gain1);
+      gain1.connect(this.audioCtx.destination);
+      osc1.start(t);
+      osc1.stop(t + 0.23);
+
+      // Pulse 2: Higher pitch warning buzz
+      const osc2 = this.audioCtx.createOscillator();
+      const gain2 = this.audioCtx.createGain();
+      osc2.type = 'sawtooth';
+      osc2.frequency.setValueAtTime(1050, t + 0.28);
+      osc2.frequency.exponentialRampToValueAtTime(680, t + 0.52);
+      gain2.gain.setValueAtTime(0.38, t + 0.28);
+      gain2.gain.exponentialRampToValueAtTime(0.01, t + 0.52);
+      osc2.connect(gain2);
+      gain2.connect(this.audioCtx.destination);
+      osc2.start(t + 0.28);
+      osc2.stop(t + 0.53);
+    } catch {
+      // Browser audio autoplay policy
+    }
+  }
+
+  testBuzzer() {
+    this.playBuzzerSound();
+    this.api.testBuzzer('gate_out').pipe(takeUntilDestroyed(this.destroy)).subscribe();
+    this.notice.set('Audible buzzer sound triggered (Browser & Host System).');
+  }
+
+  dismissAlert(id?: string) {
+    this.api.clearAlerts().pipe(takeUntilDestroyed(this.destroy)).subscribe(() => {
+      this.alerts.set([]);
+      this.notice.set('Alert dismissed.');
+    });
+  }
+
   private setUpload(id: string, state: UploadState) { this.uploads.update(value => ({...value, [id]: state})); }
   private errorMessage(error: HttpErrorResponse, fallback: string) { return typeof error.error?.detail === 'string' ? error.error.detail : fallback; }
 }

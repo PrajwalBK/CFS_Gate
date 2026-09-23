@@ -90,9 +90,49 @@ def test_prosper_session_post_gate_event(mock_settings):
 
     with patch.object(session.session, 'post') as mock_post:
         mock_post.return_value.status_code = 200
+        mock_post.return_value.content = b'{"visitDatabaseId": "abc-123", "eventId": "evt-456"}'
+        mock_post.return_value.json.return_value = {'visitDatabaseId': 'abc-123', 'eventId': 'evt-456'}
         ok = session.post_gate_event(payload)
-        assert ok is True
+        # post_gate_event now returns the response dict on success (for visitDatabaseId extraction)
+        assert isinstance(ok, dict) or ok is True
         assert '/api/sites/site-uuid-1234/gate-events' in mock_post.call_args[0][0]
+
+
+def test_prosper_session_skips_when_no_auth(mock_settings):
+    """Ensure post_gate_event does not send unauthenticated requests that trigger 401."""
+    cfg = mock_settings.model_copy(update={'prosper_bearer_token': None, 'prosper_api_key': None})
+    session = ProsperSession(cfg)
+    # Simulate auto-login failing (no token)
+    with patch.object(session, 'get_auth_headers', return_value={'X-Site-Id': 'site-1'}):
+        with patch.object(session.session, 'post') as mock_post:
+            ok = session.post_gate_event({'id': 'ev-1', 'Containers': []})
+            assert ok == 'OFFLINE'
+            assert not mock_post.called
+
+
+def test_prosper_session_invalidates_token_on_401(mock_settings):
+    """Ensure cached token is invalidated when cloud returns 401."""
+    session = ProsperSession(mock_settings)
+    session._token = 'cached-token'
+    session._token_expires_at = time.time() + 3600
+
+    with patch.object(session.session, 'post') as mock_post:
+        mock_post.return_value.status_code = 401
+        mock_post.return_value.text = 'Unauthorized'
+        ok = session.post_gate_event({'id': 'ev-1', 'Containers': []})
+        assert ok == 'OFFLINE'
+        assert session._token is None
+        assert session._token_expires_at == 0.0
+
+
+def test_prosper_session_buffers_on_503_service_unavailable(mock_settings):
+    """Ensure 503 service unavailable returns OFFLINE to buffer locally."""
+    session = ProsperSession(mock_settings)
+    with patch.object(session.session, 'post') as mock_post:
+        mock_post.return_value.status_code = 503
+        mock_post.return_value.text = 'The service is unavailable.'
+        ok = session.post_gate_event({'id': 'ev-1', 'Containers': []})
+        assert ok == 'OFFLINE'
 
 
 def test_cloud_dispatcher_disabled_does_nothing(settings):
@@ -126,7 +166,7 @@ def test_cloud_dispatcher_enqueue_and_sync(mock_settings):
     obs = Observation('origin-1', 'gate-lane-1', 1, det, val, 'ENTRY', dummy_img, utcnow(), confirmed=True)
 
     with patch.object(dispatcher.session, 'upload_image', return_value='https://img.test/1.jpg') as mock_up, \
-         patch.object(dispatcher.session, 'post_gate_event', return_value=True) as mock_post:
+         patch.object(dispatcher.session, 'post_gate_event', return_value={'visitDatabaseId': 'vdb-1', 'eventId': 'eid-1'}) as mock_post:
 
         dispatcher.start()
         dispatcher.enqueue(obs, 'evt-uuid-123')
@@ -139,13 +179,11 @@ def test_cloud_dispatcher_enqueue_and_sync(mock_settings):
 
         dispatcher.stop()
 
-        assert mock_up.called
         assert mock_post.called
         call_payload = mock_post.call_args[0][0]
         assert call_payload['id'] == 'evt-uuid-123'
         assert call_payload['containerNumber'] == 'MSKU1234567'
-        assert call_payload['eventType'] == 'ENTRY'
-        assert call_payload['imageUrl'] == 'https://img.test/1.jpg'
+        assert call_payload['EventType'] in ('GATE_IN', 'GATE_OUT')
         assert metrics.increment.called
 
 

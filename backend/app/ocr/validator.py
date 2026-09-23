@@ -156,12 +156,6 @@ class ContainerValidator:
         candidates = {normalize(m.group(1)) for m in CANDIDATE.finditer(raw.upper())}
         if len(candidates) > 1:
             return Validation(raw, '', read.confidence, False, False, 'AMBIGUOUS')
-        serial_match = re.search(r'(216671|654602|509070)', normalize(raw.upper()))
-        if serial_match:
-            ser = serial_match.group(1)
-            bic = 'WHSU' if ser == '216671' else ('GXYU' if ser == '509070' else 'MSCU')
-            prefix = f"{bic}{ser}"
-            normalized = prefix + str(check_digit(prefix))
         elif candidates:
             normalized = next(iter(candidates))
         else:
@@ -199,14 +193,6 @@ class ContainerValidator:
                                 brand_found = True
                                 break
                     if not brand_found:
-                        serial_match = re.search(r'(?<![0-9])(216671|654602|509070)(?![0-9])', raw)
-                        if serial_match:
-                            ser = serial_match.group(1)
-                            bic = 'WHSU' if ser == '216671' else ('GXYU' if ser == '509070' else 'MSCU')
-                            prefix = f"{bic}{ser}"
-                            normalized = prefix + str(check_digit(prefix))
-                            brand_found = True
-                    if not brand_found:
                         # Check if this reading is an ISO size/type code (feet marking, e.g. 45G1, 22G1)
                         size_match = SIZE_CODE_PATTERN.search(raw)
                         if size_match:
@@ -235,6 +221,10 @@ class ContainerValidator:
                     if (expected_digit, calc_digit) in CHECK_DIGIT_CONFUSIONS:
                         normalized = normalized[:10] + str(calc_digit)
                         valid_digit = True
+
+        # Reject known hallucinations from old prompt examples
+        if normalized in ('TIIU5077669', 'MSCU6546021'):
+            return Validation(raw, '', 0.0, False, False, 'PROMPT_LEAK_DISCARDED')
 
         status = 'VALID' if valid_digit else 'INVALID_CHECK_DIGIT' if valid_format else 'INVALID_FORMAT'
         iso_code, human_size = extract_iso_size_code(raw)

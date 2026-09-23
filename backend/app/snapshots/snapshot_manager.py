@@ -45,10 +45,7 @@ class SnapshotManager:
             except Exception:
                 pass
 
-        img = image.copy()
-        label = f'{camera_id}' + (f' | {direction}' if direction else '') + (f' | {text}' if text else '')
-        cv2.putText(img, label, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, .75, (40, 190, 80), 2)
-        ok, encoded = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 90])
         if not ok:
             raise OSError('Snapshot encoding failed')
 
@@ -106,30 +103,9 @@ class SnapshotManager:
         container_num = observation.ocr.normalized_text if (observation.ocr and observation.ocr.normalized_text) else ""
         box_color = (0, 200, 255) if is_rear else (40, 190, 80)
 
-        # 1. Draw extra detections on this frame (such as Feet)
-        if getattr(observation, 'all_detections', None):
-            for d in observation.all_detections:
-                if d.class_name != observation.detection.class_name:
-                    fx1, fy1, fx2, fy2 = map(int, d.bbox)
-                    cv2.rectangle(image, (fx1, fy1), (fx2, fy2), (0, 215, 255), 2)
-                    flabel = f'{d.class_name.upper()} ({int(d.confidence * 100)}%)'
-                    cv2.putText(image, flabel, (max(5, fx1), max(20, fy1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, .55, (0, 215, 255), 2)
-
-        # 2. Draw primary container detection cleanly
-        x1, y1, x2, y2 = map(int, observation.detection.bbox)
-        cv2.rectangle(image, (x1, y1), (x2, y2), box_color, 2)
-        label = f"{observation.detection.camera_id} | {slot_name}" + (f" | {container_num}" if container_num else "")
-        # Black outline + white text for high contrast without blocking the image
-        text_y = max(24, y1 - 8)
-        cv2.putText(image, label, (max(5, x1), text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3)
-        cv2.putText(image, label, (max(5, x1), text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-
-        # 3. Top-left unobtrusive watermark badge
-        top_label = f"PROOF: {slot_name}" + (f" - {container_num}" if container_num else "")
-        cv2.putText(image, top_label, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-        cv2.putText(image, top_label, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, box_color, 2)
-
-        ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        # Save clean raw camera photo without drawing boxes over text
+        # (Overlays over the numbers obscure human verification on the portal)
+        ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 92])
         if not ok:
             raise OSError('Snapshot encoding failed')
         is_rear = getattr(observation, 'slot_position', 'FRONT') == 'REAR' or observation.origin_key.endswith(':rear')

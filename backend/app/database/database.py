@@ -51,6 +51,12 @@ class Database:
                     conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN iso_code_1 VARCHAR(4)')
                 if 'iso_code_2' not in cols:
                     conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN iso_code_2 VARCHAR(4)')
+                if 'cloud_synced' not in cols:
+                    conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_synced BOOLEAN DEFAULT 0')
+                if 'cloud_synced_at' not in cols:
+                    conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_synced_at DATETIME')
+                if 'cloud_event_id' not in cols:
+                    conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_event_id VARCHAR(64)')
 
     def initialize(self):
         existing = set(inspect(self.engine).get_table_names())
