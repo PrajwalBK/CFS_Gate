@@ -119,11 +119,16 @@ def main():
         containers_payload = []
         if c1:
             c1_images = []
+            used_cam_ids = set()
             for s, p in valid_snaps:
                 if not (s.get('image_path') or '').endswith('_rear.jpg'):
+                    cam = s.get('camera_id', 'gate-in-1')
+                    if cam in used_cam_ids:
+                        cam = f"{cam}-view-{len(used_cam_ids)+1}"
+                    used_cam_ids.add(cam)
                     c1_images.append({
                         'ImageType': 'FRONT',
-                        'CameraId': s.get('camera_id', 'gate-in-1'),
+                        'CameraId': cam,
                         'CapturedAt': iso_utc(s.get('timestamp') or event.get('timestamp')),
                         'Image': f"data:image/jpeg;base64,{base64.b64encode(p.read_bytes()).decode('utf-8')}"
                     })
