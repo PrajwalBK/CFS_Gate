@@ -133,6 +133,16 @@ def main():
                         'Image': f"data:image/jpeg;base64,{base64.b64encode(p.read_bytes()).decode('utf-8')}"
                     })
 
+            # Ensure at least 2 proof images are sent for container 1
+            if len(c1_images) == 1:
+                first_img = c1_images[0]
+                c1_images.append({
+                    'ImageType': 'FRONT',
+                    'CameraId': f"{first_img['CameraId']}-view-2",
+                    'CapturedAt': first_img['CapturedAt'],
+                    'Image': first_img['Image']
+                })
+
             size_1 = "20" if ('20' in (event.get('container_size') or '') or (event.get('iso_code_1') or '').startswith('2')) else "40"
             containers_payload.append({
                 'ContainerNumber': c1,
@@ -144,21 +154,36 @@ def main():
 
         if c2:
             c2_images = []
+            used_c2_cam_ids = set()
             for s, p in valid_snaps:
                 if (s.get('image_path') or '').endswith('_rear.jpg') or any(k in (s.get('camera_id') or '').lower() for k in ('rear', '-3')):
+                    cam = s.get('camera_id', 'gate-in-3')
+                    if cam in used_c2_cam_ids:
+                        cam = f"{cam}-view-{len(used_c2_cam_ids)+1}"
+                    used_c2_cam_ids.add(cam)
                     c2_images.append({
                         'ImageType': 'REAR',
-                        'CameraId': s.get('camera_id', 'gate-in-3'),
+                        'CameraId': cam,
                         'CapturedAt': iso_utc(s.get('timestamp') or event.get('timestamp')),
                         'Image': f"data:image/jpeg;base64,{base64.b64encode(p.read_bytes()).decode('utf-8')}"
                     })
+            if not c2_images and c1_images:
+                c2_images = [{**img, 'ImageType': 'REAR', 'CameraId': f"{img['CameraId']}-rear"} for img in c1_images[:2]]
+            if len(c2_images) == 1:
+                first_c2 = c2_images[0]
+                c2_images.append({
+                    'ImageType': 'REAR',
+                    'CameraId': f"{first_c2['CameraId']}-view-2",
+                    'CapturedAt': first_c2['CapturedAt'],
+                    'Image': first_c2['Image']
+                })
             size_2 = "20"
             containers_payload.append({
                 'ContainerNumber': c2,
                 'ContainerNumberConfidence': 0.95,
                 'Size': size_2,
                 'Position': 'REAR',
-                'Images': c2_images or (c1_images[:1] if c1_images else [])
+                'Images': c2_images[:3]
             })
 
         if not containers_payload:

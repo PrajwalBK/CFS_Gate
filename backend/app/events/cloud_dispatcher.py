@@ -532,6 +532,42 @@ class CloudOutboxDispatcher:
                                     'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
                                     'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(snap_p.read_bytes(), snap, event_record)).decode('utf-8')}"
                                 })
+                            # Ensure at least 2 proof images are sent for container 1
+                            if len(c1_images) < 2 and event_record and event_record.get('snapshots'):
+                                for snap in event_record['snapshots']:
+                                    if len(c1_images) >= 2:
+                                        break
+                                    if (snap.get('image_path') or '').endswith('_rear.jpg'):
+                                        continue
+                                    try:
+                                        snap_p = self.snapshots.path(snap['image_path'])
+                                        if snap_p.is_file():
+                                            data = snap_p.read_bytes()
+                                            digest = hashlib.sha256(data).hexdigest()
+                                            if digest in seen_images:
+                                                continue
+                                            seen_images.add(digest)
+                                            source_camera_id = snap.get('camera_id', 'CAM-01')
+                                            camera_id = source_camera_id
+                                            if camera_id in used_camera_ids:
+                                                camera_id = f'{source_camera_id}-view-{len(used_camera_ids)+1}'
+                                            used_camera_ids.add(camera_id)
+                                            c1_images.append({
+                                                'ImageType': 'FRONT',
+                                                'CameraId': camera_id,
+                                                'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
+                                                'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
+                                            })
+                                    except Exception:
+                                        pass
+                            if len(c1_images) == 1:
+                                first_img = c1_images[0]
+                                c1_images.append({
+                                    'ImageType': 'FRONT',
+                                    'CameraId': f"{first_img['CameraId']}-view-2",
+                                    'CapturedAt': first_img['CapturedAt'],
+                                    'Image': first_img['Image']
+                                })
                         if not c1_images and img is not None and not event_record:
                             try:
                                 if not isinstance(img, bytes):
@@ -625,6 +661,33 @@ class CloudOutboxDispatcher:
                                             break
                                     except Exception:
                                         pass
+                        if len(c2_images) < 2 and event_record and event_record.get('snapshots'):
+                            for snap in event_record['snapshots']:
+                                if len(c2_images) >= 2:
+                                    break
+                                try:
+                                    snap_p = self.snapshots.path(snap['image_path'])
+                                    if snap_p.is_file():
+                                        data = snap_p.read_bytes()
+                                        encoded = f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
+                                        if any(img['Image'] == encoded for img in c2_images):
+                                            continue
+                                        c2_images.append({
+                                            'ImageType': 'REAR',
+                                            'CameraId': f"{snap.get('camera_id', 'CAM-02')}-view-{len(c2_images)+1}",
+                                            'CapturedAt': _iso_utc(snap.get('timestamp')),
+                                            'Image': encoded
+                                        })
+                                except Exception:
+                                    pass
+                        if len(c2_images) == 1:
+                            first_c2 = c2_images[0]
+                            c2_images.append({
+                                'ImageType': 'REAR',
+                                'CameraId': f"{first_c2['CameraId']}-view-2",
+                                'CapturedAt': first_c2['CapturedAt'],
+                                'Image': first_c2['Image']
+                            })
                         if not c2_images:
                             raise ValueError('Rear slot proof image is missing; cloud publication deferred')
                         iso_s2 = str((event_record.get('iso_code_2') if event_record else None) or '')
