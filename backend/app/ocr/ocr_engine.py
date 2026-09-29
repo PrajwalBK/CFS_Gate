@@ -83,6 +83,20 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
             output = list(engine.predict(image))
             payload = output[0].json if output else {}
             text, confidence = _paddle_text(payload)
+            # Handle vertical text crops (e.g. ECMU 5580439 on vertical corner post)
+            if hasattr(image, 'shape') and len(image.shape) >= 2:
+                h, w = image.shape[:2]
+                if h > 1.25 * w or (not text.strip() and h > w):
+                    try:
+                        import cv2
+                        rot_img = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                        rot_out = list(engine.predict(rot_img))
+                        rot_payload = rot_out[0].json if rot_out else {}
+                        rot_text, rot_conf = _paddle_text(rot_payload)
+                        if (not text.strip() and rot_text.strip()) or rot_conf > confidence:
+                            text, confidence = rot_text, rot_conf
+                    except Exception:
+                        pass
             responses.put(('result', request_id, text, confidence, None))
         except BaseException as exc:
             responses.put(('result', request_id, '', 0.0, f'{type(exc).__name__}: {exc}'))

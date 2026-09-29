@@ -60,13 +60,21 @@ class EventManager:
             confirmed = True
         if not confirmed and len(evidence.reads) < self.settings.ocr_max_attempts:
             return None
-        if not confirmed and not any(getattr(r, 'raw_text', None) for r in evidence.reads if r):
-            return None
         if not confirmed:
             # Let the truck complete its entrance before publishing an unconfirmed / NEEDS_REVIEW event!
             is_entrance_done = getattr(job, 'entrance_complete', True) or getattr(job, 'is_stationary', True)
-            if not is_entrance_done:
+            if not is_entrance_done and len(evidence.reads) < self.settings.ocr_max_attempts:
                 return None
+            # If all attempts yielded no readable text, flag for review with an alert rather than silently dropping
+            if not any(getattr(r, 'raw_text', None) for r in evidence.reads if r):
+                from app.domain import Validation
+                validation = Validation(
+                    raw_text='UNREADABLE', normalized_text='', confidence=0.0,
+                    valid_format=False, valid_check_digit=False, validation_status='UNREADABLE'
+                )
+                log.warning('passage_unreadable_flagged_for_review', extra={
+                    'origin': job.origin_key, 'gate_id': job.gate_id, 'track_id': job.track_id
+                })
         selected = max((r for r in good if r.normalized_text == best), key=lambda r: r.confidence) if confirmed else validation
         proof = proof_job or job
         obs = Observation(job.origin_key, job.gate_id, job.track_id, proof.detection, selected,

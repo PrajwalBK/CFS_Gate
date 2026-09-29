@@ -869,6 +869,16 @@ class GateRuntime:
                     if sub_crop.size > 0:
                         sub_r = self.ocr.read(sub_crop)
                         sub_v = self.validator.validate(sub_r)
+                        if not sub_v.valid_check_digit and (sub_crop.shape[0] >= 1.2 * sub_crop.shape[1] or not sub_r.raw_text.strip()):
+                            import cv2
+                            for rot_code in (cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE):
+                                rot_crop = cv2.rotate(sub_crop, rot_code)
+                                rot_r = self.ocr.read(rot_crop)
+                                rot_v = self.validator.validate(rot_r)
+                                if rot_v.valid_check_digit or (not sub_v.valid_check_digit and rot_v.confidence > sub_v.confidence and len(rot_v.normalized_text) >= 4):
+                                    sub_r, sub_v = rot_r, rot_v
+                                    if sub_v.valid_check_digit:
+                                        break
                         if sub_v.valid_check_digit:
                             read = sub_r
                             validation = sub_v
