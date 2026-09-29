@@ -1,7 +1,7 @@
 """Local transactional OCR evidence spool; separate from the event database.
 
 PNG files are flushed and renamed before a metadata-only job is committed.
-Completed evidence is retained until an operator applies a retention policy.
+Completed spool copies are bounded; event snapshots remain in their own store.
 """
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -10,6 +10,7 @@ import json
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import time
 from uuid import uuid4
@@ -115,12 +116,14 @@ class OCRJobStore:
 
     def save(self, job, crop):
         import cv2
-        def encode_img(image):
-            ok, data = cv2.imencode('.png', image, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        def encode_img(image, crop_image=False):
+            extension = '.png' if crop_image else '.jpg'
+            options = [cv2.IMWRITE_PNG_COMPRESSION, 1] if crop_image else [cv2.IMWRITE_JPEG_QUALITY, 88]
+            ok, data = cv2.imencode(extension, image, options)
             if not ok:
                 raise OSError('OCR evidence encoding failed')
             return data.tobytes()
-        crop_data, image_data = encode_img(crop), encode_img(job.frame.image)
+        crop_data, image_data = encode_img(crop, True), encode_img(job.frame.image)
         import math
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         exposure = float(((gray > 10) & (gray < 245)).mean())
@@ -142,6 +145,9 @@ class OCRJobStore:
         metadata = {
             'origin_key': job.origin_key, 'gate_id': job.gate_id, 'track_id': job.track_id,
             'event_id': getattr(job, 'event_id', None),
+            'passage_id': getattr(job, 'passage_id', None),
+            'region_id': getattr(job, 'region_id', None),
+            'passage_metadata': getattr(job, 'passage_metadata', {}),
             'proof_quality': quality,
             'direction': job.direction, 'role': job.role, 'started_at': job.started_at.isoformat(),
             'slot_position': getattr(job, 'slot_position', 'FRONT'),
@@ -154,24 +160,16 @@ class OCRJobStore:
                       'sequence': job.frame.sequence, 'source_id': job.frame.source_id},
             'companion_images': companion_paths}
         encoded = json.dumps(metadata, default=lambda value: value.isoformat())
+        payload_bytes = len(crop_data) + len(image_data) + len(encoded.encode()) + companion_bytes
+        self._prune_completed(payload_bytes, protected_origins=(job.origin_key,))
+        if payload_bytes > self.max_bytes or shutil.disk_usage(self.root).free < payload_bytes + 64 * 1024 * 1024:
+            raise OSError('OCR spool lacks free disk space')
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute('SELECT id FROM jobs WHERE origin=? AND sequence=?',
                                   (job.origin_key, job.frame.sequence)).fetchone()
             if existing:
                 return existing['id']
-            size = db.execute('SELECT COALESCE(SUM(payload_bytes),0) FROM jobs').fetchone()[0]
-            payload_bytes = len(crop_data) + len(image_data) + len(encoded.encode()) + companion_bytes
-            if size + payload_bytes > self.max_bytes:
-                # Spool capacity reached: purge oldest processed (DONE) jobs to make room for active jobs
-                old_done = db.execute("SELECT id, payload_bytes FROM jobs WHERE state='DONE' ORDER BY id ASC LIMIT 200").fetchall()
-                if old_done:
-                    del_ids = [r['id'] for r in old_done]
-                    db.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?' for _ in del_ids)})", del_ids)
-                else:
-                    # If still full and no DONE jobs to purge, prune oldest 50 jobs
-                    db.execute("DELETE FROM jobs WHERE id IN (SELECT id FROM jobs ORDER BY id ASC LIMIT 50)")
-
             paths = self._save_images(job.origin_key, job.frame.sequence, crop_data, image_data, folder=folder)
             return db.execute('INSERT INTO jobs(origin,sequence,metadata,crop,image,payload_bytes) VALUES(?,?,?,?,?,?)',
                               (job.origin_key, job.frame.sequence, encoded, *paths, payload_bytes)).lastrowid
@@ -181,6 +179,21 @@ class OCRJobStore:
             row = db.execute("SELECT id FROM jobs WHERE state='PENDING' AND retry_at<=? ORDER BY id DESC LIMIT 1",
                              (time.time(),)).fetchone()
             return row['id'] if row else None
+
+    def passage_jobs(self):
+        with self.connection() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT id,state,metadata,event_id FROM jobs WHERE metadata LIKE '%\"passage_id\": \"%' ORDER BY id")]
+
+    def link_passage(self, passage_id, event_id):
+        with self.connection() as db:
+            db.execute('UPDATE jobs SET event_id=? WHERE origin LIKE ?',
+                       (event_id, f'passage:{passage_id}:%'))
+
+    def passage_pending(self, passage_id):
+        with self.connection() as db:
+            return db.execute("SELECT COUNT(*) FROM jobs WHERE origin LIKE ? AND state='PENDING'",
+                              (f'passage:{passage_id}:%',)).fetchone()[0]
 
     def load(self, job_id):
         import cv2
@@ -211,6 +224,8 @@ class OCRJobStore:
                      tuple(detection(d) for d in data['all_detections']), data['role'],
                      companion_frames=comp_frames, slot_position=data.get('slot_position', 'FRONT'),
                      event_id=data.get('event_id'),
+                     passage_id=data.get('passage_id'), region_id=data.get('region_id'),
+                     passage_metadata=data.get('passage_metadata', {}),
                      is_stationary=data.get('is_stationary', True),
                      entrance_complete=data.get('entrance_complete', True),
                      is_twin=data.get('is_twin', False))
@@ -262,9 +277,38 @@ class OCRJobStore:
                        (event_id, time.time(), origin))
 
     def clean_completed(self, max_age_seconds=10, protected_origins=()):
-        # User requirement: Keep every process completed screenshot/snapshot and upload on local disk.
-        # Do not delete or unlink detection images/crops after processing.
-        pass
+        self._prune_completed(0, protected_origins)
+
+    def _prune_completed(self, incoming_bytes, protected_origins=()):
+        """Remove oldest completed spool copies only when the size/free-space limit requires it."""
+        with self.connection() as db:
+            total = db.execute('SELECT COALESCE(SUM(payload_bytes),0) FROM jobs').fetchone()[0]
+            free = shutil.disk_usage(self.root).free
+            if total + incoming_bytes <= self.max_bytes and free >= incoming_bytes + 128 * 1024 * 1024:
+                return
+            rows = db.execute("SELECT id,origin,crop,image,metadata,payload_bytes FROM jobs WHERE state='DONE' ORDER BY id").fetchall()
+            protected = set(protected_origins)
+            for row in sorted(rows, key=lambda r: (r['origin'] in protected, r['id'])):
+                if total + incoming_bytes <= self.max_bytes and free >= incoming_bytes + 128 * 1024 * 1024:
+                    break
+                db.execute('DELETE FROM jobs WHERE id=? AND state=?', (row['id'], 'DONE'))
+                relatives = [row['crop'], row['image']]
+                try:
+                    relatives += list(json.loads(row['metadata']).get('companion_images', {}).values())
+                except (ValueError, TypeError):
+                    pass
+                for relative in relatives:
+                    path = self.image_path(relative)
+                    size = path.stat().st_size if path.exists() else 0
+                    path.unlink(missing_ok=True)
+                    free += size
+                total -= row['payload_bytes']
+                parent = self.image_path(row['crop']).parent
+                if parent != self.image_root:
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        pass
 
     def retry(self, job_id, error_type):
         with self.connection() as db:

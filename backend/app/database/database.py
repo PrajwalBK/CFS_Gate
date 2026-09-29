@@ -43,6 +43,8 @@ class Database:
             insp = inspect(conn)
             if 'gate_events' in insp.get_table_names():
                 cols = {c['name'] for c in insp.get_columns('gate_events')}
+                if 'lane_id' not in cols:
+                    conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN lane_id VARCHAR(32)')
                 if 'is_twin' not in cols:
                     conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN is_twin BOOLEAN DEFAULT 0')
                 if 'container_number_2' not in cols:

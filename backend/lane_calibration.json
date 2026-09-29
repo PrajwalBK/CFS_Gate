@@ -1,0 +1,55 @@
+{
+  "gate-in-1": {
+    "lanes": [],
+    "occupancy_roi": [
+      0.37568679732640503,
+      0.06889210185318641,
+      1.0,
+      1.0
+    ],
+    "entry_line": 0.1,
+    "exit_line": 0.95,
+    "gate_exit_axis": null,
+    "gate_exit_positive": true,
+    "version": 1
+  },
+  "gate-in-2": {
+    "occupancy_roi": [
+      0.001059281102242107,
+      0.3490864696010126,
+      0.8838078775157426,
+      0.9850348810145984
+    ],
+    "entry_line": 0.1,
+    "exit_line": 0.95,
+    "gate_exit_axis": null,
+    "gate_exit_positive": true,
+    "version": 1
+  },
+  "gate-in-3": {
+    "occupancy_roi": [
+      0.0,
+      0.2583540602947172,
+      0.7258651394870826,
+      0.9507172308758071
+    ],
+    "entry_line": 0.1,
+    "exit_line": 0.95,
+    "gate_exit_axis": null,
+    "gate_exit_positive": true,
+    "version": 1
+  },
+  "gate-out-2": {
+    "occupancy_roi": [
+      0.0,
+      0.0,
+      0.6241759694370401,
+      1.0
+    ],
+    "entry_line": 0.1,
+    "exit_line": 0.95,
+    "gate_exit_axis": null,
+    "gate_exit_positive": true,
+    "version": 1
+  }
+}

@@ -21,6 +21,7 @@ def health(request: Request):
         ready = ready and runtime.model_status['detector'] == 'READY' and runtime.model_status['ocr'] == 'READY'
         if active:
             ready = ready and all(c['status'] == 'ONLINE' or c['playback_status'] in ('READY', 'COMPLETED', 'PAUSED') for c in active)
+    server_alive = database == 'READY' and not request.app.state.startup_error
     return JSONResponse({'status': 'READY' if ready else 'DEGRADED', 'database': database,
                          'pipeline_enabled': runtime.settings.pipeline_enabled,
                          'site': None, 'admin': None,
@@ -29,7 +30,7 @@ def health(request: Request):
                          'enabled_cameras': len(enabled), 'models': runtime.model_status,
                          'processing_error': runtime.last_processing_error,
                          'ocr_spool': spool, 'ocr_spool_error': runtime.ocr_spool_error,
-                         'startup_error': request.app.state.startup_error}, status_code=200 if ready else 503)
+                         'startup_error': request.app.state.startup_error}, status_code=200 if server_alive else 503)
 
 
 @router.get('/models')

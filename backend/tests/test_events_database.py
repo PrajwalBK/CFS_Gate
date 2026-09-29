@@ -55,6 +55,24 @@ def test_restart_dedup_is_database_backed(repository, snapshots, make_job):
     assert restarted.save_observation(observation(make_job(origin='new-process:camera-1:5')), snapshots, 30) == (first_id, False)
 
 
+def test_dwell_tracker_reassignment_keeps_waiting_container_in_one_event(repository, snapshots, make_job):
+    repository.sync_cameras([
+        CameraConfig(id='gate-out-1', name='Gate OUT 1', gate_id='lane-out', source_env='CAM_OUT_1'),
+        CameraConfig(id='gate-out-2', name='Gate OUT 2', gate_id='lane-out', source_env='CAM_OUT_2'),
+    ])
+    first_job = make_job(camera_id='gate-out-1', gate_id='lane-out', origin='dwell:gate-out-1:first',
+                         direction='EXIT')
+    first_id, created = repository.save_observation(observation(first_job), snapshots, 30,
+                                                    same_container_window_seconds=900)
+    assert created
+    second_job = make_job(camera_id='gate-out-2', gate_id='lane-out', origin='dwell:gate-out-2:reassigned',
+                          direction='EXIT', timestamp=first_job.frame.timestamp + timedelta(seconds=210))
+    second_id, second_created = repository.save_observation(observation(second_job), snapshots, 30,
+                                                             same_container_window_seconds=900)
+    assert (second_id, second_created) == (first_id, False)
+    assert repository.events(container='CSQU3054383', event_type='EXIT')['total'] == 1
+
+
 def test_invalid_ocr_is_review_without_container_identity(settings, repository, snapshots, make_job):
     manager = EventManager(settings, repository, snapshots)
     invalid = ContainerValidator().validate(OCRRead('CSQU3054384', .99))

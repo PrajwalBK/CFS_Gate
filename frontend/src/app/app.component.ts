@@ -9,17 +9,18 @@ import { CameraGridComponent } from './camera-grid.component';
 import { EventTableComponent } from './event-table.component';
 import { EventDetailComponent } from './event-detail.component';
 import { SystemHealthComponent } from './system-health.component';
+import { RoiEditorComponent } from './roi-editor.component';
 
 @Component({
   selector: 'gate-app', standalone: true,
-  imports: [FormsModule, DatePipe, CameraGridComponent, EventTableComponent, EventDetailComponent, SystemHealthComponent],
+  imports: [FormsModule, DatePipe, CameraGridComponent, EventTableComponent, EventDetailComponent, SystemHealthComponent, RoiEditorComponent],
   templateUrl: './app.component.html'
 })
 export class AppComponent {
   private api = inject(GateApi);
   private destroy = inject(DestroyRef);
   private refresh = new Subject<void>();
-  activeTab = signal<'overview' | 'events' | 'detail'>('overview');
+  activeTab = signal<'overview' | 'cameras' | 'calibration' | 'events' | 'detail'>('cameras');
   cameras = signal<Camera[]>([]);
   cameraSources = signal<CameraSource[]>([]);
   discovery = signal({state: 'WAITING', found: 0, message: 'Waiting for camera discovery'});
@@ -42,6 +43,8 @@ export class AppComponent {
   private audioCtx: any = null;
   videoCount = computed(() => this.cameras().filter(c => c.source_type === 'file').length);
   playingCount = computed(() => this.cameras().filter(c => c.playback_status === 'PLAYING').length);
+  selectedCalibrationCameraId = signal('');
+  calibrationCamera = computed(() => this.cameras().find(c => c.id === this.selectedCalibrationCameraId()) || this.cameras()[0] || null);
   containerFilter = '';
   typeFilter = '';
   offset = 0;
@@ -66,6 +69,7 @@ export class AppComponent {
       this.loading.set(false);
       if (!data) { this.error.set('Backend disconnected. Start the Gate service to upload and play videos.'); return; }
       this.error.set(''); this.cameras.set(data.cameras); this.cameraSources.set(data.sources); this.health.set(data.health); this.metrics.set(data.metrics);
+      if (!this.selectedCalibrationCameraId() && data.cameras.length) this.selectedCalibrationCameraId.set(data.cameras[0].id);
       this.discovery.set(data.discovery);
       if (data.alerts && data.alerts.length > 0) {
         this.alerts.set(data.alerts);
@@ -88,6 +92,10 @@ export class AppComponent {
     const hash = window.location.hash.replace(/^#/, '');
     if (hash === 'events') {
       this.activeTab.set('events');
+    } else if (hash === 'cameras') {
+      this.activeTab.set('cameras');
+    } else if (hash === 'calibration') {
+      this.activeTab.set('calibration');
     } else if (hash.startsWith('event-')) {
       const eventId = hash.slice(6);
       if (eventId && (!this.detail() || this.detail()?.id !== eventId)) {
@@ -96,14 +104,18 @@ export class AppComponent {
         this.activeTab.set('detail');
       }
     } else if (hash === 'overview') {
-      this.activeTab.set('overview');
+      this.activeTab.set('cameras');
     }
   }
 
-  setTab(tab: 'overview' | 'events' | 'detail') {
+  setTab(tab: 'overview' | 'cameras' | 'calibration' | 'events' | 'detail') {
     this.activeTab.set(tab);
     if (tab === 'overview') {
       window.location.hash = 'overview';
+    } else if (tab === 'cameras') {
+      window.location.hash = 'cameras';
+    } else if (tab === 'calibration') {
+      window.location.hash = 'calibration';
     } else if (tab === 'events') {
       window.location.hash = 'events';
     } else if (tab === 'detail' && this.detail()) {
@@ -171,6 +183,15 @@ export class AppComponent {
     this.api.selectCamera(id, sourceId).pipe(takeUntilDestroyed(this.destroy)).subscribe({
       next: () => { this.controlsBusy.update(value => ({...value, [id]: false})); this.notice.set('Camera source switched.'); this.refresh.next(); },
       error: (error: HttpErrorResponse) => { this.controlsBusy.update(value => ({...value, [id]: false})); this.notice.set(this.errorMessage(error, 'Camera could not be selected.')); this.refresh.next(); }
+    });
+  }
+
+  saveCalibration(value: any) {
+    const camera = this.calibrationCamera();
+    if (!camera) return;
+    this.api.saveCalibration(camera.id, value).pipe(takeUntilDestroyed(this.destroy)).subscribe({
+      next: saved => { this.cameras.update(items => items.map(item => item.id === camera.id ? {...item, calibration: saved, occupancy: item.occupancy} : item)); this.notice.set(`Lane calibration saved for ${camera.name}.`); this.refresh.next(); },
+      error: () => this.notice.set('Lane calibration could not be saved.')
     });
   }
   playAll() {

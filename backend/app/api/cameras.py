@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from app.config.settings import LaneRegion
 from typing import Literal
 
 router = APIRouter(prefix='/api/cameras', tags=['cameras'])
@@ -64,6 +65,39 @@ def sources(request: Request):
 
 class SourceSelection(BaseModel):
     source_id: str
+
+
+class LaneCalibration(BaseModel):
+    lanes: list[LaneRegion] = Field(default_factory=list, max_length=2)
+    occupancy_roi: list[float]
+    entry_line: float = 0.10
+    exit_line: float = 0.95
+    gate_exit_axis: Literal['x', 'y'] | None = None
+    gate_exit_positive: bool = True
+
+
+@router.get('/calibration/all')
+def all_calibration(request: Request):
+    runtime = request.app.state.runtime
+    return {camera.id: runtime.calibration(camera.id) for camera in runtime.cameras}
+
+
+@router.get('/{camera_id}/calibration')
+def camera_calibration(camera_id: str, request: Request):
+    worker(request, camera_id)
+    try:
+        return request.app.state.runtime.calibration(camera_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from None
+
+
+@router.post('/{camera_id}/calibration')
+def save_camera_calibration(camera_id: str, body: LaneCalibration, request: Request):
+    worker(request, camera_id)
+    try:
+        return request.app.state.runtime.save_calibration(camera_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @router.get('/discovery/status')
@@ -217,4 +251,3 @@ def set_camera_exposure(camera_id: str, body: ExposureSetting, request: Request)
     if not client:
         raise HTTPException(400, 'Exposure control not supported for this camera')
     return client.set_shutter_speed(body.shutter, mode=body.mode)
-

@@ -1,4 +1,10 @@
 from typing import Protocol, Any
+from multiprocessing import get_context
+import os
+import queue as queue_module
+import sys
+import threading
+import types
 import logging
 from app.domain import OCRRead
 
@@ -7,6 +13,179 @@ log = logging.getLogger('gate')
 
 class OCREngine(Protocol):
     def read(self, image: Any) -> OCRRead: ...
+    def read_iso(self, image: Any) -> OCRRead: ...
+
+
+def _paddle_text(payload: dict) -> tuple[str, float]:
+    """Put Paddle's independently detected text boxes back into readable rows."""
+    result = (payload or {}).get('res', payload or {})
+    texts, scores, boxes = result.get('rec_texts') or [], result.get('rec_scores') or [], result.get('rec_boxes') or []
+    rows: list[list[tuple[float, str, float, float]]] = []
+    for index, text in enumerate(texts):
+        value = str(text or '').strip()
+        if not value:
+            continue
+        score = float(scores[index]) if index < len(scores) else 0.0
+        box = boxes[index] if index < len(boxes) else [index * 100, index * 24, 0, 0]
+        x = float(box[0]) if len(box) else float(index * 100)
+        y = (float(box[1]) + float(box[3])) / 2 if len(box) >= 4 else float(index * 24)
+        row = next((candidate for candidate in rows if abs(candidate[0][0] - y) <= 24), None)
+        if row is None:
+            rows.append([(y, value, score, x)])
+        else:
+            row.append((y, value, score, x))
+    lines, values = [], []
+    for row in sorted(rows, key=lambda candidate: candidate[0][0]):
+        ordered = sorted(row, key=lambda item: item[3])
+        lines.append(' '.join(item[1] for item in ordered))
+        values.extend(item[2] for item in ordered)
+    return '\n'.join(lines), (sum(values) / len(values) if values else 0.0)
+
+
+def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, recognition_model: str):
+    """Dedicated Paddle/CUDA process.
+
+    PyTorch YOLO and Paddle link different CUDA/cuDNN builds on Windows. Keeping
+    Paddle in this child process preserves GPU acceleration without destabilising
+    the live PyTorch detector.
+    """
+    try:
+        import site
+        for package_dir in site.getsitepackages():
+            dll_dir = os.path.join(package_dir, 'nvidia', 'cu13', 'bin', 'x86_64')
+            if os.path.isdir(dll_dir):
+                os.add_dll_directory(dll_dir)
+                os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
+        import paddle
+        # PaddleX imports ModelScope only to discover optional remote model
+        # sources. Loading its PyTorch helpers would reintroduce the DLL clash.
+        sys.modules['modelscope'] = types.ModuleType('modelscope')
+        from paddleocr import PaddleOCR
+        device = 'gpu:0' if use_gpu and paddle.is_compiled_with_cuda() else 'cpu'
+        paddle.set_device(device)
+        engine = PaddleOCR(
+            text_detection_model_name=detection_model,
+            text_recognition_model_name=recognition_model,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
+        responses.put(('ready', True, device))
+    except BaseException as exc:
+        responses.put(('ready', False, f'{type(exc).__name__}: {exc}'))
+        return
+    while True:
+        request = requests.get()
+        if request is None:
+            return
+        request_id, image = request
+        try:
+            output = list(engine.predict(image))
+            payload = output[0].json if output else {}
+            text, confidence = _paddle_text(payload)
+            responses.put(('result', request_id, text, confidence, None))
+        except BaseException as exc:
+            responses.put(('result', request_id, '', 0.0, f'{type(exc).__name__}: {exc}'))
+
+
+class PaddleOCREngine:
+    """PP-OCRv6 primary reader backed by a persistent, GPU-only worker."""
+    def __init__(self, settings):
+        self._lock, self._sequence = threading.Lock(), 0
+        self._context = get_context('spawn')
+        self._requests = self._context.Queue(maxsize=1)
+        self._responses = self._context.Queue(maxsize=1)
+        self._process = self._context.Process(
+            target=_paddle_worker,
+            args=(self._requests, self._responses, bool(settings.ocr_gpu),
+                  settings.paddle_ocr_detection_model, settings.paddle_ocr_recognition_model),
+            name='gate-paddle-ocr', daemon=True,
+        )
+        self._process.start()
+        try:
+            kind, ready, detail = self._responses.get(timeout=90)
+        except queue_module.Empty as exc:
+            self.close()
+            raise RuntimeError('PaddleOCR GPU worker did not start within 90 seconds') from exc
+        if kind != 'ready' or not ready:
+            self.close()
+            raise RuntimeError(f'PaddleOCR GPU worker failed: {detail}')
+        self.device = detail
+        log.info('paddle_ocr_ready', extra={'device': self.device})
+
+    def read(self, image) -> OCRRead:
+        if image is None or getattr(image, 'size', 0) == 0 or not self._process.is_alive():
+            return OCRRead('', 0.0)
+        with self._lock:
+            self._sequence += 1
+            request_id = self._sequence
+            try:
+                self._requests.put((request_id, image), timeout=2)
+                kind, returned_id, text, confidence, error = self._responses.get(timeout=20)
+            except queue_module.Empty:
+                log.warning('paddle_ocr_timeout')
+                return OCRRead('', 0.0)
+            if kind != 'result' or returned_id != request_id or error:
+                log.warning('paddle_ocr_read_failed', extra={'error': error or 'unexpected response'})
+                return OCRRead('', 0.0)
+            return OCRRead(text[:4096], float(confidence))
+
+    def read_iso(self, image) -> OCRRead:
+        import re
+        from app.ocr.validator import extract_iso_size_code
+        result = self.read(image)
+        code, _ = extract_iso_size_code(result.raw_text)
+        if code:
+            return OCRRead(code, result.confidence)
+        compact = re.sub(r'[^A-Z0-9]', '', (result.raw_text or '').upper())
+        match = re.search(r'(?<![A-Z0-9])([1-4LMN][0-9][GVRHBUTP][0-9A-Z])(?![A-Z0-9])', compact)
+        return OCRRead(match.group(1) if match else '', result.confidence if match else 0.0)
+
+    def close(self):
+        if not getattr(self, '_process', None):
+            return
+        if self._process.is_alive():
+            try:
+                self._requests.put_nowait(None)
+                self._process.join(timeout=5)
+            except Exception:
+                pass
+        if self._process.is_alive():
+            self._process.terminate()
+
+
+class FallbackOCREngine:
+    """Use the VLM only when the fast, deterministic reader has no useful text."""
+    def __init__(self, primary: OCREngine, fallback_factory):
+        self.primary, self._fallback_factory, self._fallback = primary, fallback_factory, None
+        self._fallback_lock = threading.Lock()
+
+    @staticmethod
+    def _usable(result: OCRRead) -> bool:
+        import re
+        text = result.raw_text.upper()
+        return bool(re.search(r'[A-Z]{3}[UJZ][\s-]*(?:[0-9][\s-]*){6}', text) or
+                    re.search(r'[1-4LMN][\s-]*[0-9][\s-]*[GVRHBUTP][\s-]*[0-9A-Z]', text))
+
+    def _secondary(self):
+        with self._fallback_lock:
+            if self._fallback is None:
+                self._fallback = self._fallback_factory()
+            return self._fallback
+
+    def read(self, image) -> OCRRead:
+        primary = self.primary.read(image)
+        return primary if self._usable(primary) else self._secondary().read(image)
+
+    def read_iso(self, image) -> OCRRead:
+        primary = self.primary.read_iso(image)
+        return primary if primary.raw_text else self._secondary().read_iso(image)
+
+    def close(self):
+        for engine in (self.primary, self._fallback):
+            closer = getattr(engine, 'close', None)
+            if closer:
+                closer()
 
 
 def _extract_text_from_items(items):
@@ -130,6 +309,18 @@ class EasyOCREngine:
 
         return OCRRead(txt, conf)
 
+    def read_iso(self, image) -> OCRRead:
+        """Read only the four-character ISO size/type marking."""
+        import re
+        from app.ocr.validator import extract_iso_size_code
+        result = self.read(image)
+        code, _ = extract_iso_size_code(result.raw_text)
+        if code:
+            return OCRRead(code, result.confidence)
+        compact = re.sub(r'[^A-Z0-9]', '', (result.raw_text or '').upper())
+        match = re.search(r'(?<![A-Z0-9])([1-4LMN][0-9][GVRHBUTP][0-9A-Z])(?![A-Z0-9])', compact)
+        return OCRRead(match.group(1) if match else '', result.confidence if match else 0.0)
+
 
 class OlmOCREngine:
     """
@@ -157,9 +348,15 @@ class OlmOCREngine:
             "the 4-letter owner code (ending in U, J, or Z), 6-digit serial number, 1-digit check digit, and 4-character ISO size-type code (e.g. 45G1, 22G1). "
             "Output ONLY the letters and digits visible on the container separated by spaces. Do NOT invent or guess codes. If no container markings are clearly visible, output empty."
         )
+        self.iso_prompt = (
+            "Read only the four-character ISO 6346 container size/type code in this crop. "
+            "Valid examples are 22G1, 45G1, 42G1, L5G1, and 22R1. "
+            "Return exactly four visible letters/digits or EMPTY. Do not read the container number, "
+            "timestamps, watermarks, truck numbers, or background text. Never guess hidden characters."
+        )
         log.info(f'oLmOCR model loaded successfully on {self.device}.')
 
-    def read(self, image) -> OCRRead:
+    def read(self, image, target: str = 'container') -> OCRRead:
         import cv2
         import re
         import torch
@@ -180,12 +377,13 @@ class OlmOCREngine:
             rgb_image = cv2.cvtColor(proc_img, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(rgb_image)
 
+            prompt = self.iso_prompt if target == 'iso' else self.prompt
             messages = [
                 {
                     'role': 'user',
                     'content': [
                         {'type': 'image', 'image': pil_image},
-                        {'type': 'text', 'text': self.prompt}
+                        {'type': 'text', 'text': prompt}
                     ]
                 }
             ]
@@ -226,6 +424,13 @@ class OlmOCREngine:
             else:
                 output_text = cleaned.strip()
 
+            if target == 'iso':
+                # Do not synthesize missing characters or silently convert C to G.
+                code = re.sub(r'\s+', '', output_text.upper())
+                valid = bool(re.fullmatch(r'[1-4LMN][0-9][GVRHBUTP][0-9A-Z]', code))
+                # This is an acceptance weight, not a calibrated probability.
+                return OCRRead(code if valid else '', 0.6 if valid else 0.0)
+
             from app.ocr.validator import correct_feet_size_codes
             output_text = correct_feet_size_codes(output_text)
 
@@ -244,9 +449,20 @@ class OlmOCREngine:
             log.error(f'oLmOCR read error: {exc}', exc_info=True)
             return OCRRead('', 0.0)
 
+    def read_iso(self, image) -> OCRRead:
+        return self.read(image, target='iso')
+
 
 def create_ocr_engine(settings) -> OCREngine:
     engine_type = getattr(settings, 'ocr_engine', 'easyocr').lower()
+    if engine_type in ('paddleocr', 'paddle', 'ppocr'):
+        primary = PaddleOCREngine(settings)
+        fallback_engine = getattr(settings, 'ocr_fallback_engine', 'none').lower()
+        if fallback_engine in ('olmocr', 'qwen2_vl', 'qwen2vl', 'qwen'):
+            return FallbackOCREngine(primary, lambda: OlmOCREngine(settings))
+        if fallback_engine == 'easyocr':
+            return FallbackOCREngine(primary, lambda: EasyOCREngine(settings))
+        return primary
     if engine_type in ('olmocr', 'qwen2_vl', 'qwen2vl', 'qwen'):
         return OlmOCREngine(settings)
     return EasyOCREngine(settings)

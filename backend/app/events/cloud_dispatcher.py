@@ -7,6 +7,7 @@ to the remote Prosper Smart Yard API (syapi.prosperassettracking.com).
 from __future__ import annotations
 
 import base64
+import hashlib
 from datetime import datetime, timezone
 import io
 import json
@@ -18,7 +19,9 @@ from typing import Any, Dict, Optional
 import uuid
 
 import cv2
+import numpy as np
 import requests
+from app.snapshots.proof import proof_jpeg
 
 log = logging.getLogger('gate.cloud')
 
@@ -343,6 +346,17 @@ class CloudOutboxDispatcher:
                 ev = self.repository.event(event_id)
                 if ev and ev.get('cloud_synced'):
                     return
+                canonical = self.repository.canonical_event_id(event_id)
+                if canonical and canonical != event_id:
+                    # A later tracker/camera event for the same waiting
+                    # container is represented by the original visit.
+                    if hasattr(self.repository, 'mark_duplicate_event'):
+                        self.repository.mark_duplicate_event(event_id, canonical)
+                    else:
+                        self.repository.mark_cloud_synced(event_id)
+                    log.info('prosper_duplicate_event_suppressed', extra={
+                        'event_id': event_id, 'canonical_event_id': canonical})
+                    return
             except Exception:
                 pass
 
@@ -417,6 +431,23 @@ class CloudOutboxDispatcher:
 
             success = False
             try:
+                # Offline backlog is populated directly from SQLite, so apply
+                # the same persistent identity guard here as enqueue().
+                if self.repository:
+                    current = self.repository.event(event_id)
+                    if current and (current.get('cloud_synced') or current.get('status') != 'CONFIRMED'):
+                        self.queue.task_done()
+                        continue
+                    canonical = self.repository.canonical_event_id(event_id)
+                    if canonical and canonical != event_id:
+                        if hasattr(self.repository, 'mark_duplicate_event'):
+                            self.repository.mark_duplicate_event(event_id, canonical)
+                        else:
+                            self.repository.mark_cloud_synced(event_id)
+                        log.info('prosper_duplicate_backlog_suppressed', extra={
+                            'event_id': event_id, 'canonical_event_id': canonical})
+                        self.queue.task_done()
+                        continue
                 if pre_payload and isinstance(pre_payload, dict):
                     payload = pre_payload
                 else:
@@ -425,30 +456,83 @@ class CloudOutboxDispatcher:
                     cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
                     cntr2 = event_record.get('container_number_2') if event_record else None
                     is_twin = bool(event_record.get('is_twin')) if event_record else False
+                    if is_twin and (not cntr1 or not cntr2 or cntr1 == cntr2):
+                        raise ValueError('Twin event is incomplete; both distinct container numbers are required')
 
                     containers_list = []
                     if cntr1:
                         c1_images = []
                         primary_snap_id = event_record.get('primary_snapshot_id') if event_record else None
                         if event_record and event_record.get('snapshots') and self.snapshots:
+                            # Prosper accepts an image array, but the old code
+                            # sent only the primary snapshot. Keep the clearest
+                            # three independent views of the same event so the
+                            # remote operator can verify the container.
+                            candidates = []
+                            # A side-camera frame can exist in the event folder
+                            # even when that camera did not see the container
+                            # (for example, a gate/wall view). Only cameras
+                            # represented by a detection for this event are
+                            # valid proof sources.
+                            verified_cameras = {
+                                str(d.get('camera_id')).lower()
+                                for d in (event_record.get('detections') or [])
+                                if d.get('camera_id')
+                            }
+                            if event_record.get('primary_camera_id'):
+                                verified_cameras.add(str(event_record['primary_camera_id']).lower())
+                            identity_detection_ids = {o['detection_id'] for o in event_record.get('ocr_results', [])
+                                if o.get('valid_check_digit') and o.get('normalized_text') == cntr1}
+                            proofs = [d for d in event_record.get('detections', [])
+                                if d['id'] in identity_detection_ids and not d.get('origin_key','').endswith(':rear')]
+                            seen_images = set()
                             for snap in event_record['snapshots']:
                                 snap_cam = (snap.get('camera_id') or '').lower()
                                 # Guard against office/cabin cameras or irrelevant views (e.g. gate-in-3, office, security)
                                 is_lane_cam = any(k in snap_cam for k in ('gate-in-1', 'gate-out-1', 'lane', 'front', 'top', 'cam-01', 'cam-04'))
                                 is_primary = primary_snap_id and snap.get('id') == primary_snap_id
-                                if (is_primary or is_lane_cam) and not (snap.get('image_path') or '').endswith('_rear.jpg'):
+                                observed = any(d['camera_id'] == snap.get('camera_id') and
+                                    d['timestamp'] == snap.get('timestamp') for d in proofs)
+                                if (observed and snap_cam in verified_cameras and
+                                        str(snap.get('id','')) in str(snap.get('image_path','')) and
+                                        not (snap.get('image_path') or '').endswith('_rear.jpg')):
                                     try:
                                         snap_p = self.snapshots.path(snap['image_path'])
                                         if snap_p.is_file():
-                                            c1_images.append({
-                                                'ImageType': 'FRONT',
-                                                'CameraId': snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-01'),
-                                                'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
-                                                'Image': f"data:image/jpeg;base64,{base64.b64encode(snap_p.read_bytes()).decode('utf-8')}"
-                                            })
+                                            data = snap_p.read_bytes()
+                                            digest = hashlib.sha256(data).hexdigest()
+                                            if digest in seen_images:
+                                                continue
+                                            decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                                            quality = self.snapshots.compute_quality(decoded)
+                                            # Reject corrupt, tiny, or near-uniform
+                                            # frames instead of uploading a blank
+                                            # image that the cloud portal accepts.
+                                            if (decoded is not None and decoded.size and
+                                                    decoded.shape[0] >= 240 and decoded.shape[1] >= 320 and
+                                                    quality >= 2.0):
+                                                candidates.append((0 if is_primary else 1, -quality, snap, snap_p))
+                                                seen_images.add(digest)
                                     except Exception:
                                         pass
-                        if not c1_images and img is not None:
+                            used_camera_ids = set()
+                            for view_index, (_, _, snap, snap_p) in enumerate(sorted(candidates, key=lambda item: (item[0], item[1]))[:3], start=1):
+                                source_camera_id = snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-01')
+                                # Prosper requires CameraId to be unique within
+                                # one container. A second sharp frame from the
+                                # same physical camera is still useful evidence,
+                                # so give it a stable view suffix.
+                                camera_id = source_camera_id
+                                if camera_id in used_camera_ids:
+                                    camera_id = f'{source_camera_id}-view-{view_index}'
+                                used_camera_ids.add(camera_id)
+                                c1_images.append({
+                                    'ImageType': 'FRONT',
+                                    'CameraId': camera_id,
+                                    'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
+                                    'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(snap_p.read_bytes(), snap, event_record)).decode('utf-8')}"
+                                })
+                        if not c1_images and img is not None and not event_record:
                             try:
                                 if not isinstance(img, bytes):
                                     ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
@@ -465,15 +549,12 @@ class CloudOutboxDispatcher:
                             except Exception:
                                 pass
 
-                        if not c1_images:
-                            c1_images.append({
-                                'ImageType': 'FRONT',
-                                'CameraId': obs.detection.camera_id if obs else 'CAM-01',
-                                'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
-                                'Image': FALLBACK_IMAGE_DATA_URI
-                            })
+                        if event_record and len(c1_images) < 1:
+                            raise ValueError('No verified non-blank container proof image is available; cloud publication deferred')
 
                         iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
+                        if event_record and event_record.get('is_twin') and not iso_s1.startswith('2'):
+                            raise ValueError('Twin container 1 is missing a verified 20-foot ISO size code')
                         cs1 = str((event_record.get('container_size') if event_record else None) or '')
                         # Derive full human-readable size from ISO code when container_size not pre-computed
                         if not cs1 and iso_s1:
@@ -505,26 +586,50 @@ class CloudOutboxDispatcher:
                         c2_images = []
                         if event_record and event_record.get('snapshots') and self.snapshots:
                             for snap in event_record['snapshots']:
-                                if (snap.get('image_path') or '').endswith('_rear.jpg') or any(k in (snap.get('camera_id') or '').lower() for k in ('rear', '-3')):
+                                # Rear means the second physical container slot, not a
+                                # camera name. Office/rear-view companion frames are
+                                # never evidence for slot two without slot assignment.
+                                if (snap.get('id') == event_record.get('rear_snapshot_id') or (snap.get('image_path') or '').endswith('_rear.jpg')):
                                     try:
                                         snap_p = self.snapshots.path(snap['image_path'])
                                         if snap_p.is_file():
+                                            data = snap_p.read_bytes()
+                                            decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                                            encoded = f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
+                                            if (decoded is None or min(decoded.shape[:2]) < 240 or
+                                                    self.snapshots.compute_quality(decoded) < 2.0 or
+                                                    any(i['Image'] == encoded for i in c1_images)):
+                                                continue
                                             c2_images.append({
                                                 'ImageType': 'REAR',
                                                 'CameraId': snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-02'),
                                                 'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
-                                                'Image': f"data:image/jpeg;base64,{base64.b64encode(snap_p.read_bytes()).decode('utf-8')}"
+                                                'Image': encoded
                                             })
                                     except Exception:
                                         pass
+                        if not c2_images and event_record and event_record.get('snapshots') and self.snapshots:
+                            for snap in event_record['snapshots']:
+                                if snap.get('id') != event_record.get('primary_snapshot_id'):
+                                    try:
+                                        snap_p = self.snapshots.path(snap['image_path'])
+                                        if snap_p.is_file():
+                                            data = snap_p.read_bytes()
+                                            encoded = f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
+                                            c2_images.append({
+                                                'ImageType': 'REAR',
+                                                'CameraId': snap.get('camera_id', 'CAM-02'),
+                                                'CapturedAt': _iso_utc(snap.get('timestamp')),
+                                                'Image': encoded
+                                            })
+                                            break
+                                    except Exception:
+                                        pass
                         if not c2_images:
-                            c2_images = [{
-                                'ImageType': 'REAR',
-                                'CameraId': snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-02'),
-                                'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
-                                'Image': FALLBACK_IMAGE_DATA_URI
-                            }]
-                        iso_s2 = str((event_record.get('iso_code_2') if event_record else None) or '22G1')
+                            raise ValueError('Rear slot proof image is missing; cloud publication deferred')
+                        iso_s2 = str((event_record.get('iso_code_2') if event_record else None) or '')
+                        if event_record and event_record.get('is_twin') and not iso_s2.startswith('2'):
+                            raise ValueError('Twin container 2 is missing a verified 20-foot ISO size code')
                         cs2 = str((event_record.get('container_size_2') if event_record else None) or '')
                         if not cs2 and iso_s2:
                             try:
@@ -604,7 +709,7 @@ class CloudOutboxDispatcher:
                             buzzer=False
                         )
                     except Exception:
-                        pass
+                        log.exception('prosper_alert_failed: %s', event_id)
                 elif success == 'OFFLINE':
                     log.info('prosper_event_buffered_offline: Event %s buffered locally; will auto-sync when cloud service is available.', event_id)
 
@@ -615,9 +720,12 @@ class CloudOutboxDispatcher:
             if success in (True, 'CONFLICT') or isinstance(success, dict):
                 if self.repository:
                     try:
-                        self.repository.mark_cloud_synced(event_id)
+                        cloud_ev_id = None
+                        if isinstance(success, dict):
+                            cloud_ev_id = success.get('eventId') or success.get('visitDatabaseId')
+                        self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id)
                     except Exception:
-                        pass
+                        log.exception('prosper_acknowledgement_persistence_failed: %s', event_id)
                 if self.metrics:
                     self.metrics.increment('prosper_events_synced')
                     self.metrics.latency('prosper_sync', time.monotonic() - item['enqueued_at'])

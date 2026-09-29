@@ -28,6 +28,46 @@ class SnapshotManager:
         variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         return math.log1p(variance) * exposure
 
+    @staticmethod
+    def compute_similarity(img1, img2) -> float:
+        """
+        Fast zero-mean normalized cross-correlation (NCC) of two images (0.0 to 1.0).
+        Accepts numpy arrays, file paths (str/Path), or image bytes.
+        Downsamples to 64x64 grayscale for fast sub-3ms comparison.
+        """
+        import cv2, numpy as np
+        if isinstance(img1, (str, Path)):
+            p = str(img1)
+            if not os.path.exists(p):
+                return 0.0
+            img1 = cv2.imread(p)
+        elif isinstance(img1, bytes):
+            img1 = cv2.imdecode(np.frombuffer(img1, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+        if isinstance(img2, (str, Path)):
+            p = str(img2)
+            if not os.path.exists(p):
+                return 0.0
+            img2 = cv2.imread(p)
+        elif isinstance(img2, bytes):
+            img2 = cv2.imdecode(np.frombuffer(img2, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+        if img1 is None or img2 is None or getattr(img1, 'size', 0) == 0 or getattr(img2, 'size', 0) == 0:
+            return 0.0
+
+        try:
+            s1 = cv2.resize(cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
+            s2 = cv2.resize(cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
+            s1 -= s1.mean()
+            s2 -= s2.mean()
+            n1 = float(np.linalg.norm(s1))
+            n2 = float(np.linalg.norm(s2))
+            if n1 <= 1e-6 or n2 <= 1e-6:
+                return 0.0
+            return float(np.clip((s1 * s2).sum() / (n1 * n2), 0.0, 1.0))
+        except Exception:
+            return 0.0
+
     def save_side_snapshot(self, event_id: str, camera_id: str, image, direction: str = '', text: str = '', force: bool = False) -> str:
         """Saves or upgrades the compulsory side snapshot for camera_id under snapshots/{event_id}/{camera_id}.jpg."""
         import cv2
@@ -110,14 +150,23 @@ class SnapshotManager:
             raise OSError('Snapshot encoding failed')
         is_rear = getattr(observation, 'slot_position', 'FRONT') == 'REAR' or observation.origin_key.endswith(':rear')
         slot_suffix = '_rear' if is_rear else ''
-        relative = f'{event_id}/{observation.detection.camera_id}{slot_suffix}.jpg' if event_id else f'{snapshot_id}.jpg'
+        relative = f'{event_id}/{observation.detection.camera_id}_{snapshot_id}{slot_suffix}.jpg' if event_id else f'{snapshot_id}.jpg'
         final = self.path(relative)
         final.parent.mkdir(parents=True, exist_ok=True)
+        quality_path = final.with_suffix('.quality')
+        new_quality = self.compute_quality(image)
+        if final.exists() and quality_path.exists():
+            try:
+                if new_quality <= float(quality_path.read_text(encoding='utf-8')):
+                    return relative
+            except (OSError, ValueError):
+                pass
         temporary = final.with_suffix('.tmp')
         try:
             with temporary.open('wb') as file:
                 file.write(encoded.tobytes())
             os.replace(temporary, final)
+            quality_path.write_text(f'{new_quality:.2f}', encoding='utf-8')
         finally:
             temporary.unlink(missing_ok=True)
         return relative
@@ -147,4 +196,3 @@ class SnapshotManager:
                 path.parent.rmdir()
             except OSError:
                 pass
-

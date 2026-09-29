@@ -40,7 +40,14 @@ def _add_file_handler(logger, filepath: Path, level: int, formatter: logging.For
     for h in logger.handlers:
         if isinstance(h, RotatingFileHandler) and getattr(h, 'baseFilename', None) == resolved:
             return
-    handler = RotatingFileHandler(filepath, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
+    try:
+        handler = RotatingFileHandler(filepath, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
+    except OSError:
+        # Logging must never prevent capture/OCR startup. This can happen on
+        # Windows when a previous crashed process still holds a rotated log.
+        fallback = logging.getLogger('gate.logging')
+        fallback.warning('file_log_unavailable', extra={'error_type': 'PermissionError'})
+        return
     handler.setLevel(level)
     handler.setFormatter(formatter)
     logger.addHandler(handler)

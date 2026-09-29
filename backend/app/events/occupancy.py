@@ -173,6 +173,9 @@ class ViewOccupancy:
                 area_rear = box_area(rear_b)
                 area_ratio = min(area_front, area_rear) / max(area_front, area_rear) if max(area_front, area_rear) > 0 else 0
                 is_twin_candidate = (
+                    front_det.class_name not in ('container_number', 'iso_code', 'feet') and
+                    rear_det.class_name not in ('container_number', 'iso_code', 'feet') and
+                    iou(front_b, rear_b) < 0.15 and
                     area_front >= 0.08 and area_rear >= 0.04 and
                     area_ratio >= 0.25 and
                     abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.18 and
@@ -303,6 +306,9 @@ class ViewOccupancy:
             area_rear = box_area(rear_b)
             area_ratio = min(area_front, area_rear) / max(area_front, area_rear) if max(area_front, area_rear) > 0 else 0
             is_twin = (
+                front_det.class_name not in ('container_number', 'iso_code', 'feet') and
+                rear_det.class_name not in ('container_number', 'iso_code', 'feet') and
+                iou(front_b, rear_b) < 0.15 and
                 area_front >= 0.08 and area_rear >= 0.04 and
                 area_ratio >= 0.25 and
                 abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.18 and
@@ -362,10 +368,31 @@ class ViewOccupancy:
     def status(self):
         state = self.current
         if not state:
-            return {'state': 'CLEAR', 'event_id': None}
+            return {'state': 'CLEAR', 'state_machine': {'state': 'CLEAR', 'next': ['APPROACHING']}, 'event_id': None}
+        if state.clear_since is not None:
+            machine_state = 'CLEARING'
+        elif state.stationary and state.event_id:
+            machine_state = 'WAITING'
+        elif state.event_id and getattr(state, 'is_twin', False):
+            machine_state = 'OCCUPIED_TWIN'
+        elif state.event_id:
+            machine_state = 'OCCUPIED_SINGLE'
+        elif getattr(state, 'entrance_complete', False):
+            machine_state = 'EXITING'
+        else:
+            machine_state = 'APPROACHING'
+        next_states = {
+            'CLEAR': ['APPROACHING'], 'APPROACHING': ['OCCUPIED_SINGLE', 'OCCUPIED_TWIN', 'CLEAR'],
+            'OCCUPIED_SINGLE': ['WAITING', 'EXITING'], 'OCCUPIED_TWIN': ['WAITING', 'EXITING'],
+            'WAITING': ['EXITING', 'CLEARING'], 'EXITING': ['CLEARING', 'WAITING'],
+            'CLEARING': ['CLEAR', 'OCCUPIED_SINGLE', 'OCCUPIED_TWIN'],
+        }[machine_state]
         return {'state': 'WAITING' if state.stationary and state.event_id else
                 'OCCUPIED' if state.event_id else 'TRACKING',
+                'state_machine': {'state': machine_state, 'next': next_states},
                 'stationary': state.stationary, 'event_id': state.event_id,
                 'bbox_normalized': state.bbox, 'clear_pending': state.clear_since is not None,
                 'is_twin': getattr(state, 'is_twin', False),
-                'entrance_complete': getattr(state, 'entrance_complete', False)}
+                'entrance_complete': getattr(state, 'entrance_complete', False),
+                'slots': {key: {'closed': slot.closed, 'container_number': slot.container_number}
+                          for key, slot in getattr(state, 'slots', {}).items()}}

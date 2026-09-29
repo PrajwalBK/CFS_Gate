@@ -4,8 +4,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import logging
 from queue import Queue, Empty, Full
+from pathlib import Path
 import threading
 import time
+import json
 from uuid import uuid4
 
 from app.camera.camera_manager import CameraManager
@@ -22,6 +24,7 @@ from app.events.cloud_dispatcher import CloudOutboxDispatcher
 from app.events.event_manager import EventManager
 from app.events.gate_logic import update_direction
 from app.events.occupancy import ViewOccupancy
+from app.events.passages import PassageCollector
 from app.metrics import Metrics
 from app.ocr.container_ocr import crop_identification
 from app.ocr.ocr_engine import EasyOCREngine, create_ocr_engine
@@ -49,6 +52,9 @@ class OCRJob:
     is_stationary: bool = True
     entrance_complete: bool = True
     is_twin: bool = False
+    passage_id: str | None = None
+    region_id: str | None = None
+    passage_metadata: dict = field(default_factory=dict)
 
 
 
@@ -91,10 +97,16 @@ class GateRuntime:
         self._accelerator = threading.RLock()
         self._state_lock = threading.Lock()
         self.occupancy = {c.id: ViewOccupancy(settings) for c in cameras}
+        self.passages = PassageCollector(settings)
+        self._calibration_path = Path(settings.snapshot_directory).parent / 'lane_calibration.json'
+        self._calibrations = self._load_calibrations()
+        for camera in cameras:
+            self._apply_calibration(camera.id)
         self._threads = []
         self._recent = deque(maxlen=300)
         self._preview_detections = {}
         self._tracks = {}
+        self._confirmed_origins: set[str] = set()
         self._run_id = str(uuid4())
         self.detector = None
         self.ocr = None
@@ -102,6 +114,7 @@ class GateRuntime:
         self.last_processing_error = None
 
     def start(self):
+        self._recover_passages()
         writer = threading.Thread(target=self._save_ocr_loop, name='gate-ocr-save', daemon=True)
         self._threads.append(writer)
         writer.start()
@@ -179,7 +192,81 @@ class GateRuntime:
             camera['active_source_name'] = active_name
             with self._state_lock:
                 camera['occupancy'] = self.occupancy[camera['id']].status()
+                camera['calibration'] = self.calibration(camera['id'])
+                camera['passage_tracking'] = self.passages.status(camera['id'])
         return result
+
+    def _load_calibrations(self):
+        try:
+            if self._calibration_path.is_file():
+                value = json.loads(self._calibration_path.read_text(encoding='utf-8'))
+                return value if isinstance(value, dict) else {}
+        except Exception as exc:
+            log.warning('lane_calibration_load_failed', extra={'error_type': type(exc).__name__})
+        return {}
+
+    def calibration(self, camera_id):
+        camera = next((item for item in self.cameras if item.id == camera_id), None)
+        if camera is None:
+            raise ValueError('Camera not found')
+        saved = self._calibrations.get(camera_id, {})
+        roi = saved.get('occupancy_roi', list(camera.occupancy_roi))
+        return {
+            'camera_id': camera_id,
+            'occupancy_roi': roi,
+            'lanes': [lane.model_dump() for lane in camera.lanes],
+            'entry_line': saved.get('entry_line', 0.10),
+            'exit_line': saved.get('exit_line', camera.gate_exit_position),
+            'gate_exit_axis': saved.get('gate_exit_axis', camera.gate_exit_axis),
+            'gate_exit_positive': saved.get('gate_exit_positive', camera.gate_exit_positive),
+            'gate_clear_seconds': self.settings.gate_clear_seconds,
+            'version': saved.get('version', 1),
+        }
+
+    def save_calibration(self, camera_id, payload):
+        camera = next((item for item in self.cameras if item.id == camera_id), None)
+        if camera is None:
+            raise ValueError('Camera not found')
+        roi = tuple(float(v) for v in payload['occupancy_roi'])
+        if len(roi) != 4 or not (0 <= roi[0] < roi[2] <= 1 and 0 <= roi[1] < roi[3] <= 1):
+            raise ValueError('occupancy_roi must be normalized as [x1,y1,x2,y2]')
+        value = {
+            'lanes': payload.get('lanes', []),
+            'occupancy_roi': list(roi),
+            'entry_line': float(payload.get('entry_line', 0.10)),
+            'exit_line': float(payload.get('exit_line', camera.gate_exit_position)),
+            'gate_exit_axis': payload.get('gate_exit_axis', camera.gate_exit_axis),
+            'gate_exit_positive': bool(payload.get('gate_exit_positive', camera.gate_exit_positive)),
+            'version': 1,
+        }
+        from app.config.settings import LaneRegion
+        lanes = [LaneRegion.model_validate(lane) for lane in value['lanes']]
+        if len(lanes) > 2 or len({lane.id for lane in lanes}) != len(lanes):
+            raise ValueError('Use at most two uniquely named lanes')
+        camera.lanes = lanes
+        self._calibrations[camera_id] = value
+        camera.occupancy_roi = roi
+        camera.gate_exit_position = value['exit_line']
+        camera.gate_exit_axis = value['gate_exit_axis']
+        camera.gate_exit_positive = value['gate_exit_positive']
+        self._calibration_path.parent.mkdir(parents=True, exist_ok=True)
+        self._calibration_path.write_text(json.dumps(self._calibrations, indent=2), encoding='utf-8')
+        return self.calibration(camera_id)
+
+    def _apply_calibration(self, camera_id):
+        saved = self._calibrations.get(camera_id)
+        if not saved:
+            return
+        try:
+            camera = next(item for item in self.cameras if item.id == camera_id)
+            from app.config.settings import LaneRegion
+            camera.lanes = [LaneRegion.model_validate(lane) for lane in saved.get('lanes', [])]
+            camera.occupancy_roi = tuple(saved['occupancy_roi'])
+            camera.gate_exit_position = float(saved.get('exit_line', camera.gate_exit_position))
+            camera.gate_exit_axis = saved.get('gate_exit_axis', camera.gate_exit_axis)
+            camera.gate_exit_positive = bool(saved.get('gate_exit_positive', camera.gate_exit_positive))
+        except (StopIteration, KeyError, TypeError, ValueError):
+            log.warning('lane_calibration_invalid', extra={'camera_id': camera_id})
 
     def available_camera_sources(self):
         from urllib.parse import urlsplit
@@ -453,6 +540,9 @@ class GateRuntime:
         cameras_stopped = self.manager.stop()
         for thread in list(self._threads):
             thread.join(timeout=10)
+        closer = getattr(self.ocr, 'close', None)
+        if closer:
+            closer()
         clean = cameras_stopped and not any(t.is_alive() for t in self._threads)
         if not clean:
             log.error('worker_shutdown_timeout')
@@ -481,9 +571,17 @@ class GateRuntime:
         with self._accelerator:
             started = time.monotonic()
             detections = self.detector.detect(frame)
+            if camera.lanes and hasattr(self.detector, 'detect_vehicles'):
+                detections += self.detector.detect_vehicles(frame)
             self.metrics.latency('inference', time.monotonic() - started)
         self.metrics.inference(camera.id)
         self.metrics.increment('inferences')
+        if camera.lanes:
+            with self._state_lock:
+                self._preview_detections[camera.id] = (frame.source_id, frame.timestamp, tuple(detections))
+                self.passages.update(camera, frame, detections)
+                self._queue_passage_candidates()
+            return
         tracks = self.tracker[camera.id].update(detections, frame.timestamp)
         with self._state_lock:
             occupant = self.occupancy[camera.id]
@@ -607,12 +705,99 @@ class GateRuntime:
             finally:
                 self.queue.task_done()
 
+    def _queue_passage_candidates(self):
+        # Caller holds state lock; at most one in-flight read per text region.
+        for passage in self.passages.passages.values():
+            if passage.saved:
+                continue
+            for region in passage.regions:
+                if (region.pending or not region.candidates or
+                        region.attempts >= self.settings.ocr_max_attempts or
+                        max(region.votes.values(), default=0) >= self.settings.ocr_confirmations):
+                    continue
+                _, frame, detection, detections = region.candidates[0]
+                job = OCRJob(f'passage:{passage.id}:{region.id}', passage.gate_id,
+                             passage.track_id, detection, frame, passage.direction,
+                             passage.started, (0,0,1,1), detections,
+                             event_id=passage.id, passage_id=passage.id, region_id=region.id,
+                             passage_metadata={'lane_id':passage.lane_id,'bbox':passage.bbox,
+                                               'source_type':passage.source_type})
+                try:
+                    self.queue.put_nowait(job)
+                except Full:
+                    return
+                region.candidates.pop(0)
+                region.pending += 1
+                region.attempts += 1
+
+    def _recover_passages(self):
+        from app.events.passages import Passage, Region
+        for row in self.ocr_store.passage_jobs():
+            meta = json.loads(row['metadata'])
+            identity = meta.get('passage_id')
+            if not identity or self.repository.event(row.get('event_id') or identity):
+                continue
+            job, _, validation = self.ocr_store.load(row['id'])
+            passage = self.passages.passages.setdefault(identity, Passage(identity,
+                job.detection.camera_id, job.frame.source_id, job.gate_id,
+                job.passage_metadata['lane_id'], job.direction, job.started_at,
+                job.frame.timestamp, job.track_id, tuple(job.passage_metadata['bbox']),
+                closed=True, ambiguous=True, source_type=job.passage_metadata.get('source_type','file')))
+            region = next((r for r in passage.regions if r.id == job.region_id), None)
+            if region is None:
+                region = Region(id=job.region_id)
+                passage.regions.append(region)
+            region.attempts += 1
+            if row['state'] == 'PENDING':
+                region.pending += 1
+            elif validation:
+                # result decrements pending: preserve outstanding work count.
+                region.pending += 1
+                self.passages.result(identity, region.id, validation, job)
+
+    def _finalize_passages(self):
+        from dataclasses import replace
+        with self._state_lock:
+            self._queue_passage_candidates()
+            ready = [group for group in self.passages.groups() if all(p.closed and not p.saved and
+                     all(not r.pending and (not r.candidates or r.attempts >= self.settings.ocr_max_attempts or
+                         max(r.votes.values(), default=0) >= self.settings.ocr_confirmations) for r in p.regions) for p in group)]
+        for group in ready:
+            if any(self.ocr_store.passage_pending(p.id) for p in group):
+                continue
+            first = min(group, key=lambda p:(p.started,p.id))
+            passage = replace(first, regions=[r for p in group for r in p.regions],
+                              ambiguous=any(p.ambiguous for p in group))
+            self.repository.save_passage(passage, self.snapshots, self.settings.ocr_confirmations)
+            with self._state_lock:
+                for p in group:
+                    p.saved = True
+                    self.passages.passages.pop(p.id, None)
+                    self.ocr_store.link_passage(p.id, passage.id)
+
     def _process_saved_ocr(self, job_id):
         job, crop, validation = self.ocr_store.load(job_id)
+        if job.passage_id and job.passage_id not in self.passages.passages:
+            # A replay after restart must preserve its historical lane/event.
+            # Interrupted passages require review; no guessed completion.
+            from app.events.passages import Passage, Region
+            with self._state_lock:
+                passage = Passage(job.passage_id, job.detection.camera_id, job.frame.source_id,
+                    job.gate_id, job.passage_metadata['lane_id'], job.direction, job.started_at,
+                    job.frame.timestamp, job.track_id, tuple(job.passage_metadata['bbox']),
+                    closed=True, ambiguous=True, source_type=job.passage_metadata.get('source_type','file'))
+                self.passages.passages[job.passage_id] = passage
+        if job.passage_id:
+            from app.events.passages import Region
+            with self._state_lock:
+                passage = self.passages.passages[job.passage_id]
+                if not any(r.id == job.region_id for r in passage.regions):
+                    passage.regions.append(Region(id=job.region_id, pending=1))
         with self._state_lock:
             track_state = self._tracks.get(job.origin_key)
-            if track_state and track_state.get('done'):
-                self.ocr_store.complete(job_id, getattr(job, 'event_id', None))
+            if (track_state and track_state.get('done')) or job.origin_key in self._confirmed_origins:
+                prior = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
+                self.ocr_store.complete(job_id, prior.event_id or getattr(job, 'event_id', None))
                 return
         prior = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
         is_rear_slot = getattr(job, 'slot_position', 'FRONT') == 'REAR' or job.origin_key.endswith(':rear')
@@ -631,6 +816,7 @@ class GateRuntime:
             started = time.monotonic()
             read = None
             validation = None
+            targeted_text_seen = False
 
             # 1. DIRECT TARGETED TEXT OCR:
             # If YOLO already detected the text box (cointainer / feet), run OCR
@@ -668,6 +854,7 @@ class GateRuntime:
 
                 cointainer_candidates.sort(key=lambda d: d.confidence, reverse=True)
                 feet_candidates.sort(key=lambda d: d.confidence, reverse=True)
+                targeted_text_seen = bool(cointainer_candidates or feet_candidates)
 
                 img_h, img_w = job.frame.image.shape[:2]
 
@@ -687,8 +874,9 @@ class GateRuntime:
                             validation = sub_v
                             break
 
-                # If container number was found, check feet boxes to extract ISO size code if not present
-                if validation and validation.valid_check_digit and not validation.size_type and feet_candidates:
+                # ISO is an independent target. Read it even when the container number
+                # is not readable; the ISO code is valuable evidence for 20/40-foot logic.
+                if not (validation and validation.size_type) and feet_candidates:
                     for fd in feet_candidates:
                         pad = 10
                         fy1 = max(0, int(fd.bbox[1]) - pad)
@@ -697,18 +885,26 @@ class GateRuntime:
                         fx2 = min(img_w, int(fd.bbox[2]) + pad)
                         f_crop = job.frame.image[fy1:fy2, fx1:fx2]
                         if f_crop.size > 0:
-                            f_r = self.ocr.read(f_crop)
+                            iso_reader = getattr(self.ocr, 'read_iso', self.ocr.read)
+                            f_r = iso_reader(f_crop)
                             iso_c, human_s = extract_iso_size_code(f_r.raw_text)
-                            if iso_c or human_s:
-                                validation = Validation(
-                                    raw_text=f"{validation.raw_text} {f_r.raw_text}",
-                                    normalized_text=validation.normalized_text,
-                                    confidence=validation.confidence,
-                                    valid_format=validation.valid_format,
-                                    valid_check_digit=validation.valid_check_digit,
-                                    validation_status=validation.validation_status,
-                                    size_type=iso_c or human_s
-                                )
+                            if iso_c:
+                                if validation:
+                                    validation = Validation(
+                                        raw_text=f"{validation.raw_text} {f_r.raw_text}",
+                                        normalized_text=validation.normalized_text,
+                                        confidence=max(validation.confidence, f_r.confidence),
+                                        valid_format=validation.valid_format,
+                                        valid_check_digit=validation.valid_check_digit,
+                                        validation_status=validation.validation_status,
+                                        size_type=iso_c
+                                    )
+                                else:
+                                    validation = Validation(
+                                        raw_text=f_r.raw_text, normalized_text='', confidence=f_r.confidence,
+                                        valid_format=True, valid_check_digit=False,
+                                        validation_status='VALID_SIZE_CODE', size_type=iso_c
+                                    )
                                 break
 
                 # If still not valid, try 'feet' candidates (might contain full container number / valid code)
@@ -734,12 +930,22 @@ class GateRuntime:
                 main_read = self.ocr.read(crop)
                 main_val = self.validator.validate(main_read)
                 if validation is None or main_val.valid_check_digit or main_val.confidence > validation.confidence:
+                    if validation and validation.size_type and main_val.valid_check_digit:
+                        main_val = Validation(
+                            raw_text=f"{main_val.raw_text} {validation.raw_text}",
+                            normalized_text=main_val.normalized_text,
+                            confidence=max(main_val.confidence, validation.confidence),
+                            valid_format=main_val.valid_format,
+                            valid_check_digit=main_val.valid_check_digit,
+                            validation_status=main_val.validation_status,
+                            size_type=validation.size_type
+                        )
                     read = main_read
                     validation = main_val
 
             # 3. FALLBACK TO COMPANION CAMERA FRAMES (e.g. Side or Rear cameras):
             # If the primary camera didn't yield a valid container check digit, attempt OCR on companion camera frames
-            if validation is None or not validation.valid_check_digit:
+            if (validation is None or not validation.valid_check_digit) and not targeted_text_seen:
                 companion_dict = dict(getattr(job, 'companion_frames', {}) or {})
                 for other_cam_id, comp_img in companion_dict.items():
                     if comp_img is not None and getattr(comp_img, 'size', 0) > 0:
@@ -753,21 +959,19 @@ class GateRuntime:
 
             self.metrics.latency('ocr', time.monotonic() - started)
             self.ocr_store.save_validation(job_id, validation)
+        if job.passage_id:
+            with self._state_lock:
+                self.passages.result(job.passage_id, job.region_id, validation, job)
+            self.ocr_store.complete(job_id, job.passage_id)
+            return
         # Recover confirmation votes from disk, including after a restart.
         # Saved jobs retain historical source/lane/role; never relabel them to
         # the currently selected camera or attach current-time companion images.
         self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
         try:
             additional = dict(getattr(job, 'companion_frames', {}) or {})
-            for other_cam in self.cameras:
-                if other_cam.gate_id == job.gate_id and other_cam.id != job.detection.camera_id:
-                    if other_cam.id not in additional:
-                        other_worker = self.manager.workers.get(other_cam.id)
-                        if other_worker:
-                            other_latest = other_worker.latest()
-                            if other_latest and other_latest.image is not None:
-                                additional[other_cam.id] = other_latest.image.copy()
-
+            # OCR may finish long after capture. Never attach current live frames
+            # to a historical event: they can show an entirely different truck.
             proof = self.ocr_store.best_proof(job.origin_key, job_id) or job
             ongoing = getattr(job, 'event_id', None)
             if validation.valid_check_digit:
@@ -804,6 +1008,8 @@ class GateRuntime:
             if ev and ev.get('status') == 'CONFIRMED':
                 is_done = bool(ev.get('container_number_2')) if getattr(job, 'slot_position', 'FRONT') == 'REAR' else bool(ev.get('container_number'))
                 if is_done:
+                    with self._state_lock:
+                        self._confirmed_origins.add(job.origin_key)
                     self.ocr_store.cancel_pending(job.origin_key, result[0])
             self.metrics.increment('events_created' if result[1] else 'evidence_associated')
             self.metrics.latency('event', (utcnow() - job.started_at).total_seconds())
@@ -820,10 +1026,12 @@ class GateRuntime:
             job_id = None
             try:
                 job_id = self.ocr_store.next_id()
+                self._finalize_passages()
                 if job_id is None:
                     try:
                         with self._state_lock:
                             protected = tuple(v.current.origin for v in self.occupancy.values() if v.current)
+                            protected += tuple(f'passage:{p.id}:{r.id}' for p in self.passages.passages.values() for r in p.regions)
                         self.ocr_store.clean_completed(max_age_seconds=10, protected_origins=protected)
                     except Exception:
                         pass

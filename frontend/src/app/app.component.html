@@ -4,9 +4,6 @@
     <div><strong>GateVision</strong><small>CONTAINER OPERATIONS</small></div>
   </div>
   <nav aria-label="Primary" class="primary-nav">
-    <button type="button" class="nav-tab" [class.active]="activeTab() === 'overview'" (click)="setTab('overview')">
-      Gate overview
-    </button>
     <button type="button" class="nav-tab" [class.active]="activeTab() === 'events'" (click)="setTab('events')">
       Recent gate events
       @if (page().total) {
@@ -35,6 +32,14 @@
     </div>
   </div>
 </header>
+
+<aside class="left-nav" aria-label="Gate module navigation">
+  <div class="left-nav-label">MODULE</div>
+  <button [class.active]="activeTab() === 'cameras'" (click)="setTab('cameras')"><span>▣</span>Camera settings</button>
+  <button [class.active]="activeTab() === 'calibration'" (click)="setTab('calibration')"><span>⌗</span>Lane calibration</button>
+  <div class="left-nav-divider"></div>
+  <button [class.active]="activeTab() === 'events'" (click)="setTab('events')"><span>≡</span>Gate events</button>
+</aside>
 
 <main>
   @if (activeAlert(); as a) {
@@ -67,13 +72,13 @@
   }
 
   <!-- PAGE TAB 1: GATE OVERVIEW -->
-  @if (activeTab() === 'overview') {
+  @if (activeTab() === 'overview' || activeTab() === 'cameras' || activeTab() === 'calibration') {
     <div class="page-view animate-fade">
       <div class="page-heading">
         <div>
           <div class="eyebrow">OPERATIONS <span>/</span> GATE MODULE</div>
-          <h1>Gate overview</h1>
-          <p>Four views. One gate workflow. Add recorded footage to test without cameras.</p>
+          <h1>{{ activeTab() === 'cameras' ? 'Camera settings' : activeTab() === 'calibration' ? 'Lane calibration' : 'Gate overview' }}</h1>
+          <p>{{ activeTab() === 'cameras' ? 'Assign PoE or uploaded video sources, camera roles, playback and lens controls.' : activeTab() === 'calibration' ? 'Draw the valid lane, set entry and exit lines, and monitor the live state machine.' : 'Monitor gate health, AI readiness and operational status.' }}</p>
         </div>
         <div class="connection">
           <span class="badge" [class.good]="!error() && health()?.status === 'READY'" [class.warn]="!!error() || health()?.status === 'DEGRADED'">
@@ -85,6 +90,7 @@
 
       <div class="workspace-layout">
         <div class="gate-workspace">
+          @if (activeTab() === 'overview') {
           <section class="input-summary" aria-label="Camera discovery">
             <div><strong>Automatic camera discovery</strong><small role="status">{{ discovery().message }}</small>
               <small>New cameras fill unused views. Choose their position and gate direction below.</small></div>
@@ -105,7 +111,9 @@
               ▶ Play all videos
             </button>
           </section>
+          }
 
+          @if (activeTab() === 'cameras') {
           <div class="section-heading">
             <div>
               <h2>Camera inputs</h2>
@@ -145,7 +153,35 @@
             (sourceChange)="selectCamera($event)"
             (roleChange)="setCameraRole($event)"
           />
+          }
 
+          @if (activeTab() === 'calibration') {
+          <section class="lane-control-panel" aria-label="Lane state machine and calibration">
+            <div class="section-heading">
+              <div><h2>Lane state machine</h2><p>Every camera reports the same operational state used to decide when OCR and new events are allowed.</p></div>
+              <span class="subtle">CALIBRATION + LIVE STATE</span>
+            </div>
+            <div class="lane-state-grid">
+              @for (camera of cameras(); track camera.id) {
+                <article class="lane-state-card">
+                  <div><strong>{{ camera.name }}</strong><small>{{ camera.gate_id }} · {{ camera.role }}</small></div>
+                  <span class="state-badge" [class.state-waiting]="camera.occupancy?.state_machine?.state === 'WAITING'" [class.state-occupied]="camera.occupancy?.state_machine?.state?.startsWith('OCCUPIED')">{{ camera.occupancy?.state_machine?.state || 'CLEAR' }}</span>
+                  <small>Next: {{ camera.occupancy?.state_machine?.next?.join(' · ') || 'APPROACHING' }}</small>
+                </article>
+              }
+            </div>
+            @if (calibrationCamera(); as selected) {
+              <div class="calibration-selector">
+                <label>Calibrate camera <select [value]="selected.id" (change)="selectedCalibrationCameraId.set($any($event.target).value)">@for (camera of cameras(); track camera.id) {<option [value]="camera.id">{{ camera.name }} — {{ camera.role }}</option>}</select></label>
+              </div>
+              @if (selected.calibration; as calibration) {
+                <gate-roi-editor [camera]="selected" [calibration]="calibration" [refresh]="refreshToken()" (save)="saveCalibration($event)" />
+              }
+            }
+          </section>
+          }
+
+          @if (activeTab() === 'overview') {
           <div class="processing-strip">
             <div>
               <strong>AI event processing</strong>
@@ -160,6 +196,7 @@
               {{ health()?.models?.detector === 'LOADING' ? 'Loading…' : health()?.pipeline_enabled ? 'Check / retry AI' : 'Enable AI' }}
             </button>
           </div>
+          }
         </div>
 
         <gate-system-health [health]="health()" [metrics]="metrics()" [stale]="!!error()" />

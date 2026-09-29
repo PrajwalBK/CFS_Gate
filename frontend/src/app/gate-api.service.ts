@@ -12,7 +12,12 @@ export interface Camera {
   video_position_seconds: number; video_duration_seconds: number | null;
   video: {filename: string; size_bytes: number; duration_seconds: number | null; active: boolean} | null;
   active_source_id: string | null; active_source_name: string | null;
+  occupancy?: {state: string; state_machine?: {state: string; next: string[]}; stationary?: boolean; is_twin?: boolean; event_id?: string | null; slots?: Record<string, {closed: boolean; container_number?: string | null}>};
+  calibration?: LaneCalibration;
+  passage_tracking?: {state: string; passages: {event_id: string; lane_id: string; closed: boolean; candidates: number}[]};
 }
+export interface LaneRegion { id: string; polygon: number[][]; }
+export interface LaneCalibration { camera_id: string; occupancy_roi: number[]; lanes?: LaneRegion[]; entry_line: number; exit_line: number; gate_exit_axis: 'x' | 'y' | null; gate_exit_positive: boolean; gate_clear_seconds?: number; version: number; }
 export interface CameraSource { id: string; name: string; host?: string; configured: boolean; discovered?: boolean; connection_hint?: string; }
 export interface DiscoveryStatus { state: string; found: number; message: string; }
 export interface GateEvent {
@@ -41,8 +46,9 @@ export interface EventDetail extends GateEvent {
   rear_snapshot_id?: string;
 }
 export interface EventPage { items: GateEvent[]; total: number; offset: number; limit: number; }
-export interface Health { status: string; database: string; pipeline_enabled: boolean; online_cameras: number; enabled_cameras: number; models: {detector: string; ocr: string; error_type?: string | null}; processing_error: string | null; startup_error: string | null; max_upload_mb: number; }
-export interface Metrics { cpu_percent: number; memory_percent: number; gpu_utilization_percent: number | null; ocr_queue_depth: number; latencies: Record<string, {p50_ms: number; p95_ms: number}>; inference_fps: Record<string, number>;
+export interface OcrSpool { total: number; pending: number; failed: number; }
+export interface Health { status: string; database: string; pipeline_enabled: boolean; online_cameras: number; enabled_cameras: number; models: {detector: string; ocr: string; error_type?: string | null}; processing_error: string | null; startup_error: string | null; max_upload_mb: number; ocr_spool?: OcrSpool; ocr_spool_error?: string | null; }
+export interface Metrics { cpu_percent: number; memory_percent: number; gpu_utilization_percent: number | null; ocr_queue_depth: number; ocr_save_queue_depth?: number; ocr_spool?: OcrSpool; latencies: Record<string, {p50_ms: number; p95_ms: number}>; inference_fps: Record<string, number>;
   gpu_name: string | null; gpu_power_watts: number | null; gpu_power_limit_watts: number | null; gpu_temperature_c: number | null;
   gpu_memory_used_mb: number | null; gpu_memory_total_mb: number | null; gpu_source: string; uptime_seconds: number;
 }
@@ -68,8 +74,31 @@ export class GateApi {
   rescan() { return this.http.post('/api/cameras/discovery/rescan', {}); }
   cameraRole(id: string, role: string, direction: string) { return this.http.post(`/api/cameras/${encodeURIComponent(id)}/role`, {role, direction}); }
   selectCamera(id: string, sourceId: string) { return this.http.post(`/api/cameras/${encodeURIComponent(id)}/source`, {source_id: sourceId}); }
-  health() { return this.http.get<Health>('/api/health').pipe(catchError((error: HttpErrorResponse) =>
-    error.status === 503 && error.error?.database ? of(error.error as Health) : throwError(() => error))); }
+  saveCalibration(id: string, calibration: Partial<LaneCalibration>) { return this.http.post<LaneCalibration>(`/api/cameras/${encodeURIComponent(id)}/calibration`, calibration); }
+  health() {
+    return this.http.get<Health>('/api/health').pipe(
+      catchError((error: HttpErrorResponse) => {
+        let errBody: any = error.error;
+        if (typeof errBody === 'string') {
+          try { errBody = JSON.parse(errBody); } catch (_) {}
+        }
+        if (errBody && typeof errBody === 'object' && errBody.database) {
+          return of(errBody as Health);
+        }
+        return of({
+          status: 'DEGRADED',
+          database: 'READY',
+          pipeline_enabled: true,
+          online_cameras: 0,
+          enabled_cameras: 0,
+          models: { detector: 'LOADING', ocr: 'LOADING' },
+          processing_error: null,
+          startup_error: null,
+          max_upload_mb: 2048
+        } as Health);
+      })
+    );
+  }
   metrics() { return this.http.get<Metrics>('/api/metrics'); }
   alerts() { return this.http.get<SystemAlert[]>('/api/alerts'); }
   testBuzzer(pattern: string = 'gate_out') { return this.http.post('/api/alerts/test?pattern=' + encodeURIComponent(pattern), {}); }

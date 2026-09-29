@@ -1,6 +1,7 @@
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from app.snapshots.proof import proof_jpeg
 
 router = APIRouter(prefix='/api', tags=['events'])
 
@@ -39,11 +40,15 @@ def ocr_results(request: Request, limit: int = Query(50, ge=1, le=200), offset: 
 
 
 @router.get('/snapshots/{snapshot_id}')
-def snapshot(snapshot_id: str, request: Request):
+def snapshot(snapshot_id: str, request: Request, proof: bool = False):
     row = request.app.state.repository.snapshot(snapshot_id)
     if row is None:
         raise HTTPException(404, 'Snapshot not found')
     path = request.app.state.snapshots.path(row['image_path'])
     if not path.is_file():
         raise HTTPException(404, 'Snapshot file unavailable')
+    if proof:
+        event_record = request.app.state.repository.event(row['event_id'])
+        data = proof_jpeg(path.read_bytes(), row, event_record or {})
+        return Response(data, media_type='image/jpeg', headers={'Cache-Control': 'no-cache'})
     return FileResponse(path, media_type='image/jpeg')

@@ -1,6 +1,14 @@
 -r requirements.txt
 ultralytics>=8.3,<9
 easyocr>=1.7,<2
+# Install Paddle's GPU wheel from its CUDA-specific index during deployment.
+# Windows RTX 50-series / Blackwell: paddlepaddle-gpu==3.3.0 from the cu130 index.
+paddleocr>=3.7,<3.8
+# The PyPI GPU wheel does not support RTX 50-series GPUs. On Windows this
+# resolves Paddle 3.3 from Paddle's CUDA 13 index; Linux deployments should
+# pin the matching official CUDA wheel for their host instead.
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/
+paddlepaddle-gpu==3.3.0; platform_system == "Windows"
 # Install the appropriate PyTorch build FIRST, especially on Jetson.
 # ONNX: install onnxruntime (CPU) or a compatible onnxruntime-gpu build.
 # TensorRT: install through the target JetPack; export engines on that target.

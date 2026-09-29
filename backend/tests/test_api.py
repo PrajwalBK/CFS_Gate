@@ -27,6 +27,10 @@ def test_camera_configuration_events_health_and_snapshot(settings, repository, s
         snapshot_id = detail['snapshots'][0]['id']
         image = client.get('/api/snapshots/' + snapshot_id)
         assert image.status_code == 200 and image.headers['content-type'] == 'image/jpeg'
+        proof = client.get('/api/snapshots/' + snapshot_id + '?proof=true')
+        assert proof.status_code == 200 and proof.headers['content-type'] == 'image/jpeg'
+        assert proof.headers['cache-control'] == 'no-cache'
+        assert client.get('/api/snapshots/' + snapshot_id).content == image.content
         assert client.get('/api/ocr-results').json()[0]['raw_text'] == 'CSQU3054383'
         assert client.get('/api/gate-events/missing').status_code == 404
         assert client.get('/api/gate-events?limit=999').status_code == 422

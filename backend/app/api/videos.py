@@ -129,7 +129,7 @@ def clear_all_data(request: Request):
             pass
     try:
         with runtime.repository.database.sessions.begin() as session:
-            for t in ['gate_events', 'detections', 'snapshots']:
+            for t in ['system_logs', 'ocr_results', 'snapshots', 'detections', 'gate_events']:
                 try:
                     session.execute(text(f'DELETE FROM {t}'))
                 except Exception:

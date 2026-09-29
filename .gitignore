@@ -104,6 +104,8 @@ crop_test.jpg
 thresh.jpg
 word_*.jpg
 *.tmp
+*evaluation*.json
+
 
 # --- Frontend Node & Build Artifacts ---
 node_modules/

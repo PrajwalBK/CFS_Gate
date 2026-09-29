@@ -10,6 +10,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 Direction = Literal['ENTRY', 'EXIT', 'UNKNOWN']
 
 
+class LaneRegion(BaseModel):
+    id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,32}$')
+    polygon: list[tuple[float, float]] = Field(min_length=3, max_length=12)
+
+    @model_validator(mode='after')
+    def validate_polygon(self):
+        if any(not (0 <= x <= 1 and 0 <= y <= 1) for x, y in self.polygon):
+            raise ValueError('Lane vertices must be inside the frame')
+        import cv2
+        import numpy as np
+        points = np.array(self.polygon, dtype=np.float32)
+        if not cv2.isContourConvex(points) or cv2.contourArea(points) < .001:
+            raise ValueError('Draw a convex lane polygon with nonzero area')
+        return self
+
+
 class CameraConfig(BaseModel):
     id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
     name: str = Field(max_length=100)
@@ -31,6 +47,7 @@ class CameraConfig(BaseModel):
     line_deadband: float = Field(default=0.03, ge=0, lt=0.5)
     positive_crossing: Literal['ENTRY', 'EXIT'] = 'ENTRY'
     occupancy_roi: tuple[float, float, float, float] = (0, 0, 1, 1)
+    lanes: list[LaneRegion] = Field(default_factory=list, max_length=2)
     gate_exit_axis: Literal['x', 'y'] | None = None
     gate_exit_position: float = Field(default=.95, gt=0, lt=1)
     gate_exit_positive: bool = True
@@ -61,13 +78,19 @@ class Settings(BaseSettings):
     pipeline_enabled: bool = True
     model_backend: Literal['pytorch', 'onnx', 'tensorrt'] = 'pytorch'
     model_path: Path = Path('models/best.pt')
+    passage_vehicle_model_path: Path = Path('models/yolov8x.pt')
     model_device: str = 'cpu'
     model_image_size: int = Field(default=640, ge=32)
     class_aliases: dict[str, str] = {}
     target_classes: list[str] = ['container', 'container_number', 'iso_code']
     ocr_classes: list[str] = ['container', 'container_number', 'iso_code']
 
-    ocr_engine: Literal['olmocr', 'easyocr', 'qwen2_vl', 'qwen2vl'] = 'olmocr'
+    # PaddleOCR runs in its own CUDA worker so it does not contend with the
+    # PyTorch YOLO process. Qwen remains a last-resort reader only.
+    ocr_engine: Literal['paddleocr', 'olmocr', 'easyocr', 'qwen2_vl', 'qwen2vl'] = 'paddleocr'
+    ocr_fallback_engine: Literal['olmocr', 'easyocr', 'none'] = 'olmocr'
+    paddle_ocr_detection_model: str = 'PP-OCRv6_medium_det'
+    paddle_ocr_recognition_model: str = 'PP-OCRv6_medium_rec'
     ocr_model_name: str = 'Qwen/Qwen2-VL-2B-Instruct'
     ocr_gpu: bool = True
     ocr_download_enabled: bool = False
@@ -80,14 +103,23 @@ class Settings(BaseSettings):
     ocr_max_attempts: int = Field(default=4, ge=1)
     ocr_interval_seconds: float = Field(default=1, gt=0)
     ocr_queue_size: int = Field(default=8, ge=1, le=100)
-    ocr_spool_max_mb: int = Field(default=10240, ge=1)
+    # The spool is a temporary OCR work area. Definitive event evidence is
+    # stored under snapshots, so this must stay bounded on an edge device.
+    ocr_spool_max_mb: int = Field(default=2048, ge=256)
     gate_clear_seconds: float = Field(default=7, ge=1, le=60)
+    # Maximum timestamp distance used when joining two calibrated RTSP views
+    # into one candidate truck visit. Keep this bounded for queued traffic.
+    cross_camera_view_window_seconds: float = Field(default=8, ge=1, le=30)
     stationary_drift_threshold: float = Field(default=.02, gt=0, lt=.05)
     stationary_match_iou: float = Field(default=.45, ge=.45, lt=1)
     stationary_seconds: float = Field(default=1, gt=0)
     gate_observation_gap_seconds: float = Field(default=2, gt=0)
     dwell_container_classes: list[str] = ['container', 'container_number', 'iso_code']
     dedup_seconds: float = Field(default=30, gt=0)
+    # A tracker can be re-created when a queued truck remains in view.  Keep
+    # one persisted event for the same confirmed container/lane/direction for
+    # this long, while leaving normal (unidentified) passage dedup unchanged.
+    same_container_event_window_seconds: float = Field(default=900, ge=60, le=3600)
     track_ttl_seconds: float = Field(default=5, gt=0)
     snapshot_directory: Path = Path('snapshots')
     upload_directory: Path = Path('uploads')

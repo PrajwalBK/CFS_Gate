@@ -31,6 +31,7 @@ class GateEvent(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     gate_id: Mapped[str] = mapped_column(String(64))
     timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
+    lane_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     container_number: Mapped[str | None] = mapped_column(String(11))
     event_type: Mapped[str] = mapped_column(String(10))
     status: Mapped[str] = mapped_column(String(20))

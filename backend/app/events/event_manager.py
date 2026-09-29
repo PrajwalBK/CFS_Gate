@@ -30,7 +30,10 @@ class EventManager:
 
     def observe(self, job, validation, additional_frames: dict | None = None, proof_job=None, ongoing_event_id=None):
         evidence = self.evidence.setdefault(job.origin_key, Evidence())
-        if evidence.event_id and evidence.confirmed:
+        # A persisted event is already committed. This also covers NEEDS_REVIEW
+        # events: replaying the same spool job must not clear its event link or
+        # create a second record after a restart.
+        if evidence.event_id:
             return evidence.event_id, False
         evidence.last_seen = job.detection.frame_timestamp
         # Retrying the same failed DB write is not another independent OCR vote.
@@ -43,6 +46,18 @@ class EventManager:
         best, count = votes.most_common(1)[0] if votes else (None, 0)
         tied = sum(v == count for v in votes.values()) > 1
         confirmed = count >= self.settings.ocr_confirmations and not tied
+        # A dwell track can end before the configured vote count is reached
+        # (camera handoff, truck leaving the ROI, or a short queue passage).
+        # If at least two samples were processed and one high-confidence,
+        # check-digit-valid read exists, preserve it as the event identity
+        # rather than silently dropping the completed track.
+        dwell_end_fallback = (
+            job.origin_key.startswith('dwell:') and
+            getattr(job, 'entrance_complete', False) and
+            len(evidence.reads) >= 2 and count >= 1 and not tied
+        )
+        if dwell_end_fallback:
+            confirmed = True
         if not confirmed and len(evidence.reads) < self.settings.ocr_max_attempts:
             return None
         if not confirmed and not any(getattr(r, 'raw_text', None) for r in evidence.reads if r):
@@ -63,13 +78,35 @@ class EventManager:
 
         target_event_id = ongoing_event_id or evidence.event_id or getattr(job, 'event_id', None)
         options = {'ongoing_event_id': target_event_id} if target_event_id else {}
-        event_id, created = self.repository.save_observation(
-            obs, self.snapshots, self.settings.dedup_seconds, additional_frames, **options)
+        try:
+            event_id, created = self.repository.save_observation(
+                obs, self.snapshots, self.settings.dedup_seconds, additional_frames,
+                same_container_window_seconds=self.settings.same_container_event_window_seconds,
+                **options)
+        except TypeError as exc:
+            # Keep compatibility with small repository test doubles/plugins
+            # that still implement the pre-window method signature.
+            if 'same_container_window_seconds' not in str(exc):
+                raise
+            event_id, created = self.repository.save_observation(
+                obs, self.snapshots, self.settings.dedup_seconds, additional_frames, **options)
         evidence.event_id = event_id
         evidence.confirmed = confirmed
 
         # Only dispatch to cloud and buzz for new events or newly confirmed events that haven't been dispatched yet
-        should_dispatch = obs.confirmed and (event_id not in self._dispatched_events)
+        # A twin is one cloud transaction. Do not publish the front slot while
+        # the rear slot or its proof image is still missing; doing so permanently
+        # leaves Prosper with a single-container payload because the dispatcher
+        # deduplicates already-sent event IDs.
+        cloud_ready = True
+        if getattr(obs, 'is_twin', False) and event_id:
+            current = self.repository.event(event_id) or {}
+            snapshots = current.get('snapshots') or []
+            cloud_ready = bool(
+                current.get('container_number') and current.get('container_number_2') and
+                any(str(item.get('image_path', '')).endswith('_rear.jpg') for item in snapshots)
+            )
+        should_dispatch = obs.confirmed and cloud_ready and (event_id not in self._dispatched_events)
         if self.dispatcher and should_dispatch:
             self._dispatched_events.add(event_id)
             self.dispatcher.enqueue(obs, event_id)

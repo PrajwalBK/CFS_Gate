@@ -14,6 +14,7 @@ def clear_all():
     if db_path.exists():
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
+        cur.execute("DELETE FROM system_logs")
         cur.execute("DELETE FROM ocr_results")
         cur.execute("DELETE FROM snapshots")
         cur.execute("DELETE FROM detections")
@@ -22,7 +23,7 @@ def clear_all():
         cur.execute("VACUUM")
         conn.commit()
         conn.close()
-        print("Cleared gate.db tables (gate_events, detections, snapshots, ocr_results)")
+        print("Cleared gate.db tables (gate_events, detections, snapshots, ocr_results, system_logs)")
 
     # 2. Clear OCR spool database
     if spool_db_path.exists():

@@ -202,11 +202,11 @@ import { EventDetail } from './gate-api.service';
                         <span class="proof-cam mono">{{ frontSnap.camera_id }}</span>
                       </div>
                       <div class="proof-img-wrap">
-                        <img [src]="'/api/snapshots/' + frontSnap.id" [alt]="'Front container proof from ' + frontSnap.camera_id">
+                        <img [src]="snapshotUrl(frontSnap.id)" [alt]="'Front container proof from ' + frontSnap.camera_id" (error)="markImageError(frontSnap.id)">
                       </div>
                       <div class="proof-caption">
                         <span><strong class="mono">{{ item.container_number || 'Front Container' }}</strong> · {{ frontSnap.timestamp | date:'HH:mm:ss · dd MMM yyyy' }}</span>
-                        <a [href]="'/api/snapshots/' + frontSnap.id" target="_blank" class="view-raw-link">Full resolution ↗</a>
+                        <a [href]="snapshotUrl(frontSnap.id)" target="_blank" class="view-raw-link">Full resolution ↗</a>
                       </div>
                     </div>
                   }
@@ -219,11 +219,11 @@ import { EventDetail } from './gate-api.service';
                         <span class="proof-cam mono">{{ rearSnap.camera_id }}</span>
                       </div>
                       <div class="proof-img-wrap">
-                        <img [src]="'/api/snapshots/' + rearSnap.id" [alt]="'Rear container proof from ' + rearSnap.camera_id">
+                        <img [src]="snapshotUrl(rearSnap.id)" [alt]="'Rear container proof from ' + rearSnap.camera_id" (error)="markImageError(rearSnap.id)">
                       </div>
                       <div class="proof-caption">
                         <span><strong class="mono">{{ item.container_number_2 || 'Rear Container' }}</strong> · {{ rearSnap.timestamp | date:'HH:mm:ss · dd MMM yyyy' }}</span>
-                        <a [href]="'/api/snapshots/' + rearSnap.id" target="_blank" class="view-raw-link">Full resolution ↗</a>
+                        <a [href]="snapshotUrl(rearSnap.id)" target="_blank" class="view-raw-link">Full resolution ↗</a>
                       </div>
                     </div>
                   }
@@ -236,22 +236,36 @@ import { EventDetail } from './gate-api.service';
                       <span class="proof-cam mono">{{ primary.camera_id }}</span>
                     </div>
                     <div class="proof-img-wrap">
-                      <img [src]="'/api/snapshots/' + primary.id" [alt]="'Container proof from ' + primary.camera_id">
+                      <img [src]="snapshotUrl(primary.id)" [alt]="'Container proof from ' + primary.camera_id" (error)="markImageError(primary.id)">
                     </div>
                     <div class="proof-caption">
                       <span><strong>{{ item.container_number || 'Detected Container' }}</strong> · {{ primary.timestamp | date:'HH:mm:ss · dd MMM yyyy' }}</span>
-                      <a [href]="'/api/snapshots/' + primary.id" target="_blank" class="view-raw-link">Full resolution ↗</a>
+                      <a [href]="snapshotUrl(primary.id)" target="_blank" class="view-raw-link">Full resolution ↗</a>
                     </div>
                   </div>
                 }
               }
 
-              <h4 class="multi-angle-title">All Gate Camera Angles ({{ item.snapshots.length }})</h4>
+              <div class="multi-angle-heading">
+                <h4 class="multi-angle-title">All captured camera images ({{ item.snapshots.length }})</h4>
+                <span class="image-refresh-note">Matched proof includes the number crop and raw OCR. Full resolution opens the unmodified capture.</span>
+              </div>
               <div class="snapshots-grid">
                 @for (s of item.snapshots; track s.id) {
                   <figure class="snapshot-card" [class.is-primary]="s.id === item.primary_snapshot_id || s.id === item.rear_snapshot_id">
                     <div class="snapshot-img-wrap">
-                      <img [src]="'/api/snapshots/' + s.id" [alt]="'Snapshot from ' + s.camera_id" loading="lazy">
+                      @if (imageErrors()[s.id]) {
+                        <div class="snapshot-error" role="status">
+                          <span class="snapshot-error-icon">⚠</span>
+                          <strong>Image unavailable</strong>
+                          <small>{{ s.camera_id }} · refresh the event</small>
+                        </div>
+                      } @else {
+                        <img [src]="snapshotUrl(s.id)" [alt]="'Snapshot from ' + s.camera_id" (error)="markImageError(s.id)" (load)="markImageLoaded(s.id)">
+                        @if (!imageLoaded()[s.id]) {
+                          <span class="snapshot-loading">Loading original image…</span>
+                        }
+                      }
                       <span class="camera-tag">{{ s.camera_id }}</span>
                       @if (s.id === item.primary_snapshot_id) {
                         <span class="primary-tag">FRONT PROOF</span>
@@ -280,6 +294,22 @@ export class EventDetailComponent {
   back = output<void>();
   showJson = signal(false);
   copied = signal(false);
+  imageLoaded = signal<Record<string, boolean>>({});
+  imageErrors = signal<Record<string, boolean>>({});
+
+  snapshotUrl(id: string): string {
+    // Derived proof includes the observed number crop and the raw OCR reading.
+    // Full-resolution links retain the unmodified capture.
+    return `/api/snapshots/${id}?proof=true`;
+  }
+
+  markImageLoaded(id: string) {
+    this.imageLoaded.update(state => ({ ...state, [id]: true }));
+  }
+
+  markImageError(id: string) {
+    this.imageErrors.update(state => ({ ...state, [id]: true }));
+  }
 
   toggleJson() {
     this.showJson.update(v => !v);
@@ -332,4 +362,3 @@ export class EventDetailComponent {
     });
   }
 }
-
