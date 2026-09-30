@@ -209,6 +209,7 @@ def main():
                 resp_data = res.json() if res.content else {}
                 cloud_visit_id = resp_data.get('visitId', visit_id)
                 cloud_event_id = resp_data.get('eventId', 'OK')
+                repo.mark_cloud_synced(event_id, cloud_event_id)
                 print(f"[SUCCESS] {event_id[:8]} | Container={c1} | Visit={cloud_visit_id} | CloudEventId={cloud_event_id}")
                 synced_count += 1
             else:

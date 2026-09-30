@@ -615,10 +615,15 @@ class GateRuntime:
                         if other_cam.gate_id == camera.gate_id and other_cam.id != camera.id:
                             other_occ = self.occupancy[other_cam.id].current
                             if other_occ:
-                                cand = getattr(other_occ, 'event_id', None) or getattr(other_occ, 'provisional_event_id', None)
-                                if cand:
-                                    gate_event_id = cand
-                                    break
+                                # ONLY borrow event_id from a companion camera if the passage is concurrent
+                                # (within cross_camera_view_window_seconds, default 8s) and the companion
+                                # is actively seeing the same passage (not already cleared/stale)
+                                time_gap = abs((frame.timestamp - other_occ.first_seen).total_seconds()) if other_occ.first_seen else 999.0
+                                if time_gap <= self.settings.cross_camera_view_window_seconds and not other_occ.closed and other_occ.clear_since is None:
+                                    cand = getattr(other_occ, 'event_id', None) or getattr(other_occ, 'provisional_event_id', None)
+                                    if cand:
+                                        gate_event_id = cand
+                                        break
                 event_id = gate_event_id or getattr(occupancy, 'event_id', None) or getattr(occupancy, 'provisional_event_id', None)
                 if event_id and not getattr(occupancy, 'provisional_event_id', None):
                     occupancy.provisional_event_id = event_id
