@@ -518,10 +518,20 @@ class CloudOutboxDispatcher:
                                     return (2, c)
                                 return (3, c)
 
+                            def _cam_image_type(c_id):
+                                c = (c_id or '').lower()
+                                if any(k in c for k in ('3', 'rear', 'back')):
+                                    return 'REAR'
+                                if any(k in c for k in ('2', 'left', 'side')):
+                                    return 'LEFT'
+                                if 'right' in c:
+                                    return 'RIGHT'
+                                return 'FRONT'
+
                             for cam_id in sorted(best_by_camera.keys(), key=_cam_sort_key):
                                 snap, data = best_by_camera[cam_id]
                                 c1_images.append({
-                                    'ImageType': 'FRONT',
+                                    'ImageType': _cam_image_type(cam_id),
                                     'CameraId': cam_id,
                                     'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
                                     'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"

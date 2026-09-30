@@ -302,4 +302,5 @@ def test_each_camera_sends_one_image_without_duplicate_views(mock_settings, tmp_
         # Exactly 3 images: one from each camera, no duplicate gate-in-2 views
         camera_ids = [img['CameraId'] for img in container['Images']]
         assert camera_ids == ['gate-in-1', 'gate-in-2', 'gate-in-3']
+        assert [img['ImageType'] for img in container['Images']] == ['FRONT', 'LEFT', 'REAR']
 
