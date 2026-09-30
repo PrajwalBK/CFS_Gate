@@ -119,3 +119,26 @@ def test_twin_containers_saved_under_single_event_id(repository, snapshots, came
     assert full_event['container_size_2'] == '20 FT'
     assert full_event['size_code'] == '22G1'
     assert full_event['size_code_2'] == '22G1'
+
+
+def test_twin_containers_detected_via_container_number_markings(settings, camera):
+    view = ViewOccupancy(settings)
+    camera.gate_exit_axis = None
+
+    # Two text markings detected (TEMU and SEGU) separated along the X axis
+    ts = datetime(2026, 9, 30, 11, 45, 0)
+    frame = Frame(camera.id, ts, 1, np.zeros((720, 1280, 3), dtype=np.uint8), 'source')
+    # Normalized coords: X in 0..1280, Y in 0..720
+    # Front container marking at x=1033..1088 (norm: 0.81..0.85)
+    # Rear container marking at x=336..359 (norm: 0.26..0.28)
+    det_front = Detection(camera.id, ts, 'container_number', 0.85, (1033.0, 416.0, 1088.0, 688.0))
+    det_rear = Detection(camera.id, ts, 'container_number', 0.76, (336.0, 311.0, 359.0, 482.0))
+
+    det = view.update(camera, frame, [det_front, det_rear])
+    assert det is not None
+    assert view.current is not None
+    assert view.current.is_twin is True
+    assert len(view.current.slots) == 2
+    assert 'FRONT' in view.current.slots
+    assert 'REAR' in view.current.slots
+

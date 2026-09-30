@@ -164,24 +164,39 @@ class ViewOccupancy:
             axis = 1 if camera.gate_exit_axis == 'y' else 0
             is_pos = camera.gate_exit_positive if camera.gate_exit_axis is not None else False
             if len(candidates) >= 2:
-                ordered = self._order_slots(candidates[:2], camera)
-                front_det, front_b = ordered[0]
-                rear_det, rear_b = ordered[1]
-                # To be twin containers, they must represent two physical containers on the trailer chassis:
-                # Must have comparable scale (not a background container) and aligned on the passage axis
-                area_front = box_area(front_b)
-                area_rear = box_area(rear_b)
-                area_ratio = min(area_front, area_rear) / max(area_front, area_rear) if max(area_front, area_rear) > 0 else 0
-                is_twin_candidate = (
-                    front_det.class_name not in ('container_number', 'iso_code', 'feet') and
-                    rear_det.class_name not in ('container_number', 'iso_code', 'feet') and
-                    iou(front_b, rear_b) < 0.15 and
-                    area_front >= 0.08 and area_rear >= 0.04 and
-                    area_ratio >= 0.25 and
-                    abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.18 and
-                    abs(center(front_b)[1 - axis] - center(rear_b)[1 - axis]) <= 0.35
-                )
-                if is_twin_candidate:
+                best_pair = None
+                max_sep = 0.0
+                for i in range(len(candidates)):
+                    for j in range(i + 1, len(candidates)):
+                        c1, c2 = candidates[i], candidates[j]
+                        if iou(c1[1], c2[1]) >= 0.15:
+                            continue
+                        sep = abs(center(c1[1])[axis] - center(c2[1])[axis])
+                        align = abs(center(c1[1])[1 - axis] - center(c2[1])[1 - axis])
+                        if sep < 0.18 or align > 0.35:
+                            continue
+                        area_1, area_2 = box_area(c1[1]), box_area(c2[1])
+                        area_ratio = min(area_1, area_2) / max(area_1, area_2) if max(area_1, area_2) > 0 else 0
+                        is_body_twin = (
+                            c1[0].class_name not in ('container_number', 'iso_code', 'feet') and
+                            c2[0].class_name not in ('container_number', 'iso_code', 'feet') and
+                            area_1 >= 0.04 and area_2 >= 0.04 and area_ratio >= 0.25
+                        )
+                        is_text_twin = (
+                            c1[0].class_name in ('container_number', 'container') and
+                            c2[0].class_name in ('container_number', 'container') and
+                            (c1[0].class_name == 'container_number' or c2[0].class_name == 'container_number') and
+                            c1[0].confidence >= 0.40 and c2[0].confidence >= 0.40
+                        )
+                        if is_body_twin or is_text_twin:
+                            if sep > max_sep:
+                                max_sep = sep
+                                best_pair = (c1, c2)
+
+                if best_pair is not None:
+                    ordered = self._order_slots(best_pair, camera)
+                    front_det, front_b = ordered[0]
+                    rear_det, rear_b = ordered[1]
                     if not state.is_twin:
                         state.is_twin = True
                         state.closed = False
@@ -297,23 +312,41 @@ class ViewOccupancy:
 
         base_origin = f'dwell:{camera.id}:{uuid4().hex}'
         prov_id = str(uuid4())
-        if len(non_overlapping) >= 2:
-            ordered = self._order_slots(non_overlapping, camera)
+        axis = 1 if camera.gate_exit_axis == 'y' else 0
+        best_pair = None
+        max_sep = 0.0
+        for i in range(len(non_overlapping)):
+            for j in range(i + 1, len(non_overlapping)):
+                c1, c2 = non_overlapping[i], non_overlapping[j]
+                if iou(c1[1], c2[1]) >= 0.15:
+                    continue
+                sep = abs(center(c1[1])[axis] - center(c2[1])[axis])
+                align = abs(center(c1[1])[1 - axis] - center(c2[1])[1 - axis])
+                if sep < 0.18 or align > 0.35:
+                    continue
+                area_1, area_2 = box_area(c1[1]), box_area(c2[1])
+                area_ratio = min(area_1, area_2) / max(area_1, area_2) if max(area_1, area_2) > 0 else 0
+                is_body_twin = (
+                    c1[0].class_name not in ('container_number', 'iso_code', 'feet') and
+                    c2[0].class_name not in ('container_number', 'iso_code', 'feet') and
+                    area_1 >= 0.04 and area_2 >= 0.04 and area_ratio >= 0.25
+                )
+                is_text_twin = (
+                    c1[0].class_name in ('container_number', 'container') and
+                    c2[0].class_name in ('container_number', 'container') and
+                    (c1[0].class_name == 'container_number' or c2[0].class_name == 'container_number') and
+                    c1[0].confidence >= 0.40 and c2[0].confidence >= 0.40
+                )
+                if is_body_twin or is_text_twin:
+                    if sep > max_sep:
+                        max_sep = sep
+                        best_pair = (c1, c2)
+
+        if best_pair is not None:
+            ordered = self._order_slots(best_pair, camera)
             front_det, front_b = ordered[0]
             rear_det, rear_b = ordered[1]
-            axis = 1 if camera.gate_exit_axis == 'y' else 0
-            area_front = box_area(front_b)
-            area_rear = box_area(rear_b)
-            area_ratio = min(area_front, area_rear) / max(area_front, area_rear) if max(area_front, area_rear) > 0 else 0
-            is_twin = (
-                front_det.class_name not in ('container_number', 'iso_code', 'feet') and
-                rear_det.class_name not in ('container_number', 'iso_code', 'feet') and
-                iou(front_b, rear_b) < 0.15 and
-                area_front >= 0.08 and area_rear >= 0.04 and
-                area_ratio >= 0.25 and
-                abs(center(front_b)[axis] - center(rear_b)[axis]) >= 0.18 and
-                abs(center(front_b)[1 - axis] - center(rear_b)[1 - axis]) <= 0.35
-            )
+            is_twin = True
             if is_twin:
                 slots = {
                     'FRONT': ContainerSlot('FRONT', f'{base_origin}:front', front_b, center(front_b), now, now, now, event_id=None),
