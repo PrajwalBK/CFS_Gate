@@ -116,13 +116,25 @@ def main():
             continue
 
         # Build containers array
+        # Only accept snapshots from cameras that actually had detections for this event
+        detection_cams = {
+            str(d.get('camera_id')).lower()
+            for d in (event.get('detections') or [])
+            if d.get('camera_id')
+        }
+        if event.get('primary_camera_id'):
+            detection_cams.add(str(event['primary_camera_id']).lower())
+
         containers_payload = []
         if c1:
             c1_images = []
             used_cam_ids = set()
             for s, p in valid_snaps:
+                cam = s.get('camera_id', 'gate-in-1')
+                # Guard: Reject snapshots from companion cameras that never detected this event (empty road frames)
+                if detection_cams and cam.lower() not in detection_cams:
+                    continue
                 if not (s.get('image_path') or '').endswith('_rear.jpg'):
-                    cam = s.get('camera_id', 'gate-in-1')
                     if cam in used_cam_ids:
                         cam = f"{cam}-view-{len(used_cam_ids)+1}"
                     used_cam_ids.add(cam)

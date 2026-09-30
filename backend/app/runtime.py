@@ -654,11 +654,14 @@ class GateRuntime:
                 companion_frames = {}
                 for other_cam in self.cameras:
                     if other_cam.gate_id == camera.gate_id and other_cam.id != camera.id:
-                        other_worker = self.manager.workers.get(other_cam.id)
-                        if other_worker:
-                            other_latest = other_worker.latest()
-                            if other_latest and other_latest.image is not None:
-                                companion_frames[other_cam.id] = other_latest.image.copy()
+                        other_occ = self.occupancy[other_cam.id].current
+                        # ONLY include companion frames if the other camera is actively tracking/seeing a vehicle
+                        if other_occ and not other_occ.closed and other_occ.clear_since is None:
+                            other_worker = self.manager.workers.get(other_cam.id)
+                            if other_worker:
+                                other_latest = other_worker.latest()
+                                if other_latest and other_latest.image is not None:
+                                    companion_frames[other_cam.id] = other_latest.image.copy()
 
                 is_stat = bool((active_slot_obj and active_slot_obj.stationary) or getattr(occupancy, 'stationary', False))
                 ent_done = bool(getattr(occupancy, 'entrance_complete', False) or is_stat)

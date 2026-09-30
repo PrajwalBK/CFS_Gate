@@ -502,6 +502,13 @@ class GateRepository:
                     for other_cam_id, other_img in additional_frames.items():
                         if other_cam_id == obs.detection.camera_id or other_img is None:
                             continue
+                        # Guard: Never save empty companion frames from cameras that never detected this vehicle
+                        has_other_detection = session.scalar(select(DetectionRecord.id).where(
+                            DetectionRecord.event_id == event_id,
+                            DetectionRecord.camera_id == other_cam_id
+                        )) is not None
+                        if not has_other_detection:
+                            continue
                         already_saved = session.scalar(select(Snapshot).where(
                             Snapshot.event_id == event_id,
                             Snapshot.camera_id == other_cam_id

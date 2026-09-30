@@ -537,6 +537,9 @@ class CloudOutboxDispatcher:
                                 for snap in event_record['snapshots']:
                                     if len(c1_images) >= 2:
                                         break
+                                    snap_cam = (snap.get('camera_id') or '').lower()
+                                    if snap_cam not in verified_cameras:
+                                        continue
                                     if (snap.get('image_path') or '').endswith('_rear.jpg'):
                                         continue
                                     try:
