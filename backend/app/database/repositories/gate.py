@@ -248,10 +248,10 @@ class GateRepository:
 
                             # 1. Sequential twin 20ft container passage on the same lane:
                             # A truck chassis can carry two distinct 20-foot containers (front and rear).
-                            # If an existing event on the same lane has a 20ft front container (and no container_number_2),
-                            # and this observation is a distinct 20ft container arriving within the passage window (e.g. <= 30s),
-                            # they belong to the same twin-chassis truck passage.
+                            # Only fuse if twin chassis or rear slot is genuinely detected/indicated.
+                            twin_indicated = getattr(obs, 'is_twin', False) or cand.is_twin or is_rear_slot or obs.origin_key.endswith(':rear')
                             if (
+                                twin_indicated and
                                 number and c_num and number != c_num and
                                 len(number) == 11 and len(c_num) == 11 and
                                 time_diff <= 30.0 and
@@ -484,7 +484,10 @@ class GateRepository:
                 # 1. Primary snapshot for this observation
                 snapshot_id = str(uuid4())
                 if is_rear_slot and getattr(obs, 'slot_position', 'FRONT') != 'REAR':
-                    obs.slot_position = 'REAR'
+                    try:
+                        object.__setattr__(obs, 'slot_position', 'REAR')
+                    except Exception:
+                        pass
                 image_path = snapshots.save(snapshot_id, obs, event_id)
                 existing_path_snap = session.scalar(select(Snapshot).where(
                     Snapshot.event_id == event_id,
@@ -502,12 +505,13 @@ class GateRepository:
                     for other_cam_id, other_img in additional_frames.items():
                         if other_cam_id == obs.detection.camera_id or other_img is None:
                             continue
-                        # Guard: Never save empty companion frames from cameras that never detected this vehicle
-                        has_other_detection = session.scalar(select(DetectionRecord.id).where(
-                            DetectionRecord.event_id == event_id,
-                            DetectionRecord.camera_id == other_cam_id
-                        )) is not None
-                        if not has_other_detection:
+                        if hasattr(other_img, 'size') and other_img.size == 0:
+                            continue
+                        if hasattr(other_img, 'shape') and min(other_img.shape[:2]) < 32:
+                            continue
+                        # If full camera frame, filter out completely blank or corrupted frames
+                        if (hasattr(other_img, 'shape') and other_img.shape[0] >= 240 and other_img.shape[1] >= 320 and
+                                hasattr(snapshots, 'compute_quality') and snapshots.compute_quality(other_img) < 1.5):
                             continue
                         already_saved = session.scalar(select(Snapshot).where(
                             Snapshot.event_id == event_id,

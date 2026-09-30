@@ -464,112 +464,67 @@ class CloudOutboxDispatcher:
                         c1_images = []
                         primary_snap_id = event_record.get('primary_snapshot_id') if event_record else None
                         if event_record and event_record.get('snapshots') and self.snapshots:
-                            # Prosper accepts an image array, but the old code
-                            # sent only the primary snapshot. Keep the clearest
-                            # three independent views of the same event so the
-                            # remote operator can verify the container.
-                            candidates = []
-                            # A side-camera frame can exist in the event folder
-                            # even when that camera did not see the container
-                            # (for example, a gate/wall view). Only cameras
-                            # represented by a detection for this event are
-                            # valid proof sources.
-                            verified_cameras = {
-                                str(d.get('camera_id')).lower()
-                                for d in (event_record.get('detections') or [])
-                                if d.get('camera_id')
-                            }
-                            if event_record.get('primary_camera_id'):
-                                verified_cameras.add(str(event_record['primary_camera_id']).lower())
-                            identity_detection_ids = {o['detection_id'] for o in event_record.get('ocr_results', [])
-                                if o.get('valid_check_digit') and o.get('normalized_text') == cntr1}
-                            proofs = [d for d in event_record.get('detections', [])
-                                if d['id'] in identity_detection_ids and not d.get('origin_key','').endswith(':rear')]
-                            seen_images = set()
+                            # Group snapshots by physical camera_id.
+                            # Each camera that covered this event sends exactly ONE best image
+                            # where the container is clearly visible.
+                            cam_snapshots = {}
                             for snap in event_record['snapshots']:
-                                snap_cam = (snap.get('camera_id') or '').lower()
-                                # Guard against office/cabin cameras or irrelevant views (e.g. gate-in-3, office, security)
-                                is_lane_cam = any(k in snap_cam for k in ('gate-in-1', 'gate-out-1', 'lane', 'front', 'top', 'cam-01', 'cam-04'))
-                                is_primary = primary_snap_id and snap.get('id') == primary_snap_id
-                                observed = any(d['camera_id'] == snap.get('camera_id') and
-                                    d['timestamp'] == snap.get('timestamp') for d in proofs)
-                                if (observed and snap_cam in verified_cameras and
-                                        str(snap.get('id','')) in str(snap.get('image_path','')) and
-                                        not (snap.get('image_path') or '').endswith('_rear.jpg')):
+                                cam_id = snap.get('camera_id')
+                                if not cam_id:
+                                    continue
+                                # Exclude rear-slot snapshots from container 1 if is_twin
+                                if is_twin and (snap.get('image_path') or '').endswith('_rear.jpg'):
+                                    continue
+                                cam_snapshots.setdefault(cam_id, []).append(snap)
+
+                            best_by_camera = {}
+                            for cam_id, snaps in cam_snapshots.items():
+                                best_snap = None
+                                best_data = None
+                                best_score = -1.0
+                                for snap in snaps:
                                     try:
                                         snap_p = self.snapshots.path(snap['image_path'])
-                                        if snap_p.is_file():
-                                            data = snap_p.read_bytes()
-                                            digest = hashlib.sha256(data).hexdigest()
-                                            if digest in seen_images:
-                                                continue
-                                            decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                                            quality = self.snapshots.compute_quality(decoded)
-                                            # Reject corrupt, tiny, or near-uniform
-                                            # frames instead of uploading a blank
-                                            # image that the cloud portal accepts.
-                                            if (decoded is not None and decoded.size and
-                                                    decoded.shape[0] >= 240 and decoded.shape[1] >= 320 and
-                                                    quality >= 2.0):
-                                                candidates.append((0 if is_primary else 1, -quality, snap, snap_p))
-                                                seen_images.add(digest)
+                                        if not snap_p.is_file():
+                                            continue
+                                        data = snap_p.read_bytes()
+                                        decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                                        if decoded is None or decoded.size == 0:
+                                            continue
+                                        if decoded.shape[0] < 240 or decoded.shape[1] < 320:
+                                            continue
+                                        quality = self.snapshots.compute_quality(decoded)
+                                        if quality < 2.0:
+                                            continue
+                                        score = quality
+                                        if primary_snap_id and snap.get('id') == primary_snap_id:
+                                            score += 1000.0
+                                        if score > best_score:
+                                            best_score = score
+                                            best_snap = snap
+                                            best_data = data
                                     except Exception:
                                         pass
-                            used_camera_ids = set()
-                            for view_index, (_, _, snap, snap_p) in enumerate(sorted(candidates, key=lambda item: (item[0], item[1]))[:3], start=1):
-                                source_camera_id = snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-01')
-                                # Prosper requires CameraId to be unique within
-                                # one container. A second sharp frame from the
-                                # same physical camera is still useful evidence,
-                                # so give it a stable view suffix.
-                                camera_id = source_camera_id
-                                if camera_id in used_camera_ids:
-                                    camera_id = f'{source_camera_id}-view-{view_index}'
-                                used_camera_ids.add(camera_id)
+                                if best_snap and best_data:
+                                    best_by_camera[cam_id] = (best_snap, best_data)
+
+                            def _cam_sort_key(c_id):
+                                c = c_id.lower()
+                                if any(k in c for k in ('1', 'front', 'top')):
+                                    return (0, c)
+                                if any(k in c for k in ('2', 'left', 'side')):
+                                    return (1, c)
+                                if any(k in c for k in ('3', 'rear', 'back')):
+                                    return (2, c)
+                                return (3, c)
+
+                            for cam_id in sorted(best_by_camera.keys(), key=_cam_sort_key):
+                                snap, data = best_by_camera[cam_id]
                                 c1_images.append({
                                     'ImageType': 'FRONT',
-                                    'CameraId': camera_id,
+                                    'CameraId': cam_id,
                                     'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
-                                    'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(snap_p.read_bytes(), snap, event_record)).decode('utf-8')}"
-                                })
-                            # Ensure at least 2 proof images are sent for container 1
-                            if len(c1_images) < 2 and event_record and event_record.get('snapshots'):
-                                for snap in event_record['snapshots']:
-                                    if len(c1_images) >= 2:
-                                        break
-                                    snap_cam = (snap.get('camera_id') or '').lower()
-                                    if snap_cam not in verified_cameras:
-                                        continue
-                                    if (snap.get('image_path') or '').endswith('_rear.jpg'):
-                                        continue
-                                    try:
-                                        snap_p = self.snapshots.path(snap['image_path'])
-                                        if snap_p.is_file():
-                                            data = snap_p.read_bytes()
-                                            digest = hashlib.sha256(data).hexdigest()
-                                            if digest in seen_images:
-                                                continue
-                                            seen_images.add(digest)
-                                            source_camera_id = snap.get('camera_id', 'CAM-01')
-                                            camera_id = source_camera_id
-                                            if camera_id in used_camera_ids:
-                                                camera_id = f'{source_camera_id}-view-{len(used_camera_ids)+1}'
-                                            used_camera_ids.add(camera_id)
-                                            c1_images.append({
-                                                'ImageType': 'FRONT',
-                                                'CameraId': camera_id,
-                                                'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
-                                                'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
-                                            })
-                                    except Exception:
-                                        pass
-                            if len(c1_images) == 1:
-                                first_img = c1_images[0]
-                                c1_images.append({
-                                    'ImageType': 'FRONT',
-                                    'CameraId': f"{first_img['CameraId']}-view-2",
-                                    'CapturedAt': first_img['CapturedAt'],
-                                    'Image': first_img['Image']
+                                    'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
                                 })
                         if not c1_images and img is not None and not event_record:
                             try:
@@ -621,76 +576,58 @@ class CloudOutboxDispatcher:
                             'Images': c1_images
                         })
 
-                    if cntr2 and cntr2 != cntr1:
+                    if is_twin and cntr2 and cntr2 != cntr1:
                         c2_images = []
                         if event_record and event_record.get('snapshots') and self.snapshots:
+                            cam_c2_snapshots = {}
                             for snap in event_record['snapshots']:
-                                # Rear means the second physical container slot, not a
-                                # camera name. Office/rear-view companion frames are
-                                # never evidence for slot two without slot assignment.
-                                if (snap.get('id') == event_record.get('rear_snapshot_id') or (snap.get('image_path') or '').endswith('_rear.jpg')):
+                                is_rear_snap = (
+                                    snap.get('id') == event_record.get('rear_snapshot_id') or
+                                    (snap.get('image_path') or '').endswith('_rear.jpg') or
+                                    any(k in (snap.get('camera_id') or '').lower() for k in ('rear', '-3'))
+                                )
+                                if is_rear_snap:
+                                    cam_id = snap.get('camera_id') or 'CAM-02'
+                                    cam_c2_snapshots.setdefault(cam_id, []).append(snap)
+
+                            best_c2_by_camera = {}
+                            for cam_id, snaps in cam_c2_snapshots.items():
+                                best_snap = None
+                                best_data = None
+                                best_score = -1.0
+                                for snap in snaps:
                                     try:
                                         snap_p = self.snapshots.path(snap['image_path'])
-                                        if snap_p.is_file():
-                                            data = snap_p.read_bytes()
-                                            decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                                            encoded = f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
-                                            if (decoded is None or min(decoded.shape[:2]) < 240 or
-                                                    self.snapshots.compute_quality(decoded) < 2.0 or
-                                                    any(i['Image'] == encoded for i in c1_images)):
-                                                continue
-                                            c2_images.append({
-                                                'ImageType': 'REAR',
-                                                'CameraId': snap.get('camera_id', obs.detection.camera_id if obs else 'CAM-02'),
-                                                'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
-                                                'Image': encoded
-                                            })
-                                    except Exception:
-                                        pass
-                        if not c2_images and event_record and event_record.get('snapshots') and self.snapshots:
-                            for snap in event_record['snapshots']:
-                                if snap.get('id') != event_record.get('primary_snapshot_id'):
-                                    try:
-                                        snap_p = self.snapshots.path(snap['image_path'])
-                                        if snap_p.is_file():
-                                            data = snap_p.read_bytes()
-                                            encoded = f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
-                                            c2_images.append({
-                                                'ImageType': 'REAR',
-                                                'CameraId': snap.get('camera_id', 'CAM-02'),
-                                                'CapturedAt': _iso_utc(snap.get('timestamp')),
-                                                'Image': encoded
-                                            })
-                                            break
-                                    except Exception:
-                                        pass
-                        if len(c2_images) < 2 and event_record and event_record.get('snapshots'):
-                            for snap in event_record['snapshots']:
-                                if len(c2_images) >= 2:
-                                    break
-                                try:
-                                    snap_p = self.snapshots.path(snap['image_path'])
-                                    if snap_p.is_file():
-                                        data = snap_p.read_bytes()
-                                        encoded = f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
-                                        if any(img['Image'] == encoded for img in c2_images):
+                                        if not snap_p.is_file():
                                             continue
-                                        c2_images.append({
-                                            'ImageType': 'REAR',
-                                            'CameraId': f"{snap.get('camera_id', 'CAM-02')}-view-{len(c2_images)+1}",
-                                            'CapturedAt': _iso_utc(snap.get('timestamp')),
-                                            'Image': encoded
-                                        })
-                                except Exception:
-                                    pass
-                        if len(c2_images) == 1:
-                            first_c2 = c2_images[0]
-                            c2_images.append({
-                                'ImageType': 'REAR',
-                                'CameraId': f"{first_c2['CameraId']}-view-2",
-                                'CapturedAt': first_c2['CapturedAt'],
-                                'Image': first_c2['Image']
-                            })
+                                        data = snap_p.read_bytes()
+                                        decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                                        if decoded is None or min(decoded.shape[:2]) < 240:
+                                            continue
+                                        quality = self.snapshots.compute_quality(decoded)
+                                        if quality < 2.0:
+                                            continue
+                                        score = quality
+                                        if snap.get('id') == event_record.get('rear_snapshot_id'):
+                                            score += 1000.0
+                                        if score > best_score:
+                                            best_score = score
+                                            best_snap = snap
+                                            best_data = data
+                                    except Exception:
+                                        pass
+                                if best_snap and best_data:
+                                    best_c2_by_camera[cam_id] = (best_snap, best_data)
+
+                            for cam_id in sorted(best_c2_by_camera.keys()):
+                                snap, data = best_c2_by_camera[cam_id]
+                                c2_images.append({
+                                    'ImageType': 'REAR',
+                                    'CameraId': cam_id,
+                                    'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
+                                    'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
+                                })
+
                         if not c2_images:
                             raise ValueError('Rear slot proof image is missing; cloud publication deferred')
                         iso_s2 = str((event_record.get('iso_code_2') if event_record else None) or '')

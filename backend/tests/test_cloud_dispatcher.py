@@ -229,3 +229,77 @@ def test_syapi_gate_event_schema(mock_settings):
         assert len(container['Images']) >= 1
         assert container['Images'][0]['CameraId'] == 'CAM-01'
         assert container['Images'][0]['Image'].startswith('data:image/jpeg;base64,')
+
+
+def test_each_camera_sends_one_image_without_duplicate_views(mock_settings, tmp_path):
+    import cv2
+    from pathlib import Path
+
+    # Create dummy sharp images
+    snap_dir = tmp_path / "snaps"
+    snap_dir.mkdir()
+    event_folder = snap_dir / "evt-123"
+    event_folder.mkdir()
+
+    img = np.ones((300, 400, 3), dtype=np.uint8) * 128
+    # Add high contrast edges for high Laplacian quality
+    img[50:250, 50:350] = 255
+    cv2.putText(img, "TEST CONTAINER", (60, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    _, buf = cv2.imencode('.jpg', img)
+
+    p1 = event_folder / "gate-in-1.jpg"
+    p1.write_bytes(buf.tobytes())
+    p2a = event_folder / "gate-in-2-a.jpg"
+    p2a.write_bytes(buf.tobytes())
+    p2b = event_folder / "gate-in-2-b.jpg"
+    p2b.write_bytes(buf.tobytes())
+    p3 = event_folder / "gate-in-3.jpg"
+    p3.write_bytes(buf.tobytes())
+
+    mock_snaps = MagicMock()
+    mock_snaps.path.side_effect = lambda rel: snap_dir / rel
+    mock_snaps.compute_quality.return_value = 150.0
+
+    mock_repo = MagicMock()
+    mock_repo.event.return_value = {
+        'id': 'evt-123',
+        'status': 'CONFIRMED',
+        'container_number': 'BSIU3391518',
+        'container_number_2': None,
+        'is_twin': 0,
+        'iso_code_1': '22G1',
+        'primary_snapshot_id': 'snap-2a',
+        'cloud_synced': 0,
+        'snapshots': [
+            {'id': 'snap-1', 'camera_id': 'gate-in-1', 'image_path': 'evt-123/gate-in-1.jpg', 'timestamp': '2026-09-30T10:00:00Z'},
+            {'id': 'snap-2a', 'camera_id': 'gate-in-2', 'image_path': 'evt-123/gate-in-2-a.jpg', 'timestamp': '2026-09-30T10:00:01Z'},
+            {'id': 'snap-2b', 'camera_id': 'gate-in-2', 'image_path': 'evt-123/gate-in-2-b.jpg', 'timestamp': '2026-09-30T10:00:02Z'},
+            {'id': 'snap-3', 'camera_id': 'gate-in-3', 'image_path': 'evt-123/gate-in-3.jpg', 'timestamp': '2026-09-30T10:00:03Z'},
+        ]
+    }
+    mock_repo.canonical_event_id.return_value = 'evt-123'
+
+    dispatcher = CloudOutboxDispatcher(mock_settings, repository=mock_repo, snapshots=mock_snaps)
+
+    with patch.object(dispatcher.session, 'post_gate_event', return_value=True) as mock_post:
+        dispatcher.start()
+        dispatcher.enqueue(None, 'evt-123')
+
+        for _ in range(20):
+            if dispatcher.queue.empty() and mock_post.called:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+        assert mock_post.called
+        payload = mock_post.call_args[0][0]
+        assert len(payload['Containers']) == 1
+        container = payload['Containers'][0]
+        assert container['ContainerNumber'] == 'BSIU3391518'
+        assert container['Position'] == 'SINGLE'
+
+        # Exactly 3 images: one from each camera, no duplicate gate-in-2 views
+        camera_ids = [img['CameraId'] for img in container['Images']]
+        assert camera_ids == ['gate-in-1', 'gate-in-2', 'gate-in-3']
+
