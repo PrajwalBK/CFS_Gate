@@ -158,7 +158,7 @@ class GateRepository:
                 prior = session.scalar(select(DetectionRecord).where(DetectionRecord.origin_key == obs.origin_key))
                 if prior:
                     return prior.event_id, False
-                number = obs.ocr.normalized_text if obs.confirmed else None
+                number = obs.ocr.normalized_text if (obs.confirmed or getattr(obs.ocr, 'valid_check_digit', False)) else None
                 delta = timedelta(seconds=dedup_seconds)
                 existing = None
 

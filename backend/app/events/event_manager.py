@@ -33,7 +33,7 @@ class EventManager:
         # A persisted event is already committed. This also covers NEEDS_REVIEW
         # events: replaying the same spool job must not clear its event link or
         # create a second record after a restart.
-        if evidence.event_id:
+        if evidence.event_id and evidence.confirmed:
             return evidence.event_id, False
         evidence.last_seen = job.detection.frame_timestamp
         # Retrying the same failed DB write is not another independent OCR vote.
@@ -63,8 +63,10 @@ class EventManager:
         if not confirmed:
             # Let the truck complete its entrance before publishing an unconfirmed / NEEDS_REVIEW event!
             is_entrance_done = getattr(job, 'entrance_complete', True) or getattr(job, 'is_stationary', True)
-            if not is_entrance_done and len(evidence.reads) < self.settings.ocr_max_attempts:
-                return None
+            if len(evidence.reads) < self.settings.ocr_max_attempts:
+                # If we have a valid check-digit candidate, wait for confirmation votes
+                if count >= 1 or not is_entrance_done:
+                    return None
             # If all attempts yielded no readable text, flag for review with an alert rather than silently dropping
             if not any(getattr(r, 'raw_text', None) for r in evidence.reads if r):
                 from app.domain import Validation
