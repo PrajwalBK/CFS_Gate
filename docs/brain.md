@@ -635,3 +635,10 @@ To support co-located deployments and concurrent testing environments across dif
 - **Unconfirmed Dwell Upgrades**:
   - In `EventManager.observe`, enabled incoming confirmed reads on existing dwell tracks (`evidence.event_id`) to update the committed database record and upgrade status to `CONFIRMED`.
   - Added sample gating to ensure tracks with valid check-digit candidates await confirmation votes rather than publishing prematurely on sample 1.
+
+## 31. YOLO label normalization and container body detection (October 1, 2026)
+
+- **Class Label Alias Normalization**:
+  - The detection model `best.pt` uses the label `container_object` for the physical container body and `Cointainer` for the text serial box. Because `container_object` was not mapped in `CLASS_ALIASES`, `YoloDetector.detect` discarded all container body bounding boxes whenever this class was predicted.
+  - Hardened `YoloDetector.detect` with internal normalization: automatically maps `container_object` and `cointainer` to `container`, and `feet` to `iso_code`.
+  - Configured `TARGET_CLASSES` in `backend/.env` to include all model variants (`container`, `container_object`, `cointainer`, `container_number`, `feet`, `iso_code`), guaranteeing that whole-container detections on wide cameras (such as `gate-out-2`) are accepted and passed directly to tracking and OCR.

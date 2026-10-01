@@ -50,9 +50,16 @@ class YoloDetector:
             if result.boxes is None:
                 continue
             for box in result.boxes:
-                name = str(result.names[int(box.cls.item())]).lower()
-                name = self.settings.class_aliases.get(name, name)
-                if name not in self.settings.target_classes and name not in ('truck', 'trailer'):
+                raw_name = str(result.names[int(box.cls.item())]).lower()
+                name = self.settings.class_aliases.get(raw_name, raw_name)
+                if name in ('container_object', 'cointainer'):
+                    name = 'container'
+                elif name == 'feet':
+                    name = 'iso_code'
+                allowed = set(self.settings.target_classes) | {
+                    'container', 'container_number', 'iso_code', 'truck', 'trailer', 'vehicle'
+                }
+                if name not in allowed:
                     continue
                 confidence = float(box.conf.item())
                 coords = [float(v) for v in box.xyxy[0].tolist()]

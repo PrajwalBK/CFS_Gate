@@ -1,5 +1,16 @@
 # GateVision — Project Change Log
 
+## 2026-10-01 15:35 IST — Fix YOLO container_object & Text Class Aliases
+
+- **Model Label Normalization in YoloDetector**:
+  - Identified root cause of missed container body detections on cameras (specifically `gate-out-2`): `runs/detect/gate_detector/weights/best.pt` uses label `container_object` for the physical container body and `Cointainer` for the text serial box.
+  - In `backend/app/detection/yolo_detector.py`, added automatic label normalization mapping `container_object` and `cointainer` directly to `container`, and `feet` to `iso_code`.
+  - Added explicit union with container and vehicle classes to ensure detections are never dropped due to class name alias mismatches.
+- **Environment Configuration Alignment**:
+  - Updated `CLASS_ALIASES={"cointainer":"container","container_object":"container","feet":"iso_code"}` in `backend/.env`.
+  - Expanded `TARGET_CLASSES` to include `container_object`, `cointainer`, `container_number`, `feet`, and `iso_code`.
+- **Verification**: Verified that a live container frame previously discarded is now immediately detected with 57.9% confidence as `Class: container`. All 24 backend test suites pass 100%.
+
 ## 2026-10-01 15:15 IST — Prevent Duplicate Passage Events and Preserve Valid Container Numbers
 
 - **Deduplication Identity Preservation**:
