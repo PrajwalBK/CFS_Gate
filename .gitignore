@@ -88,6 +88,8 @@ backend/uploads/*.webm
 backend/uploads/ocr-spool/
 **/ocr-spool/**
 uploads/ocr-spool/
+backend/uploads/*.json
+uploads/*.json
 
 # --- Scratch, Test Crops & Temporary Images ---
 scratch/
@@ -122,6 +124,8 @@ frontend/node_modules/
 *.sqlite
 *.sqlite3
 *.log
+logs/
+backend/logs/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

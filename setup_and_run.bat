@@ -106,7 +106,7 @@ echo   Installing core packages from requirements.txt...
 "%VENV_PIP%" install -r "%BACKEND_DIR%\requirements.txt"
 
 if exist "%BACKEND_DIR%\requirements-ai.txt" (
-    echo   Installing AI packages (Ultralytics, EasyOCR, PaddleOCR)...
+    echo   Installing AI packages: Ultralytics, EasyOCR, PaddleOCR...
     "%VENV_PIP%" install -r "%BACKEND_DIR%\requirements-ai.txt"
 )
 
@@ -132,13 +132,13 @@ where npm >nul 2>&1
 if %ERRORLEVEL% equ 0 (
     pushd "%FRONTEND_DIR%"
     if not exist "node_modules" (
-        echo   Installing frontend dependencies (npm install)...
+        echo   Installing frontend dependencies...
         call npm install
     ) else (
         echo   Frontend node_modules present.
     )
     if not exist "%FRONTEND_INDEX%" (
-        echo   Compiling Angular frontend (npm run build)...
+        echo   Compiling Angular frontend...
         call npm run build
     ) else (
         echo   Frontend build ready.
@@ -151,14 +151,14 @@ if %ERRORLEVEL% equ 0 (
 echo.
 echo [7/7] Launching GateVision AI...
 
-:: Check if port is already running
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":%PORT% " ^| findstr "LISTENING"') do (
-    set "CONFLICT_PID=%%a"
-    if defined CONFLICT_PID (
-        echo   Port %PORT% is in use by PID !CONFLICT_PID!. Terminating old instance...
-        taskkill /F /PID !CONFLICT_PID! >nul 2>&1
-        timeout /t 1 /nobreak >nul
-    )
+:: Check if port is already running, find next free port without affecting running instances
+:check_port_loop
+netstat -aon | findstr ":!PORT! " | findstr "LISTENING" >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    set /a PREV_PORT=!PORT!
+    set /a PORT+=1
+    echo   Port !PREV_PORT! is in use by another application. Keeping it running and switching to port !PORT!...
+    goto check_port_loop
 )
 
 echo ======================================================================

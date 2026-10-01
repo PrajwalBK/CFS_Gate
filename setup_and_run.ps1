@@ -225,21 +225,36 @@ if ($npmCmd) {
 
 # [7/7] Port Conflict Resolution & Launch Application
 Write-Host "`n[7/7] Checking port availability and preparing launch..." -ForegroundColor Yellow
-$activeConnections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($activeConnections) {
-    $conflictPids = $activeConnections | Select-Object -ExpandProperty OwningProcess -Unique
-    foreach ($cPid in $conflictPids) {
-        $cProc = Get-Process -Id $cPid -ErrorAction SilentlyContinue
-        if ($cProc) {
-            if ($cProc.ProcessName -match "python" -or $cProc.ProcessName -match "uvicorn") {
-                Write-Host "  Port $Port is occupied by existing $($cProc.ProcessName) (PID: $cPid). Terminating old instance..." -ForegroundColor Yellow
-                Stop-Process -Id $cPid -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 1
-            } else {
-                Write-Warning "Port $Port is currently in use by process $($cProc.ProcessName) (PID: $cPid)."
+
+function Get-AvailablePort([string]$hostAddr, [int]$startPort) {
+    $p = $startPort
+    while ($p -le 65535) {
+        $inUse = $false
+        $active = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
+        if ($active) {
+            $inUse = $true
+        } else {
+            try {
+                $ip = if ($hostAddr -eq '0.0.0.0') { [System.Net.IPAddress]::Any } else { [System.Net.IPAddress]::Parse($hostAddr) }
+                $listener = [System.Net.Sockets.TcpListener]::new($ip, $p)
+                $listener.Start()
+                $listener.Stop()
+            } catch {
+                $inUse = $true
             }
         }
+        if (-not $inUse) {
+            return $p
+        }
+        $p++
     }
+    throw "No available ports found starting from $startPort"
+}
+
+$originalPort = $Port
+$Port = Get-AvailablePort -hostAddr $HostAddress -startPort $Port
+if ($Port -ne $originalPort) {
+    Write-Host "  Port $originalPort is unavailable. Automatically switched to port $Port." -ForegroundColor Yellow
 }
 
 $dashboardUrl = "http://localhost:$Port"

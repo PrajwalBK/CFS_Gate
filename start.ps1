@@ -31,6 +31,37 @@ if ($BuildFrontend -or -not (Test-Path -LiteralPath $frontendIndex -PathType Lea
     }
 }
 
+function Get-AvailablePort([string]$hostAddr, [int]$startPort) {
+    $p = $startPort
+    while ($p -le 65535) {
+        $inUse = $false
+        $active = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
+        if ($active) {
+            $inUse = $true
+        } else {
+            try {
+                $ip = if ($hostAddr -eq '0.0.0.0') { [System.Net.IPAddress]::Any } else { [System.Net.IPAddress]::Parse($hostAddr) }
+                $listener = [System.Net.Sockets.TcpListener]::new($ip, $p)
+                $listener.Start()
+                $listener.Stop()
+            } catch {
+                $inUse = $true
+            }
+        }
+        if (-not $inUse) {
+            return $p
+        }
+        $p++
+    }
+    throw "No available ports found starting from $startPort"
+}
+
+$originalPort = $Port
+$Port = Get-AvailablePort -hostAddr $HostAddress -startPort $Port
+if ($Port -ne $originalPort) {
+    Write-Host ("Port {0} is currently in use. Automatically switched to available port: {1}" -f $originalPort, $Port) -ForegroundColor Yellow
+}
+
 Write-Host ("GateVision starting at http://{0}:{1}" -f $HostAddress, $Port)
 Write-Host 'Press Ctrl+C to stop the complete application.'
 Set-Location $backendRoot

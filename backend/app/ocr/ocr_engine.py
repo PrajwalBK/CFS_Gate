@@ -60,6 +60,7 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
         # PaddleX imports ModelScope only to discover optional remote model
         # sources. Loading its PyTorch helpers would reintroduce the DLL clash.
         sys.modules['modelscope'] = types.ModuleType('modelscope')
+        os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'
         from paddleocr import PaddleOCR
         device = 'gpu:0' if use_gpu and paddle.is_compiled_with_cuda() else 'cpu'
         paddle.set_device(device)
