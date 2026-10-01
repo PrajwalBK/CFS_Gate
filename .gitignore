@@ -140,12 +140,8 @@ yarn-error.log*
 Thumbs.db
 
 # --- Documentation Notes & Agent Logs ---
-brain.md
 chat.md
-CHANGELOG.md
-docs/brain.md
 docs/chat.md
-docs/CHANGELOG.md
 *.chat
 *.prompt
 
