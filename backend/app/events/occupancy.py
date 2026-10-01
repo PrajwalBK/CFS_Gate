@@ -116,7 +116,7 @@ class ViewOccupancy:
         for d, b in all_boxes:
             cx, cy = center(b)
             if iou(b, zone) > 0 and (zone[0] <= cx <= zone[2] and zone[1] <= cy <= zone[3]) and not self._past_exit(b, camera):
-                min_area = 0.015 if d.class_name == 'container' else 0.0001
+                min_area = 0.005 if d.class_name == 'container' else 0.0001
                 if box_area(b) >= min_area:
                     raw_candidates.append((d, b))
 
@@ -257,7 +257,7 @@ class ViewOccupancy:
             state.stationary = any(s.stationary for s in state.slots.values()) if state.slots else False
             state.entrance_complete = state.stationary or (
                 (now - state.first_seen).total_seconds() >= self.settings.gate_observation_gap_seconds and
-                (box_area(state.bbox) >= 0.015 or len(candidates) > 0)
+                (box_area(state.bbox) >= 0.005 or len(candidates) > 0)
             )
             state.closed = all(s.closed for s in state.slots.values()) if state.slots else False
             if 'FRONT' in state.slots:

@@ -2,7 +2,7 @@
 param(
     [string]$HostAddress = '127.0.0.1',
     [ValidateRange(1, 65535)]
-    [int]$Port = 8001,
+    [int]$Port = 8002,
     [switch]$BuildFrontend
 )
 
@@ -12,6 +12,15 @@ $backendRoot = Join-Path $launcherRoot 'backend'
 $frontendRoot = Join-Path $launcherRoot 'frontend'
 $backendPython = Join-Path $backendRoot '.venv\Scripts\python.exe'
 $frontendIndex = Join-Path $frontendRoot 'dist\gate\browser\index.html'
+
+# Ensure root snapshots junction points to backend snapshots
+$snapshotsRoot = Join-Path $launcherRoot 'snapshots'
+$backendSnapshots = Join-Path $backendRoot 'snapshots'
+if (-not (Test-Path -LiteralPath $snapshotsRoot)) {
+    try {
+        New-Item -ItemType Junction -Path $snapshotsRoot -Target $backendSnapshots -ErrorAction SilentlyContinue | Out-Null
+    } catch {}
+}
 
 if (-not (Test-Path -LiteralPath $backendPython -PathType Leaf)) {
     throw 'Backend environment is missing. Create backend\.venv and install backend\requirements.txt first.'

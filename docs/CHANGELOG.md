@@ -1,6 +1,19 @@
 # GateVision — Project Change Log
 
-## 2026-10-01 13:50 IST — Fix OCR Delimiter Parsing, Prevent False Size Code Overwrites, and Enable Single-Shot Confirmations
+## 2026-10-01 15:10 IST — Dual-Application Coexistence, Port 8002 Alignment, and Snapshot Publishing Fixes
+
+- **Multi-Application Concurrent Execution**:
+  - Configured `frontend/proxy.conf.json` to proxy `/api` requests to `http://127.0.0.1:8002` so the Angular UI connects directly to this workspace rather than pointing to the parallel project on port 8001.
+  - Set default server port in `start.ps1` and `backend/start.ps1` to `8002` to avoid initial port collisions with other developers' applications running on port 8001.
+  - Expanded `CORS_ORIGINS` in `backend/.env` to include ports `4201`, `4202`, and `8002`.
+- **Snapshot Directory Junction Automation**:
+  - Added automatic Windows directory junction creation in `start.ps1` linking `e:\project\snapshots` directly to `e:\project\backend\snapshots`, ensuring snapshots are visible from both root and backend workspace directories.
+- **Occupancy & Unconfirmed Event Snapshot Publishing**:
+  - Lowered minimum container bounding box area in `backend/app/events/occupancy.py` from `0.015` to `0.005` so wide-angle cameras and smaller lane perspective containers trigger occupancy candidates reliably.
+  - Removed redundant early return in `backend/app/events/event_manager.py` that previously prevented unconfirmed passages (`status: NEEDS_REVIEW`) from saving snapshots when attempts were below max attempts. Now passages with completed entrances immediately record the event and write multi-camera snapshots.
+- **Verification**: All 24 backend test suites passed 100%. Verified live database event generation, PaddleOCR output (`SUNIL TRANSPORT ALL INDIA PERALY`), and multi-camera JPEG snapshots written to disk.
+
+
 
 - **OCR Delimiter-Tolerant Parsing & Multiline Stacking**:
   - Solved container validation failure where delimiter characters (`|`, `/`, `-`, `1`) between the 4-letter owner prefix and 6-digit serial number (e.g. `TRHU1 1545895`) caused ISO 6346 rejection. Added delimiter-tolerant verification that checks checksum after delimiter detachment, correctly identifying `TRHU1545895`.

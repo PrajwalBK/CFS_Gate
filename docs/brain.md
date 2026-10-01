@@ -617,4 +617,14 @@ To support co-located deployments and concurrent testing environments across dif
 - **Removed Size Marking Fallback Hijacking**: Fixed a regression where presence of standard container size codes (`22G1`, `45G1`) in raw text caused the validator to truncate the normalized container text to `'22G'` and force `VALID_SIZE_CODE` (`NEEDS_REVIEW`), discarding the valid container number.
 - **Fast-Passage Confirmation**: When tracking completes and the attempt ceiling is reached, if at least one sample yielded a valid check-digit read without conflicting candidates, `EventManager` confirms the event rather than discarding the valid read into `NEEDS_REVIEW`.
 - **Windows MAX_PATH Protection**: Shortened temporary file generation in `OCRJobStore` to prevent path overflows on deep directory structures.
+## 29. Dual-application coexistence and snapshot publishing architecture (October 1, 2026)
 
+- **Port Isolation & UI Proxy Targeting**:
+  - When running in environments where another instance or project occupies port `8001` (such as a parallel development directory on another disk drive), `frontend/proxy.conf.json` is aligned to target `http://127.0.0.1:8002`.
+  - Default listening port for `start.ps1` and `backend/start.ps1` is defaulted to `8002`, eliminating port collision warnings while maintaining automatic incrementation to subsequent ports (`8003+`) if needed.
+  - `CORS_ORIGINS` in `backend/.env` is expanded to permit `http://localhost:4201`, `http://127.0.0.1:4201`, and `http://127.0.0.1:8002`.
+- **Snapshot Directory Junction Automation**:
+  - Automatically initializes a Windows NTFS directory junction from `snapshots` at the repository root to `backend/snapshots`, ensuring that users inspecting either the root folder or backend folder immediately see all generated event snapshots and proof crops.
+- **Occupancy Sensitivity & Unconfirmed Snapshot Preservation**:
+  - Decreased the minimum candidate bounding box threshold in `ViewOccupancy` from `0.015` to `0.005`, accommodating wide-angle camera perspectives and distant lane approaches without missing valid container passages.
+  - Streamlined `EventManager.observe`: eliminated redundant attempt-count gates so that once a passage completes its physical entrance (`entrance_complete=True`), unconfirmed events (`status: NEEDS_REVIEW`) are saved to the database and multi-camera proof snapshots are written to disk.

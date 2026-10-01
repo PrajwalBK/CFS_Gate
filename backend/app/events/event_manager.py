@@ -60,8 +60,6 @@ class EventManager:
             confirmed = True
         if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and count >= 1 and not tied:
             confirmed = True
-        if not confirmed and len(evidence.reads) < self.settings.ocr_max_attempts:
-            return None
         if not confirmed:
             # Let the truck complete its entrance before publishing an unconfirmed / NEEDS_REVIEW event!
             is_entrance_done = getattr(job, 'entrance_complete', True) or getattr(job, 'is_stationary', True)
