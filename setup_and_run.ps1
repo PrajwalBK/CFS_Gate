@@ -251,6 +251,19 @@ function Get-AvailablePort([string]$hostAddr, [int]$startPort) {
     throw "No available ports found starting from $startPort"
 }
 
+# Clean up any orphaned background processes belonging to this specific workspace
+$conns = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 8000 -and $_.LocalPort -le 8010 }
+foreach ($c in $conns) {
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $($c.OwningProcess)" -ErrorAction SilentlyContinue
+        if ($proc -and $proc.CommandLine -and ($proc.CommandLine -like "*$backendRoot*" -or $proc.ExecutablePath -like "*$backendRoot*")) {
+            Write-Host ("Reclaiming port {0} from previous background run of this project (PID {1})..." -f $c.LocalPort, $c.OwningProcess) -ForegroundColor DarkGray
+            Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+        }
+    } catch {}
+}
+
 $originalPort = $Port
 $Port = Get-AvailablePort -hostAddr $HostAddress -startPort $Port
 if ($Port -ne $originalPort) {
