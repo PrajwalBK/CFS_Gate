@@ -3,7 +3,8 @@ param(
     [string]$HostAddress = '127.0.0.1',
     [ValidateRange(1, 65535)]
     [int]$Port = 8001,
-    [switch]$BuildFrontend
+    [switch]$BuildFrontend,
+    [switch]$NoBrowser
 )
 
 $ErrorActionPreference = 'Stop'
@@ -84,8 +85,26 @@ if ($Port -ne $originalPort) {
     Write-Host ("Port {0} is currently in use. Automatically switched to available port: {1}" -f $originalPort, $Port) -ForegroundColor Yellow
 }
 
-Write-Host ("GateVision starting at http://{0}:{1}" -f $HostAddress, $Port)
-Write-Host 'Press Ctrl+C to stop the complete application.'
+$dashboardUrl = "http://localhost:$Port"
+$docsUrl = "http://localhost:$Port/docs"
+
+Write-Host ""
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "                     GateVision AI is Starting                       " -ForegroundColor Green
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "  Web Dashboard : $dashboardUrl" -ForegroundColor Green
+Write-Host "  API Docs      : $docsUrl" -ForegroundColor Green
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "Press Ctrl+C in this terminal to shut down the server.`n" -ForegroundColor DarkGray
+
+if (-not $NoBrowser) {
+    Start-Job -ScriptBlock {
+        param($url)
+        Start-Sleep -Seconds 2
+        try { Start-Process $url } catch {}
+    } -ArgumentList $dashboardUrl | Out-Null
+}
+
 Set-Location $backendRoot
 & $backendPython -m uvicorn app.main:app --host $HostAddress --port $Port --workers 1 --no-access-log
 exit $LASTEXITCODE
