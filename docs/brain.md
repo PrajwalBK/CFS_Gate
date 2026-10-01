@@ -627,4 +627,11 @@ To support co-located deployments and concurrent testing environments across dif
   - Automatically initializes a Windows NTFS directory junction from `snapshots` at the repository root to `backend/snapshots`, ensuring that users inspecting either the root folder or backend folder immediately see all generated event snapshots and proof crops.
 - **Occupancy Sensitivity & Unconfirmed Snapshot Preservation**:
   - Decreased the minimum candidate bounding box threshold in `ViewOccupancy` from `0.015` to `0.005`, accommodating wide-angle camera perspectives and distant lane approaches without missing valid container passages.
-  - Streamlined `EventManager.observe`: eliminated redundant attempt-count gates so that once a passage completes its physical entrance (`entrance_complete=True`), unconfirmed events (`status: NEEDS_REVIEW`) are saved to the database and multi-camera proof snapshots are written to disk.
+## 30. Passage deduplication and check digit preservation (October 1, 2026)
+
+- **Container Number Preservation During Deduplication**:
+  - In `GateRepository.save_observation`, resolved a defect where unconfirmed observations (`obs.confirmed=False`) discarded the parsed container number to `None`. When an OCR reading has a valid check digit (`getattr(obs.ocr, 'valid_check_digit', False)`), the normalized container number is preserved.
+  - This allows the 15-minute `SAME_CONTAINER_EVENT_WINDOW_SECONDS` deduplication window to reliably associate subsequent dwells or slow passages directly with the existing event record instead of creating duplicate `NEEDS_REVIEW` events with null container numbers.
+- **Unconfirmed Dwell Upgrades**:
+  - In `EventManager.observe`, enabled incoming confirmed reads on existing dwell tracks (`evidence.event_id`) to update the committed database record and upgrade status to `CONFIRMED`.
+  - Added sample gating to ensure tracks with valid check-digit candidates await confirmation votes rather than publishing prematurely on sample 1.

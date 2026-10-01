@@ -1,5 +1,16 @@
 # GateVision — Project Change Log
 
+## 2026-10-01 15:15 IST — Prevent Duplicate Passage Events and Preserve Valid Container Numbers
+
+- **Deduplication Identity Preservation**:
+  - In `backend/app/database/repositories/gate.py`, updated `number` extraction so valid container numbers with verified check digits are never blanked out to `None` during unconfirmed passes:
+    `number = obs.ocr.normalized_text if (obs.confirmed or getattr(obs.ocr, 'valid_check_digit', False)) else None`
+  - Ensures the 15-minute `SAME_CONTAINER_EVENT_WINDOW_SECONDS` (900s) query reliably matches existing passage records, eliminating duplicate `NEEDS_REVIEW` events for dwell tracks or stationary trucks.
+- **Unconfirmed Dwell Upgrade Support**:
+  - In `backend/app/events/event_manager.py`, updated `observe()` to allow incoming confirmed reads on existing dwell tracks to upgrade the database record from `NEEDS_REVIEW` to `CONFIRMED`.
+  - Configured sample gating to await confirmation votes when a valid check digit is identified (`count >= 1`) rather than prematurely firing an unconfirmed event on sample 1.
+- **Verification**: Cleaned and merged orphaned duplicate event `50fa6f38` into confirmed event `db286664` (`EGHU3934143`), verified 24 backend tests passing 100%.
+
 ## 2026-10-01 15:10 IST — Dual-Application Coexistence, Port 8002 Alignment, and Snapshot Publishing Fixes
 
 - **Multi-Application Concurrent Execution**:
