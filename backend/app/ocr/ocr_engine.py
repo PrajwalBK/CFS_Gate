@@ -184,17 +184,29 @@ class FallbackOCREngine:
 
     def _secondary(self):
         with self._fallback_lock:
+            if self._fallback is False:
+                return None
             if self._fallback is None:
-                self._fallback = self._fallback_factory()
-            return self._fallback
+                try:
+                    self._fallback = self._fallback_factory()
+                except Exception as exc:
+                    log.warning('ocr_fallback_unavailable', extra={'error_type': type(exc).__name__, 'error': str(exc)})
+                    self._fallback = False
+            return self._fallback if self._fallback is not False else None
 
     def read(self, image) -> OCRRead:
         primary = self.primary.read(image)
-        return primary if self._usable(primary) else self._secondary().read(image)
+        if self._usable(primary):
+            return primary
+        secondary = self._secondary()
+        return secondary.read(image) if secondary else primary
 
     def read_iso(self, image) -> OCRRead:
         primary = self.primary.read_iso(image)
-        return primary if primary.raw_text else self._secondary().read_iso(image)
+        if primary.raw_text:
+            return primary
+        secondary = self._secondary()
+        return secondary.read_iso(image) if secondary else primary
 
     def close(self):
         for engine in (self.primary, self._fallback):
