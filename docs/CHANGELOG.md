@@ -1,5 +1,17 @@
 # GateVision — Project Change Log
 
+## 2026-10-01 13:50 IST — Fix OCR Delimiter Parsing, Prevent False Size Code Overwrites, and Enable Single-Shot Confirmations
+
+- **OCR Delimiter-Tolerant Parsing & Multiline Stacking**:
+  - Solved container validation failure where delimiter characters (`|`, `/`, `-`, `1`) between the 4-letter owner prefix and 6-digit serial number (e.g. `TRHU1 1545895`) caused ISO 6346 rejection. Added delimiter-tolerant verification that checks checksum after delimiter detachment, correctly identifying `TRHU1545895`.
+  - Added multiline single-line normalization to parse vertically stacked container markings on doors and corner posts (e.g. `CSQU\n305438\n3`).
+- **Eliminated False Size Code Overwrites**:
+  - Removed faulty fallback that intercepted raw text containing size markings (`22G1`/`45G1`) and hijacked the normalized container text to `'22G'`, forcing valid reads into `VALID_SIZE_CODE` (`NEEDS_REVIEW`).
+- **Fast-Passage Confirmation & Spool Path Resilience**:
+  - In `EventManager`, added confirmation promotion when attempts are exhausted and at least one valid check-digit read exists (`count >= 1` and `not tied`), preventing fast-moving trucks with single sharp frames from degrading into empty `NEEDS_REVIEW` events.
+  - Shortened temporary spool image filenames in `OCRJobStore` to prevent Windows `MAX_PATH` (260 char) path overflow errors.
+- **Verification**: All 14 validator tests passed including new `test_delimiter_tolerant_container_read`. Verified on database sample `TRHU1 1545895` now correctly validating as `TRHU1545895` (`VALID`).
+
 ## 2026-10-01 13:10 IST — Multi-Instance Launcher, Dynamic Port Resolution, and OCR Pipeline Hardening
 
 - **Dynamic Port Conflict Resolution & Multi-Instance Safety**:

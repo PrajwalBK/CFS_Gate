@@ -49,7 +49,7 @@ class OCRJobStore:
         if path.exists():
             if path.read_bytes() == data:
                 return
-        temporary = path.with_name(path.name + '.' + uuid4().hex + '.tmp')
+        temporary = path.with_name(f'{uuid4().hex[:8]}.tmp')
         try:
             with temporary.open('wb') as file:
                 file.write(data)

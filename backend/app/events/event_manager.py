@@ -58,6 +58,8 @@ class EventManager:
         )
         if dwell_end_fallback:
             confirmed = True
+        if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and count >= 1 and not tied:
+            confirmed = True
         if not confirmed and len(evidence.reads) < self.settings.ocr_max_attempts:
             return None
         if not confirmed:

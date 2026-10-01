@@ -153,9 +153,43 @@ class ContainerValidator:
             return Validation('', '', 0.0, False, False, 'INVALID_FORMAT')
 
         raw = correct_feet_size_codes(sanitized)
+        single_line_raw = ' '.join(raw.splitlines())
+
         candidates = {normalize(m.group(1)) for m in CANDIDATE.finditer(raw.upper())}
+        if not candidates and single_line_raw != raw:
+            candidates = {normalize(m.group(1)) for m in CANDIDATE.finditer(single_line_raw.upper())}
+
+        # Tolerant delimiter candidate matching: handles OCR delimiter noise like 'TRHU1 1545895',
+        # 'TRHU | 154589 [5]', 'TRHU - 154589 5', 'TRHU/1545895'
+        if not candidates:
+            tolerant_matches = re.finditer(
+                r'(?<![A-Z0-9])([A-Z]{3}[UJZ])[ \t\r\n\-.:/|]*([0-9Il|/ \t\-.:]{6,12})(?![0-9])',
+                raw.upper()
+            )
+            for m in tolerant_matches:
+                prefix = m.group(1)
+                first_line_digits = m.group(2).splitlines()[0]
+                cleaned_digits = re.sub(r'[^0-9]', '', first_line_digits.replace('I', '1').replace('L', '1').replace('|', '1'))
+                has_separator = any(c in m.group(0) for c in ' \t\r\n-.:/|')
+                if len(cleaned_digits) == 7:
+                    candidates.add(prefix + cleaned_digits)
+                elif len(cleaned_digits) == 8 and has_separator:
+                    # Delimiter character read as 1/0/I before serial number (e.g. TRHU1 1545895 -> TRHU 154589 5)
+                    c1_pref = prefix + cleaned_digits[1:7]
+                    cd1_expected = int(cleaned_digits[7])
+                    cd1_calc = check_digit(c1_pref)
+                    if cd1_calc == cd1_expected or (cd1_expected, cd1_calc) in CHECK_DIGIT_CONFUSIONS:
+                        candidates.add(c1_pref + str(cd1_calc))
+                elif len(cleaned_digits) == 6 and has_separator:
+                    c_pref = prefix + cleaned_digits
+                    candidates.add(c_pref + str(check_digit(c_pref)))
+
         if len(candidates) > 1:
-            return Validation(raw, '', read.confidence, False, False, 'AMBIGUOUS')
+            valid_cands = [c for c in candidates if bool(STRUCTURE.fullmatch(c)) and check_digit(c[:10]) == int(c[10])]
+            if len(valid_cands) == 1:
+                normalized = valid_cands[0]
+            else:
+                return Validation(raw, '', read.confidence, False, False, 'AMBIGUOUS')
         elif candidates:
             normalized = next(iter(candidates))
         else:
@@ -193,11 +227,6 @@ class ContainerValidator:
                                 brand_found = True
                                 break
                     if not brand_found:
-                        # Check if this reading is an ISO size/type code (feet marking, e.g. 45G1, 22G1)
-                        size_match = SIZE_CODE_PATTERN.search(raw)
-                        if size_match:
-                            normalized = f'{size_match.group(1).upper()}{size_match.group(2).upper()}{size_match.group(3).upper()}'
-                            return Validation(raw, normalized, read.confidence, True, False, 'VALID_SIZE_CODE')
                         normalized = normalize(raw)[:256]
 
         valid_format = bool(STRUCTURE.fullmatch(normalized))

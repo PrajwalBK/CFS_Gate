@@ -58,3 +58,19 @@ def test_feet_size_code_c_to_g_correction():
     assert val.normalized_text == '45G1'
     assert val.validation_status == 'VALID_SIZE_CODE'
 
+
+def test_delimiter_tolerant_container_read():
+    raw_trhu = (
+        'TRITON\n'
+        'TRHU1 1545895\n'
+        '22G1\n'
+        'MAXGROS 30.480 KGS\n'
+        '67.200 LBS'
+    )
+    val = ContainerValidator().validate(OCRRead(raw_trhu, .95))
+    assert val.normalized_text == 'TRHU1545895'
+    assert val.valid_format and val.valid_check_digit
+    assert val.validation_status == 'VALID'
+    assert val.size_type == '22G1'
+
+
