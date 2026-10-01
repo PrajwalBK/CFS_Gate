@@ -75,6 +75,7 @@ uploads/*.avi
 uploads/*.mov
 uploads/*.mkv
 uploads/*.webm
+/snapshots
 /snapshots/*
 !/snapshots/.gitkeep
 backend/snapshots/*
