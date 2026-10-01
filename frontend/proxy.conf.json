@@ -1,1 +1,1 @@
-{"/api": {"target": "http://127.0.0.1:8002", "secure": false, "changeOrigin": true, "ws": true}}
+{"/api": {"target": "http://127.0.0.1:8001", "secure": false, "changeOrigin": true, "ws": true}}

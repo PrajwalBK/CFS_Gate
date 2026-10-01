@@ -2,7 +2,7 @@
 param(
     [string]$HostAddress = '127.0.0.1',
     [ValidateRange(1, 65535)]
-    [int]$Port = 8002,
+    [int]$Port = 8001,
     [switch]$BuildFrontend
 )
 

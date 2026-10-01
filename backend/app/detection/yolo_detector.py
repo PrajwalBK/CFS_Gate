@@ -52,8 +52,10 @@ class YoloDetector:
             for box in result.boxes:
                 raw_name = str(result.names[int(box.cls.item())]).lower()
                 name = self.settings.class_aliases.get(raw_name, raw_name)
-                if name in ('container_object', 'cointainer'):
+                if name == 'container_object':
                     name = 'container'
+                elif name == 'cointainer':
+                    name = 'container_number'
                 elif name == 'feet':
                     name = 'iso_code'
                 allowed = set(self.settings.target_classes) | {
