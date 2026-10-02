@@ -182,11 +182,15 @@ class ViewOccupancy:
                             c2[0].class_name not in ('container_number', 'iso_code', 'feet') and
                             area_1 >= 0.04 and area_2 >= 0.04 and area_ratio >= 0.25
                         )
+                        # A body box plus its number box is one container, not
+                        # a twin. Text-only twin evidence is accepted only when
+                        # both boxes are independent number markings of useful
+                        # size and confidence. OCR later confirms the identities.
                         is_text_twin = (
-                            c1[0].class_name in ('container_number', 'container') and
-                            c2[0].class_name in ('container_number', 'container') and
-                            (c1[0].class_name == 'container_number' or c2[0].class_name == 'container_number') and
-                            c1[0].confidence >= 0.40 and c2[0].confidence >= 0.40
+                            c1[0].class_name == 'container_number' and
+                            c2[0].class_name == 'container_number' and
+                            area_1 >= 0.0015 and area_2 >= 0.0015 and
+                            c1[0].confidence >= 0.60 and c2[0].confidence >= 0.60
                         )
                         if is_body_twin or is_text_twin:
                             if sep > max_sep:
@@ -332,10 +336,10 @@ class ViewOccupancy:
                     area_1 >= 0.04 and area_2 >= 0.04 and area_ratio >= 0.25
                 )
                 is_text_twin = (
-                    c1[0].class_name in ('container_number', 'container') and
-                    c2[0].class_name in ('container_number', 'container') and
-                    (c1[0].class_name == 'container_number' or c2[0].class_name == 'container_number') and
-                    c1[0].confidence >= 0.40 and c2[0].confidence >= 0.40
+                    c1[0].class_name == 'container_number' and
+                    c2[0].class_name == 'container_number' and
+                    area_1 >= 0.0015 and area_2 >= 0.0015 and
+                    c1[0].confidence >= 0.60 and c2[0].confidence >= 0.60
                 )
                 if is_body_twin or is_text_twin:
                     if sep > max_sep:

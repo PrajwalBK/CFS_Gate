@@ -28,7 +28,32 @@
     <div><small>SITE</small><span>Panvel CFS</span></div>
     <div class="admin-context">
       <span class="avatar">A</span>
-      <span>admin<small>Prosper Cloud Connected</small></span>
+      <span>admin</span>
+    </div>
+    <div class="cloud-sync-status-badge"
+         [class.online]="cloudSync()?.enabled && cloudSync()?.is_online && (cloudSync()?.pending_count || 0) === 0"
+         [class.syncing]="cloudSync()?.enabled && cloudSync()?.is_online && (cloudSync()?.pending_count || 0) > 0"
+         [class.offline]="cloudSync()?.enabled && !cloudSync()?.is_online"
+         [class.disabled]="!cloudSync()?.enabled"
+         [title]="cloudSync()?.last_error || (cloudSync()?.last_sync_time ? 'Last synced: ' + cloudSync()?.last_sync_time : 'Cloud Sync Status')">
+      @if (cloudSync()?.enabled) {
+        @if (cloudSync()?.is_online) {
+          @if ((cloudSync()?.pending_count || 0) > 0) {
+            <span class="sync-dot pulsing"></span>
+            <span>Cloud: Syncing ({{ cloudSync()?.pending_count }} pending)</span>
+          } @else {
+            <span class="sync-dot online"></span>
+            <span>Cloud: 🟢 Online (All synced)</span>
+          }
+        } @else {
+          <span class="sync-dot offline"></span>
+          <span>Cloud: 🟠 Offline ({{ cloudSync()?.pending_count || 0 }} queued)</span>
+          <button type="button" class="btn-mini-retry" [disabled]="syncBusy()" (click)="retrySync()" title="Click to retry cloud sync">↻</button>
+        }
+      } @else {
+        <span class="sync-dot disabled"></span>
+        <span>Cloud: Disabled</span>
+      }
     </div>
   </div>
 </header>
@@ -42,6 +67,25 @@
 </aside>
 
 <main>
+  @if (cloudSync(); as cs) {
+    @if (cs.enabled && !cs.is_online && cs.pending_count > 0) {
+      <div class="offline-recovery-banner" role="alert">
+        <div class="offline-banner-left">
+          <span class="offline-icon">📡</span>
+          <div class="offline-info">
+            <strong class="offline-title">OFFLINE QUEUE ACTIVE</strong>
+            <span class="offline-msg">CFS Cloud connection is currently offline. <strong>{{ cs.pending_count }} event(s)</strong> are queued safely in the local database and will auto-sync when online.</span>
+            @if (cs.last_error) {
+              <small class="offline-error-detail">({{ cs.last_error }})</small>
+            }
+          </div>
+        </div>
+        <button type="button" class="btn-retry-cloud-sync" [disabled]="syncBusy()" (click)="retrySync()">
+          {{ syncBusy() ? '⏳ Re-checking...' : '↻ Retry Cloud Sync' }}
+        </button>
+      </div>
+    }
+  }
   @if (activeAlert(); as a) {
     <div class="alert alert-buzzer" [class.alert-danger]="a.level === 'ERROR'" role="alert">
       <div class="alert-content-row">

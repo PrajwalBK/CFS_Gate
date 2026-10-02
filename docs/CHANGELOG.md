@@ -1,5 +1,11 @@
 # GateVision — Project Change Log
 
+## 2026-10-02 — Prevent false twins from one body and its text box
+
+- A `container` detection and its nested `container_number` detection are now
+  treated as one physical container. Text-only twin candidates require two
+  separate, sufficiently large and confident `container_number` detections.
+
 ## 2026-10-01 15:35 IST — Fix YOLO container_object & Text Class Aliases
 
 - **Model Label Normalization in YoloDetector**:

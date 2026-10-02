@@ -19,7 +19,16 @@ def event(event_id: str, request: Request):
     result = request.app.state.repository.event(event_id)
     if result is None:
         raise HTTPException(404, 'Event not found')
+    result['ocr_crops'] = request.app.state.runtime.ocr_store.event_crops(event_id)
     return result
+
+
+@router.get('/ocr-crops/{job_id}')
+def ocr_crop(job_id: int, request: Request):
+    path = request.app.state.runtime.ocr_store.crop_path(job_id)
+    if path is None:
+        raise HTTPException(404, 'OCR crop unavailable')
+    return FileResponse(path, media_type='image/png', headers={'Cache-Control': 'no-cache'})
 
 
 @router.get('/gate-events/{event_id}/json')

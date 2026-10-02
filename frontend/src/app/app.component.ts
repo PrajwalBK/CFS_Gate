@@ -4,7 +4,7 @@ import { HttpErrorResponse, HttpEventType } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { catchError, exhaustMap, forkJoin, merge, of, Subject, timer, timeout } from 'rxjs';
-import { GateApi, Camera, CameraSource, EventPage, EventDetail, Health, Metrics, UploadState, PlaybackAction, SystemAlert } from './gate-api.service';
+import { GateApi, Camera, CameraSource, EventPage, EventDetail, Health, Metrics, UploadState, PlaybackAction, SystemAlert, CloudSyncStatus } from './gate-api.service';
 import { CameraGridComponent } from './camera-grid.component';
 import { EventTableComponent } from './event-table.component';
 import { EventDetailComponent } from './event-detail.component';
@@ -28,6 +28,8 @@ export class AppComponent {
   health = signal<Health | null>(null);
   metrics = signal<Metrics | null>(null);
   detail = signal<EventDetail | null>(null);
+  cloudSync = signal<CloudSyncStatus | null>(null);
+  syncBusy = signal(false);
   error = signal('');
   eventsError = signal('');
   notice = signal('');
@@ -62,7 +64,8 @@ export class AppComponent {
         health: this.api.health(),
         metrics: this.api.metrics(),
         alerts: this.api.alerts().pipe(catchError(() => of([]))),
-        events: this.api.events(this.offset, this.containerFilter, this.typeFilter).pipe(catchError(() => of(null)))
+        events: this.api.events(this.offset, this.containerFilter, this.typeFilter).pipe(catchError(() => of(null))),
+        cloudSync: this.api.cloudSyncStatus()
       }).pipe(timeout(15000), catchError(() => of(null)))),
       takeUntilDestroyed(this.destroy)
     ).subscribe(data => {
@@ -71,6 +74,7 @@ export class AppComponent {
       this.error.set(''); this.cameras.set(data.cameras); this.cameraSources.set(data.sources); this.health.set(data.health); this.metrics.set(data.metrics);
       if (!this.selectedCalibrationCameraId() && data.cameras.length) this.selectedCalibrationCameraId.set(data.cameras[0].id);
       this.discovery.set(data.discovery);
+      this.cloudSync.set(data.cloudSync || data.health?.cloud_sync || null);
       if (data.alerts && data.alerts.length > 0) {
         this.alerts.set(data.alerts);
         const top = data.alerts[0];
@@ -277,4 +281,21 @@ export class AppComponent {
 
   private setUpload(id: string, state: UploadState) { this.uploads.update(value => ({...value, [id]: state})); }
   private errorMessage(error: HttpErrorResponse, fallback: string) { return typeof error.error?.detail === 'string' ? error.error.detail : fallback; }
+
+  retrySync() {
+    this.syncBusy.set(true);
+    this.api.retryCloudSync().subscribe({
+      next: (res) => {
+        this.syncBusy.set(false);
+        this.notice.set('Cloud retry sweep triggered: ' + res.pending + ' events pending.');
+        this.refresh.next();
+        setTimeout(() => this.notice.set(''), 4000);
+      },
+      error: () => {
+        this.syncBusy.set(false);
+        this.error.set('Failed to trigger cloud sync retry.');
+        setTimeout(() => this.error.set(''), 4000);
+      }
+    });
+  }
 }

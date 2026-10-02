@@ -256,6 +256,42 @@ class OCRJobStore:
                 continue
         return None
 
+    def event_crops(self, event_id):
+        """Return persisted OCR crops linked to an event for operator review."""
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT id, crop, metadata, validation FROM jobs "
+                "WHERE event_id=? OR metadata LIKE ? ORDER BY id",
+                (event_id, f'%\"event_id\": \"{event_id}\"%'),
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                meta = json.loads(row['metadata'])
+                crop_path = self.image_path(row['crop'])
+                if not crop_path.is_file():
+                    continue
+                validation = json.loads(row['validation']) if row['validation'] else {}
+                result.append({
+                    'id': str(row['id']),
+                    'camera_id': (meta.get('frame') or {}).get('camera_id'),
+                    'timestamp': (meta.get('frame') or {}).get('timestamp'),
+                    'slot_position': meta.get('slot_position', 'FRONT'),
+                    'path': row['crop'],
+                    'normalized_text': validation.get('normalized_text'),
+                })
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return result
+
+    def crop_path(self, job_id):
+        with self.connection() as db:
+            row = db.execute('SELECT crop FROM jobs WHERE id=?', (job_id,)).fetchone()
+        if not row:
+            return None
+        path = self.image_path(row['crop'])
+        return path if path.is_file() else None
+
     def evidence(self, origin, limit):
         from app.events.event_manager import Evidence
         with self.connection() as db:

@@ -73,3 +73,23 @@ def test_compiled_frontend_is_served_by_backend(settings, repository, camera, tm
         assert page.status_code == 200 and 'Gate UI' in page.text
         asset = client.get('/main.js')
         assert asset.status_code == 200 and 'javascript' in asset.headers['content-type']
+
+
+def test_cloud_sync_status_and_retry_api(settings, repository, camera):
+    with TestClient(create_app(settings, repository.db, [camera])) as client:
+        status_resp = client.get('/api/cloud-sync/status')
+        assert status_resp.status_code == 200
+        data = status_resp.json()
+        assert 'enabled' in data
+        assert 'is_online' in data
+        assert 'pending_count' in data
+
+        retry_resp = client.post('/api/cloud-sync/retry')
+        assert retry_resp.status_code == 200
+        rdata = retry_resp.json()
+        assert 'triggered' in rdata
+        assert 'pending' in rdata
+
+        health = client.get('/api/health').json()
+        assert 'cloud_sync' in health
+        assert health['cloud_sync']['pending_count'] == data['pending_count']

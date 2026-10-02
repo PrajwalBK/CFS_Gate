@@ -206,7 +206,7 @@ import { EventDetail } from './gate-api.service';
                       </div>
                       <div class="proof-caption">
                         <span><strong class="mono">{{ item.container_number || 'Front Container' }}</strong> · {{ frontSnap.timestamp | date:'HH:mm:ss · dd MMM yyyy' }}</span>
-                        <a [href]="snapshotUrl(frontSnap.id)" target="_blank" class="view-raw-link">Full resolution ↗</a>
+                        <a [href]="rawSnapshotUrl(frontSnap.id)" target="_blank" class="view-raw-link">Original frame ↗</a>
                       </div>
                     </div>
                   }
@@ -223,7 +223,7 @@ import { EventDetail } from './gate-api.service';
                       </div>
                       <div class="proof-caption">
                         <span><strong class="mono">{{ item.container_number_2 || 'Rear Container' }}</strong> · {{ rearSnap.timestamp | date:'HH:mm:ss · dd MMM yyyy' }}</span>
-                        <a [href]="snapshotUrl(rearSnap.id)" target="_blank" class="view-raw-link">Full resolution ↗</a>
+                        <a [href]="rawSnapshotUrl(rearSnap.id)" target="_blank" class="view-raw-link">Original frame ↗</a>
                       </div>
                     </div>
                   }
@@ -240,7 +240,7 @@ import { EventDetail } from './gate-api.service';
                     </div>
                     <div class="proof-caption">
                       <span><strong>{{ item.container_number || 'Detected Container' }}</strong> · {{ primary.timestamp | date:'HH:mm:ss · dd MMM yyyy' }}</span>
-                      <a [href]="snapshotUrl(primary.id)" target="_blank" class="view-raw-link">Full resolution ↗</a>
+                      <a [href]="rawSnapshotUrl(primary.id)" target="_blank" class="view-raw-link">Original frame ↗</a>
                     </div>
                   </div>
                 }
@@ -250,6 +250,25 @@ import { EventDetail } from './gate-api.service';
                 <h4 class="multi-angle-title">All captured camera images ({{ item.snapshots.length }})</h4>
                 <span class="image-refresh-note">Matched proof includes the number crop and raw OCR. Full resolution opens the unmodified capture.</span>
               </div>
+              @if (item.ocr_crops?.length) {
+                <div class="ocr-crops-section">
+                  <h4 class="multi-angle-title">OCR crops used for recognition ({{ item.ocr_crops!.length }})</h4>
+                  <div class="snapshots-grid ocr-crops-grid">
+                    @for (crop of item.ocr_crops; track crop.id) {
+                      <figure class="snapshot-card ocr-crop-card">
+                        <div class="snapshot-img-wrap">
+                          <img [src]="ocrCropUrl(crop.id)" [alt]="'OCR crop from ' + (crop.camera_id || 'camera')" (error)="markImageError('ocr-' + crop.id)" />
+                          <span class="camera-tag">{{ crop.camera_id || 'camera' }} · {{ crop.slot_position }}</span>
+                        </div>
+                        <figcaption>
+                          <span class="snap-time mono">{{ crop.normalized_text || 'OCR pending' }}</span>
+                          <a [href]="ocrCropUrl(crop.id)" target="_blank" class="view-raw-link">Open crop ↗</a>
+                        </figcaption>
+                      </figure>
+                    }
+                  </div>
+                </div>
+              }
               <div class="snapshots-grid">
                 @for (s of item.snapshots; track s.id) {
                   <figure class="snapshot-card" [class.is-primary]="s.id === item.primary_snapshot_id || s.id === item.rear_snapshot_id">
@@ -263,7 +282,7 @@ import { EventDetail } from './gate-api.service';
                       } @else {
                         <img [src]="snapshotUrl(s.id)" [alt]="'Snapshot from ' + s.camera_id" (error)="markImageError(s.id)" (load)="markImageLoaded(s.id)">
                         @if (!imageLoaded()[s.id]) {
-                          <span class="snapshot-loading">Loading original image…</span>
+                          <span class="snapshot-loading">Loading proof view…</span>
                         }
                       }
                       <span class="camera-tag">{{ s.camera_id }}</span>
@@ -301,6 +320,14 @@ export class EventDetailComponent {
     // Derived proof includes the observed number crop and the raw OCR reading.
     // Full-resolution links retain the unmodified capture.
     return `/api/snapshots/${id}?proof=true`;
+  }
+
+  rawSnapshotUrl(id: string): string {
+    return `/api/snapshots/${encodeURIComponent(id)}`;
+  }
+
+  ocrCropUrl(id: string): string {
+    return `/api/ocr-crops/${encodeURIComponent(id)}?v=${encodeURIComponent(id)}`;
   }
 
   markImageLoaded(id: string) {

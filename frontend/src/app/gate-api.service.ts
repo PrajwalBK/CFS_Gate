@@ -37,6 +37,7 @@ export interface GateEvent {
 export interface Detection { id?: string; camera_id: string; class_name: string; confidence: number; bbox: number[]; timestamp?: string; frame_timestamp?: string; track_id?: number; }
 export interface OCR { id: string; raw_text: string; normalized_text: string; confidence: number; validation_status: string; }
 export interface Snapshot { id: string; camera_id: string; timestamp: string; image_path?: string; }
+export interface OcrCrop { id: string; camera_id?: string; timestamp?: string; slot_position: string; normalized_text?: string | null; }
 export interface EventDetail extends GateEvent {
   detections: Detection[];
   ocr_results: OCR[];
@@ -44,10 +45,20 @@ export interface EventDetail extends GateEvent {
   primary_camera_id?: string;
   primary_snapshot_id?: string;
   rear_snapshot_id?: string;
+  ocr_crops?: OcrCrop[];
 }
 export interface EventPage { items: GateEvent[]; total: number; offset: number; limit: number; }
 export interface OcrSpool { total: number; pending: number; failed: number; }
-export interface Health { status: string; database: string; pipeline_enabled: boolean; online_cameras: number; enabled_cameras: number; models: {detector: string; ocr: string; error_type?: string | null}; processing_error: string | null; startup_error: string | null; max_upload_mb: number; ocr_spool?: OcrSpool; ocr_spool_error?: string | null; }
+export interface CloudSyncStatus {
+  enabled: boolean;
+  is_online: boolean;
+  pending_count: number;
+  queue_depth: number;
+  last_sync_time: string | null;
+  last_error: string | null;
+  site_id?: string | null;
+}
+export interface Health { status: string; database: string; pipeline_enabled: boolean; online_cameras: number; enabled_cameras: number; models: {detector: string; ocr: string; error_type?: string | null}; processing_error: string | null; startup_error: string | null; max_upload_mb: number; ocr_spool?: OcrSpool; ocr_spool_error?: string | null; cloud_sync?: CloudSyncStatus; }
 export interface Metrics { cpu_percent: number; memory_percent: number; gpu_utilization_percent: number | null; ocr_queue_depth: number; ocr_save_queue_depth?: number; ocr_spool?: OcrSpool; latencies: Record<string, {p50_ms: number; p95_ms: number}>; inference_fps: Record<string, number>;
   gpu_name: string | null; gpu_power_watts: number | null; gpu_power_limit_watts: number | null; gpu_temperature_c: number | null;
   gpu_memory_used_mb: number | null; gpu_memory_total_mb: number | null; gpu_source: string; uptime_seconds: number;
@@ -130,4 +141,14 @@ export class GateApi {
   lensAutoFocus(id: string) { return this.http.post<{success: boolean}>(`/api/cameras/${encodeURIComponent(id)}/lens/autofocus`, {}); }
   getExposure(id: string) { return this.http.get<{supported: boolean; mode?: string; shutter_speed?: string; shutter_ms?: number}>(`/api/cameras/${encodeURIComponent(id)}/exposure`); }
   setExposure(id: string, shutter: string, mode: string = 'auto') { return this.http.post<{success: boolean; shutter_speed?: string; mode?: string}>(`/api/cameras/${encodeURIComponent(id)}/exposure`, {shutter, mode}); }
+
+  cloudSyncStatus() {
+    return this.http.get<CloudSyncStatus>('/api/cloud-sync/status').pipe(
+      catchError(() => of({ enabled: false, is_online: false, pending_count: 0, queue_depth: 0, last_sync_time: null, last_error: 'Unable to reach backend' }))
+    );
+  }
+
+  retryCloudSync() {
+    return this.http.post<{ triggered: boolean; pending: number }>('/api/cloud-sync/retry', {});
+  }
 }

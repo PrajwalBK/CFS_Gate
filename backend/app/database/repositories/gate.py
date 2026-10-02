@@ -779,6 +779,18 @@ class GateRepository:
             )
             return [serialize(e) for e in session.scalars(query)]
 
+    def count_unsynced_confirmed_events(self) -> int:
+        with self.db.sessions() as session:
+            query = (
+                select(func.count(GateEvent.id))
+                .where(
+                    GateEvent.status == 'CONFIRMED',
+                    (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
+                    (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
+                )
+            )
+            return int(session.scalar(query) or 0)
+
     def clean_duplicate_events(self, max_gap_seconds: int = 1200, snapshots=None):
         """
         Merges and removes duplicate events created for the same container within dwell windows.

@@ -310,10 +310,38 @@ class CloudOutboxDispatcher:
         self._stop = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
 
+        self._is_online: bool = True
+        self._last_sync_time: Optional[str] = None
+        self._last_error: Optional[str] = None
+
         self.device_uuid = (
             settings.prosper_device_uuid
             or 'EDGE-GATE-01'
         )
+
+    def status(self) -> dict:
+        pending_count = 0
+        if self.repository and hasattr(self.repository, 'count_unsynced_confirmed_events'):
+            try:
+                pending_count = self.repository.count_unsynced_confirmed_events()
+            except Exception:
+                pass
+        return {
+            'enabled': self.enabled,
+            'is_online': self._is_online if self.enabled else False,
+            'pending_count': pending_count,
+            'queue_depth': self.queue.qsize(),
+            'last_sync_time': self._last_sync_time,
+            'last_error': self._last_error,
+            'site_id': self.session.site_id if (self.session and self.session.site_id) else None,
+        }
+
+    def trigger_retry(self) -> int:
+        """Trigger an immediate offline backlog sweep and return the number of pending items queued."""
+        if not self.enabled or not self.repository:
+            return 0
+        self._sweep_offline_backlog()
+        return self.status()['pending_count']
 
     def start(self):
         if not self.enabled:
@@ -731,6 +759,9 @@ class CloudOutboxDispatcher:
                 success = 'OFFLINE'
 
             if success in (True, 'CONFLICT') or isinstance(success, dict):
+                self._is_online = True
+                self._last_sync_time = datetime.now(timezone.utc).isoformat()
+                self._last_error = None
                 if self.repository:
                     try:
                         cloud_ev_id = None
@@ -744,6 +775,13 @@ class CloudOutboxDispatcher:
                     self.metrics.latency('prosper_sync', time.monotonic() - item['enqueued_at'])
                 self.queue.task_done()
             else:
+                self._is_online = False
+                if success == 'OFFLINE':
+                    self._last_error = 'Cloud endpoint unreachable or offline'
+                elif success == 'REJECTED':
+                    self._last_error = 'Cloud rejected payload (validation or authentication error)'
+                elif 'exc' in locals() and exc:
+                    self._last_error = str(exc)
                 item['retries'] += 1
                 if item['retries'] < self.settings.prosper_max_retries:
                     backoff = min(2.0 ** item['retries'], 30.0)
