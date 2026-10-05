@@ -138,19 +138,12 @@ class SnapshotManager:
         import cv2
         image = observation.image.copy()
 
-        is_rear = getattr(observation, 'slot_position', 'FRONT') == 'REAR' or observation.origin_key.endswith(':rear')
-        slot_name = "REAR (SLOT 2)" if is_rear else "FRONT (SLOT 1)"
-        container_num = observation.ocr.normalized_text if (observation.ocr and observation.ocr.normalized_text) else ""
-        box_color = (0, 200, 255) if is_rear else (40, 190, 80)
-
         # Save clean raw camera photo without drawing boxes over text
         # (Overlays over the numbers obscure human verification on the portal)
         ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 92])
         if not ok:
             raise OSError('Snapshot encoding failed')
-        is_rear = getattr(observation, 'slot_position', 'FRONT') == 'REAR' or observation.origin_key.endswith(':rear')
-        slot_suffix = '_rear' if is_rear else ''
-        relative = f'{event_id}/{observation.detection.camera_id}_{snapshot_id}{slot_suffix}.jpg' if event_id else f'{snapshot_id}.jpg'
+        relative = f'{event_id}/{observation.detection.camera_id}_{snapshot_id}.jpg' if event_id else f'{snapshot_id}.jpg'
         final = self.path(relative)
         final.parent.mkdir(parents=True, exist_ok=True)
         quality_path = final.with_suffix('.quality')

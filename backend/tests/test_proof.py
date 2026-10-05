@@ -14,13 +14,12 @@ def evidence():
     return data, snap, event
 
 
-def test_derived_proof_preserves_source_and_adds_inset():
+def test_clean_proof_preserves_raw_source():
     data, snap, event = evidence()
     result = proof_jpeg(data, snap, event)
+    assert result == data
     decoded = cv2.imdecode(np.frombuffer(result, np.uint8), 1)
-    assert decoded.shape == (420, 900, 3)
-    assert data == evidence()[0]
-    assert decoded[50:150, 515:745].std() > 10
+    assert decoded.shape == (300, 500, 3)
 
 
 def test_unlinked_or_wrong_identity_returns_original():
@@ -29,19 +28,3 @@ def test_unlinked_or_wrong_identity_returns_original():
     assert proof_jpeg(data, {**snap, 'timestamp': 'other'}, event) == data
     assert proof_jpeg(data, snap, {**event, 'container_number': 'OTHER'}) == data
     assert proof_jpeg(b'broken', snap, event) == b'broken'
-
-
-def test_passage_does_not_apply_full_frame_bbox():
-    data, snap, event = evidence()
-    result = proof_jpeg(data, snap, {**event, 'lane_id': 'lane-1'})
-    decoded = cv2.imdecode(np.frombuffer(result, np.uint8), 1)
-    assert decoded[50:150, 515:745].std() < 6
-
-
-def test_rear_requires_second_identity_and_slot():
-    data, snap, event = evidence()
-    snap['image_path'] = 'cam_snap1_rear.jpg'
-    assert proof_jpeg(data, snap, event) == data
-    event['container_number_2'] = event['container_number']
-    event['detections'][0]['origin_key'] = 'dwell:rear'
-    assert proof_jpeg(data, snap, event) != data

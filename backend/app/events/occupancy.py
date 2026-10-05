@@ -32,13 +32,13 @@ def center(box):
 
 @dataclass
 class ContainerSlot:
-    slot_id: str  # 'FRONT' or 'REAR'
-    origin: str
-    bbox: tuple
-    anchor: tuple
-    first_seen: object
-    last_measured: object
-    stationary_since: object
+    slot_id: str = 'SINGLE'
+    origin: str = ''
+    bbox: tuple = (0, 0, 1, 1)
+    anchor: tuple = (0.5, 0.5)
+    first_seen: object = None
+    last_measured: object = None
+    stationary_since: object = None
     stationary: bool = False
     event_id: str | None = None
     container_number: str | None = None
@@ -62,7 +62,7 @@ class Occupancy:
     closed: bool = False
     is_twin: bool = False
     slots: dict = field(default_factory=dict)
-    active_slot: str = 'FRONT'
+    active_slot: str = 'SINGLE'
     provisional_event_id: str | None = None
     entrance_complete: bool = False
 
@@ -76,23 +76,8 @@ class ViewOccupancy:
         if camera.gate_exit_axis is None:
             return False
         axis = 0 if camera.gate_exit_axis == 'x' else 1
-        # Entire bounding box, not its centroid, must clear the exit line.
         edge = box[axis] if camera.gate_exit_positive else box[axis + 2]
         return edge > camera.gate_exit_position if camera.gate_exit_positive else edge < camera.gate_exit_position
-
-    def _order_slots(self, candidates_pair, camera):
-        axis = 1 if camera.gate_exit_axis == 'y' else 0
-        if camera.gate_exit_axis is not None:
-            pos = camera.gate_exit_positive if camera.gate_exit_positive is not None else True
-        else:
-            # Default horizontal gate lane: exit is on left (smaller x)
-            pos = False
-        c1, c2 = candidates_pair[0], candidates_pair[1]
-        coord1 = center(c1[1])[axis]
-        coord2 = center(c2[1])[axis]
-        if (coord1 > coord2) if pos else (coord1 < coord2):
-            return [c1, c2]
-        return [c2, c1]
 
     def _update_slot(self, slot, b, now):
         point = center(b)
@@ -140,12 +125,11 @@ class ViewOccupancy:
                 state.stationary = False
             state.last_measured = now
 
-            # Check if all tracked container slots departed past the exit boundary
-            if state.slots and all(self._past_exit(s.bbox, camera) for s in state.slots.values()):
+            # Check if container departed past exit
+            if self._past_exit(state.bbox, camera):
                 self.current = None
                 return None
 
-            # Backward-compat: single box departed past exit
             matched_dep = max(all_boxes, key=lambda item: iou(state.bbox, item[1]), default=None)
             if matched_dep and iou(state.bbox, matched_dep[1]) > 0.15:
                 if not self._past_exit(state.bbox, camera) and self._past_exit(matched_dep[1], camera):
@@ -160,224 +144,42 @@ class ViewOccupancy:
 
             state.clear_since = None
 
-            # Update tracking for slots
-            axis = 1 if camera.gate_exit_axis == 'y' else 0
-            is_pos = camera.gate_exit_positive if camera.gate_exit_axis is not None else False
-            if len(candidates) >= 2:
-                best_pair = None
-                max_sep = 0.0
-                for i in range(len(candidates)):
-                    for j in range(i + 1, len(candidates)):
-                        c1, c2 = candidates[i], candidates[j]
-                        if iou(c1[1], c2[1]) >= 0.15:
-                            continue
-                        sep = abs(center(c1[1])[axis] - center(c2[1])[axis])
-                        align = abs(center(c1[1])[1 - axis] - center(c2[1])[1 - axis])
-                        if sep < 0.18 or align > 0.35:
-                            continue
-                        area_1, area_2 = box_area(c1[1]), box_area(c2[1])
-                        area_ratio = min(area_1, area_2) / max(area_1, area_2) if max(area_1, area_2) > 0 else 0
-                        is_body_twin = (
-                            c1[0].class_name not in ('container_number', 'iso_code', 'feet') and
-                            c2[0].class_name not in ('container_number', 'iso_code', 'feet') and
-                            area_1 >= 0.04 and area_2 >= 0.04 and area_ratio >= 0.25
-                        )
-                        # A body box plus its number box is one container, not
-                        # a twin. Text-only twin evidence is accepted only when
-                        # both boxes are independent number markings of useful
-                        # size and confidence. OCR later confirms the identities.
-                        is_text_twin = (
-                            c1[0].class_name == 'container_number' and
-                            c2[0].class_name == 'container_number' and
-                            area_1 >= 0.0015 and area_2 >= 0.0015 and
-                            c1[0].confidence >= 0.60 and c2[0].confidence >= 0.60
-                        )
-                        if is_body_twin or is_text_twin:
-                            if sep > max_sep:
-                                max_sep = sep
-                                best_pair = (c1, c2)
-
-                if best_pair is not None:
-                    ordered = self._order_slots(best_pair, camera)
-                    front_det, front_b = ordered[0]
-                    rear_det, rear_b = ordered[1]
-                    if not state.is_twin:
-                        state.is_twin = True
-                        state.closed = False
-                        state.slots['REAR'] = ContainerSlot('REAR', f'{state.origin}:rear', rear_b, center(rear_b), now, now, now, event_id=state.event_id)
-                    if 'FRONT' in state.slots:
-                        self._update_slot(state.slots['FRONT'], front_b, now)
-                    if 'REAR' in state.slots:
-                        self._update_slot(state.slots['REAR'], rear_b, now)
-                else:
-                    # Multiple text boxes on the same single container: track the main box in FRONT slot!
-                    best_det, best_b = max(candidates, key=lambda c: c[0].confidence * box_area(c[1]))
-                    if 'FRONT' in state.slots:
-                        self._update_slot(state.slots['FRONT'], best_b, now)
-            elif len(candidates) == 1:
-                det, b = candidates[0]
+            # Spatial tracking continuity: match candidate to current container by IoU
+            matched = max(candidates, key=lambda c: iou(state.bbox, c[1]), default=None)
+            if matched and iou(state.bbox, matched[1]) >= 0.15:
+                det, b = matched
                 front_slot = state.slots.get('FRONT')
-                rear_slot = state.slots.get('REAR')
-
-                if state.is_twin and rear_slot:
-                    if front_slot and front_slot.closed:
-                        self._update_slot(rear_slot, b, now)
-                    elif rear_slot.closed:
-                        self._update_slot(front_slot, b, now)
-                    else:
-                        front_coord = center(front_slot.bbox)[axis] if front_slot else 0
-                        rear_coord = center(rear_slot.bbox)[axis] if rear_slot else 0
-                        b_coord = center(b)[axis]
-                        front_match = iou(front_slot.bbox, b) if front_slot else 0.0
-                        rear_match = iou(rear_slot.bbox, b) if rear_slot else 0.0
-
-                        if rear_match > front_match and rear_match >= 0.10:
-                            self._update_slot(rear_slot, b, now)
-                        elif front_match >= 0.10:
-                            self._update_slot(front_slot, b, now)
-                        else:
-                            front_dist = abs(front_coord - b_coord)
-                            rear_dist = abs(rear_coord - b_coord)
-                            if rear_dist < front_dist:
-                                self._update_slot(rear_slot, b, now)
-                            else:
-                                self._update_slot(front_slot, b, now)
-                elif front_slot:
-                    is_sequential_twin = (
-                        camera.gate_exit_axis is not None and
-                        self._past_exit(front_slot.bbox, camera) and
-                        not self._past_exit(b, camera) and
-                        iou(front_slot.bbox, b) < 0.20 and
-                        abs(center(front_slot.bbox)[axis] - center(b)[axis]) >= 0.25
-                    )
-                    if is_sequential_twin:
-                        state.is_twin = True
-                        state.closed = False
-                        state.slots['REAR'] = ContainerSlot('REAR', f'{state.origin}:rear', b, center(b), now, now, now, event_id=state.event_id)
-                    else:
-                        self._update_slot(front_slot, b, now)
-
-            # Synchronize master state properties
-            state.stationary = any(s.stationary for s in state.slots.values()) if state.slots else False
-            state.entrance_complete = state.stationary or (
-                (now - state.first_seen).total_seconds() >= self.settings.gate_observation_gap_seconds and
-                (box_area(state.bbox) >= 0.005 or len(candidates) > 0)
-            )
-            state.closed = all(s.closed for s in state.slots.values()) if state.slots else False
-            if 'FRONT' in state.slots:
-                state.bbox = state.slots['FRONT'].bbox
-                state.anchor = state.slots['FRONT'].anchor
-
-            if state.closed:
+                if front_slot:
+                    self._update_slot(front_slot, b, now)
+                state.bbox = b
+                state.anchor = center(b)
+                state.stationary = front_slot.stationary if front_slot else False
+                state.entrance_complete = state.stationary or (
+                    (now - state.first_seen).total_seconds() >= self.settings.gate_observation_gap_seconds
+                )
+                if state.closed:
+                    return None
+                return det
+            else:
+                # Different container or no IoU match: keep tracking existing without stealing
+                if (now - state.last_measured).total_seconds() >= self.settings.gate_clear_seconds:
+                    self.current = None
                 return None
 
-            # Select which slot's detection to sample for OCR
-            front_slot = state.slots.get('FRONT')
-            rear_slot = state.slots.get('REAR')
-
-            axis = 1 if camera.gate_exit_axis == 'y' else 0
-            front_cand = max(((d, b) for d, b in candidates if front_slot and (iou(front_slot.bbox, b) >= 0.05 or abs(center(front_slot.bbox)[axis] - center(b)[axis]) < 0.25)),
-                             key=lambda item: iou(front_slot.bbox, item[1]), default=None)
-            rear_cand = max(((d, b) for d, b in candidates if rear_slot and (iou(rear_slot.bbox, b) >= 0.05 or abs(center(rear_slot.bbox)[axis] - center(b)[axis]) < 0.25)),
-                            key=lambda item: iou(rear_slot.bbox, item[1]), default=None)
-
-            target = None
-            if rear_slot and not rear_slot.closed and rear_cand:
-                if not front_slot or front_slot.closed:
-                    target = ('REAR', rear_cand[0])
-                elif front_cand and front_cand[0] is not rear_cand[0]:
-                    target = ('FRONT', front_cand[0]) if getattr(frame, 'sequence', 0) % 2 == 0 else ('REAR', rear_cand[0])
-                else:
-                    target = ('REAR', rear_cand[0])
-            elif front_slot and not front_slot.closed and front_cand:
-                target = ('FRONT', front_cand[0])
-            elif rear_cand and rear_slot and not rear_slot.closed:
-                target = ('REAR', rear_cand[0])
-            elif front_cand and front_slot and not front_slot.closed:
-                target = ('FRONT', front_cand[0])
-
-            if target:
-                state.active_slot = target[0]
-                return target[1]
-
-            return None
-
-        # State is None: fresh vehicle arrival
+        # State is None: fresh container arrival
         if not candidates:
             return None
 
-        # Determine if arrival carries Twin 20ft containers or Single (20ft/40ft) container
-        non_overlapping = []
-        for d, b in sorted(candidates, key=lambda item: box_area(item[1]), reverse=True):
-            if not any(iou(b, ex[1]) > 0.15 for ex in non_overlapping):
-                non_overlapping.append((d, b))
-                if len(non_overlapping) == 2:
-                    break
-
+        best_det, best_b = max(candidates, key=lambda c: c[0].confidence * box_area(c[1]))
         base_origin = f'dwell:{camera.id}:{uuid4().hex}'
         prov_id = str(uuid4())
-        axis = 1 if camera.gate_exit_axis == 'y' else 0
-        best_pair = None
-        max_sep = 0.0
-        for i in range(len(non_overlapping)):
-            for j in range(i + 1, len(non_overlapping)):
-                c1, c2 = non_overlapping[i], non_overlapping[j]
-                if iou(c1[1], c2[1]) >= 0.15:
-                    continue
-                sep = abs(center(c1[1])[axis] - center(c2[1])[axis])
-                align = abs(center(c1[1])[1 - axis] - center(c2[1])[1 - axis])
-                if sep < 0.18 or align > 0.35:
-                    continue
-                area_1, area_2 = box_area(c1[1]), box_area(c2[1])
-                area_ratio = min(area_1, area_2) / max(area_1, area_2) if max(area_1, area_2) > 0 else 0
-                is_body_twin = (
-                    c1[0].class_name not in ('container_number', 'iso_code', 'feet') and
-                    c2[0].class_name not in ('container_number', 'iso_code', 'feet') and
-                    area_1 >= 0.04 and area_2 >= 0.04 and area_ratio >= 0.25
-                )
-                is_text_twin = (
-                    c1[0].class_name == 'container_number' and
-                    c2[0].class_name == 'container_number' and
-                    area_1 >= 0.0015 and area_2 >= 0.0015 and
-                    c1[0].confidence >= 0.60 and c2[0].confidence >= 0.60
-                )
-                if is_body_twin or is_text_twin:
-                    if sep > max_sep:
-                        max_sep = sep
-                        best_pair = (c1, c2)
-
-        if best_pair is not None:
-            ordered = self._order_slots(best_pair, camera)
-            front_det, front_b = ordered[0]
-            rear_det, rear_b = ordered[1]
-            is_twin = True
-            if is_twin:
-                slots = {
-                    'FRONT': ContainerSlot('FRONT', f'{base_origin}:front', front_b, center(front_b), now, now, now, event_id=None),
-                    'REAR': ContainerSlot('REAR', f'{base_origin}:rear', rear_b, center(rear_b), now, now, now, event_id=None),
-                }
-                self.current = Occupancy(frame.source_id, base_origin, front_b, center(front_b),
-                                         now, now, now, event_id=None, is_twin=True, slots=slots, active_slot='FRONT',
-                                         provisional_event_id=prov_id)
-                return front_det
-            else:
-                detection, box = non_overlapping[0]
-                slots = {
-                    'FRONT': ContainerSlot('FRONT', f'{base_origin}:single', box, center(box), now, now, now, event_id=None)
-                }
-                self.current = Occupancy(frame.source_id, base_origin, box, center(box),
-                                         now, now, now, event_id=None, is_twin=False, slots=slots, active_slot='FRONT',
-                                         provisional_event_id=prov_id)
-                return detection
-        else:
-            detection, box = non_overlapping[0]
-            slots = {
-                'FRONT': ContainerSlot('FRONT', f'{base_origin}:single', box, center(box), now, now, now, event_id=None)
-            }
-            self.current = Occupancy(frame.source_id, base_origin, box, center(box),
-                                     now, now, now, event_id=None, is_twin=False, slots=slots, active_slot='FRONT',
-                                     provisional_event_id=prov_id)
-            return detection
+        slots = {
+            'FRONT': ContainerSlot('SINGLE', f'{base_origin}:single', best_b, center(best_b), now, now, now, event_id=None)
+        }
+        self.current = Occupancy(frame.source_id, base_origin, best_b, center(best_b),
+                                 now, now, now, event_id=None, is_twin=False, slots=slots, active_slot='SINGLE',
+                                 provisional_event_id=prov_id)
+        return best_det
 
     def confirm(self, origin, event_id, container_number=None):
         if not self.current:
@@ -385,7 +187,7 @@ class ViewOccupancy:
         state = self.current
         matched = False
         for s_id, slot in state.slots.items():
-            if slot.origin == origin or (s_id == 'FRONT' and (origin == state.origin or origin.endswith(':front') or origin.endswith(':single'))) or (s_id == 'REAR' and origin.endswith(':rear')):
+            if slot.origin == origin or origin.startswith(state.origin):
                 slot.event_id = event_id
                 slot.container_number = container_number
                 slot.closed = True
@@ -400,7 +202,7 @@ class ViewOccupancy:
         state.event_id = event_id
         if not state.container_number:
             state.container_number = container_number
-        state.closed = all(s.closed for s in state.slots.values()) if state.slots else True
+        state.closed = True
 
     def status(self):
         state = self.current
@@ -410,8 +212,6 @@ class ViewOccupancy:
             machine_state = 'CLEARING'
         elif state.stationary and state.event_id:
             machine_state = 'WAITING'
-        elif state.event_id and getattr(state, 'is_twin', False):
-            machine_state = 'OCCUPIED_TWIN'
         elif state.event_id:
             machine_state = 'OCCUPIED_SINGLE'
         elif getattr(state, 'entrance_complete', False):
@@ -419,17 +219,17 @@ class ViewOccupancy:
         else:
             machine_state = 'APPROACHING'
         next_states = {
-            'CLEAR': ['APPROACHING'], 'APPROACHING': ['OCCUPIED_SINGLE', 'OCCUPIED_TWIN', 'CLEAR'],
-            'OCCUPIED_SINGLE': ['WAITING', 'EXITING'], 'OCCUPIED_TWIN': ['WAITING', 'EXITING'],
+            'CLEAR': ['APPROACHING'], 'APPROACHING': ['OCCUPIED_SINGLE', 'CLEAR'],
+            'OCCUPIED_SINGLE': ['WAITING', 'EXITING'],
             'WAITING': ['EXITING', 'CLEARING'], 'EXITING': ['CLEARING', 'WAITING'],
-            'CLEARING': ['CLEAR', 'OCCUPIED_SINGLE', 'OCCUPIED_TWIN'],
+            'CLEARING': ['CLEAR', 'OCCUPIED_SINGLE'],
         }[machine_state]
         return {'state': 'WAITING' if state.stationary and state.event_id else
                 'OCCUPIED' if state.event_id else 'TRACKING',
                 'state_machine': {'state': machine_state, 'next': next_states},
                 'stationary': state.stationary, 'event_id': state.event_id,
                 'bbox_normalized': state.bbox, 'clear_pending': state.clear_since is not None,
-                'is_twin': getattr(state, 'is_twin', False),
+                'is_twin': False,
                 'entrance_complete': getattr(state, 'entrance_complete', False),
                 'slots': {key: {'closed': slot.closed, 'container_number': slot.container_number}
                           for key, slot in getattr(state, 'slots', {}).items()}}

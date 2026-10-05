@@ -805,18 +805,12 @@ class GateRuntime:
                 self.ocr_store.complete(job_id, prior.event_id or getattr(job, 'event_id', None))
                 return
         prior = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
-        is_rear_slot = getattr(job, 'slot_position', 'FRONT') == 'REAR' or job.origin_key.endswith(':rear')
         if prior.event_id:
             prior_ev = self.repository.event(prior.event_id)
-            if prior_ev and prior_ev.get('status') == 'CONFIRMED':
-                if is_rear_slot and not prior_ev.get('container_number_2'):
-                    pass  # Keep processing to extract container_number_2
-                elif not prior_ev.get('iso_code_1') and not prior_ev.get('container_size'):
-                    pass  # Keep processing to extract ISO size/type code from feet markings
-                elif not is_rear_slot and prior_ev.get('container_number'):
-                    self.ocr_store.complete(job_id, prior.event_id)
-                    self._confirm_occupancy(job, prior.event_id)
-                    return  # Already committed occupancy: no repeat OCR, event write or log.
+            if prior_ev and prior_ev.get('status') == 'CONFIRMED' and prior_ev.get('container_number'):
+                self.ocr_store.complete(job_id, prior.event_id)
+                self._confirm_occupancy(job, prior.event_id)
+                return  # Already committed occupancy: no repeat OCR, event write or log.
         if validation is None:
             started = time.monotonic()
             read = None
@@ -994,10 +988,7 @@ class GateRuntime:
                     for view in self.cameras:
                         state = self.occupancy[view.id].current
                         if (view.gate_id == job.gate_id and state and state.event_id):
-                            if (state.container_number == validation.normalized_text or
-                                    getattr(state, 'is_twin', False) or
-                                    job.origin_key.endswith(':rear') or
-                                    getattr(job, 'slot_position', 'FRONT') == 'REAR'):
+                            if state.container_number == validation.normalized_text:
                                 ongoing = state.event_id
                                 break
             result = self.events.observe(job, validation, additional_frames=additional,
@@ -1011,17 +1002,14 @@ class GateRuntime:
                 state['pending'] = False
                 ev = self.repository.event(result[0]) if result else None
                 if ev:
-                    if getattr(job, 'slot_position', 'FRONT') == 'REAR':
-                        state['done'] = bool(ev.get('container_number_2'))
-                    else:
-                        state['done'] = bool(ev.get('container_number'))
+                    state['done'] = bool(ev.get('container_number'))
                 else:
                     state['done'] = False
         if result:
             self._confirm_occupancy(job, result[0])
             ev = self.repository.event(result[0])
             if ev and ev.get('status') == 'CONFIRMED':
-                is_done = bool(ev.get('container_number_2')) if getattr(job, 'slot_position', 'FRONT') == 'REAR' else bool(ev.get('container_number'))
+                is_done = bool(ev.get('container_number'))
                 if is_done:
                     with self._state_lock:
                         self._confirmed_origins.add(job.origin_key)
@@ -1033,8 +1021,8 @@ class GateRuntime:
         event = self.repository.event(event_id)
         if event and event['status'] == 'CONFIRMED':
             with self._state_lock:
-                num = event.get('container_number_2') if getattr(job, 'slot_position', 'FRONT') == 'REAR' else event.get('container_number')
-                self.occupancy[job.detection.camera_id].confirm(job.origin_key, event_id, num or event['container_number'])
+                num = event.get('container_number')
+                self.occupancy[job.detection.camera_id].confirm(job.origin_key, event_id, num)
 
     def _ocr_loop(self):
         while not self._stop.is_set():

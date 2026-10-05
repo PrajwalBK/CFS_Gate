@@ -61,32 +61,25 @@ class GateRepository:
             if number not in candidates or count > candidates[number][0]:
                 candidates[number] = (count, validation, job)
         entries = list(candidates.items())
-        # Different views of one number do not establish a second container.
-        twin = len(entries) == 2
-        if len(entries) > 2:
-            uncertain = True
-        if twin and any(not str(v.size_type or '').startswith('2') for _, (_, v, _) in entries):
-            uncertain = True
         created_paths = []
         try:
             with self._write_lock, self.db.sessions.begin() as session:
                 if session.get(GateEvent, passage.id):
                     return passage.id
                 first = entries[0] if entries else None
-                second = entries[1] if twin else None
                 event = GateEvent(id=passage.id, gate_id=passage.gate_id, lane_id=passage.lane_id,
                                   timestamp=passage.started, event_type=passage.direction,
                                   container_number=first[0] if first else None,
-                                  container_number_2=second[0] if second else None,
+                                  container_number_2=None,
                                   iso_code_1=first[1][1].size_type if first else None,
-                                  iso_code_2=second[1][1].size_type if second else None,
-                                  is_twin=twin, status='CONFIRMED' if entries and not uncertain else 'NEEDS_REVIEW')
+                                  iso_code_2=None,
+                                  is_twin=False, status='CONFIRMED' if entries and not uncertain else 'NEEDS_REVIEW')
                 session.add(event)
                 session.flush()
                 for index, (number, (_, validation, job)) in enumerate(entries):
                     detection_id, snapshot_id = str(uuid4()), str(uuid4())
-                    slot = 'REAR' if index == 1 else 'FRONT'
-                    origin = f'{job.origin_key}:{number}' + (':rear' if slot == 'REAR' else '')
+                    slot = 'SINGLE'
+                    origin = f'{job.origin_key}:{number}'
                     image = job.frame.image
                     # Give each identity its own proof view, even when two
                     # numbers were read from one camera frame. Include context
@@ -99,7 +92,7 @@ class GateRepository:
                     proof_image = image[top:top+ch,left:left+cw].copy()
                     obs = Observation(origin, passage.gate_id, job.track_id,
                                       job.detection, validation, passage.direction, proof_image,
-                                      passage.started, True, slot_position=slot, is_twin=twin)
+                                      passage.started, True, slot_position=slot, is_twin=False)
                     path = snapshots.save(snapshot_id, obs, passage.id)
                     created_paths.append(path)
                     context_id = str(uuid4())
@@ -168,14 +161,10 @@ class GateRepository:
                     else True
                 )
 
-                is_rear_slot = getattr(obs, 'slot_position', 'FRONT') == 'REAR' or obs.origin_key.endswith(':rear')
-
                 if number:
                     existing = session.scalar(select(GateEvent).where(
                         GateEvent.gate_id == obs.gate_id,
-                        (GateEvent.container_number == number) |
-                        (GateEvent.container_number_2 == number) |
-                        (GateEvent.container_number_2.is_(None) if is_rear_slot else GateEvent.container_number.is_(None)),
+                        GateEvent.container_number == number,
                         direction_match,
                         GateEvent.timestamp >= obs.detection.frame_timestamp - delta,
                         GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
@@ -191,8 +180,7 @@ class GateRepository:
                         ).order_by(GateEvent.timestamp.desc())).all()
                         for cand in candidates:
                             c1 = cand.container_number or ''
-                            c2 = cand.container_number_2 or ''
-                            if (len(c1) == 11 and c1[4:] == suffix) or (len(c2) == 11 and c2[4:] == suffix):
+                            if len(c1) == 11 and c1[4:] == suffix:
                                 existing = cand
                                 break
                     # Dwell/queue recovery: a different camera or a restarted
@@ -206,8 +194,7 @@ class GateRepository:
                         long_delta = timedelta(seconds=max(float(same_container_window_seconds or 0), dedup_seconds))
                         existing = session.scalar(select(GateEvent).where(
                             GateEvent.gate_id == obs.gate_id,
-                            (GateEvent.container_number == number) |
-                            (GateEvent.container_number_2 == number),
+                            GateEvent.container_number == number,
                             direction_match,
                             GateEvent.status.in_(['CONFIRMED', 'NEEDS_REVIEW']),
                             GateEvent.timestamp >= obs.detection.frame_timestamp - long_delta,
@@ -223,9 +210,8 @@ class GateRepository:
                                 GateEvent.timestamp <= obs.detection.frame_timestamp,
                             ).order_by(GateEvent.timestamp.asc())).all()
                             for cand in candidates:
-                                c1, c2 = cand.container_number or '', cand.container_number_2 or ''
-                                if ((len(c1) == 11 and c1[4:] == suffix) or
-                                        (len(c2) == 11 and c2[4:] == suffix)):
+                                c1 = cand.container_number or ''
+                                if len(c1) == 11 and c1[4:] == suffix:
                                     existing = cand
                                     break
 
@@ -245,27 +231,6 @@ class GateRepository:
                         for cand in recent_candidates:
                             time_diff = datetime_diff_seconds(cand.timestamp, obs.detection.frame_timestamp)
                             c_num = cand.container_number or ''
-
-                            # 1. Sequential twin 20ft container passage on the same lane:
-                            # A truck chassis can carry two distinct 20-foot containers (front and rear).
-                            # Only fuse if twin chassis or rear slot is genuinely detected/indicated.
-                            twin_indicated = getattr(obs, 'is_twin', False) or cand.is_twin or is_rear_slot or obs.origin_key.endswith(':rear')
-                            if (
-                                twin_indicated and
-                                number and c_num and number != c_num and
-                                len(number) == 11 and len(c_num) == 11 and
-                                time_diff <= 30.0 and
-                                (not cand.container_number_2 or cand.container_number_2 == number)
-                            ):
-                                obs_iso = str(getattr(obs.ocr, 'size_type', None) or '')
-                                cand_iso = str(cand.iso_code_1 or '')
-                                obs_is_40 = obs_iso.startswith('4') or obs_iso.startswith('L') or '40' in obs_iso or '45' in obs_iso
-                                cand_is_40 = cand_iso.startswith('4') or cand_iso.startswith('L') or '40' in cand_iso or '45' in cand_iso
-                                if not obs_is_40 and not cand_is_40:
-                                    is_rear_slot = True
-                                    cand.is_twin = True
-                                    existing = cand
-                                    break
 
                             # Do not merge distinctly different container codes (e.g. CSQU3054383 vs MSCU6639870)
                             if number and c_num and len(number) == 11 and len(c_num) == 11:
@@ -306,31 +271,19 @@ class GateRepository:
                             ocr_sim = ocr_similarity_score(number, c_num)
                             if time_diff <= 15.0 and ocr_sim >= 0.70:
                                 match_found = True
-                            elif time_diff <= 2.0 and not cand.is_twin:
-                                # Sub-second or <= 2s passage on same lane is physically the same vehicle
-                                match_found = True
 
                             if match_found:
                                 existing = cand
                                 break
 
                     if existing:
-                        is_twin_active = existing.is_twin or getattr(obs, 'is_twin', False) or is_rear_slot
-                        if is_rear_slot and is_twin_active:
-                            existing.is_twin = True
-                            if (number != existing.container_number or not existing.container_number) and (not existing.container_number_2 or obs.confirmed):
-                                existing.container_number_2 = number
-                                existing.iso_code_2 = getattr(obs.ocr, 'size_type', None) or '22G1'
-                                if not existing.iso_code_1 or not str(existing.iso_code_1).startswith('2'):
-                                    existing.iso_code_1 = '22G1'
-                        else:
-                            if not existing.container_number or (obs.confirmed and getattr(obs.ocr, 'valid_check_digit', False)):
-                                existing.container_number = number
-                                existing.iso_code_1 = getattr(obs.ocr, 'size_type', None) or existing.iso_code_1
-                            elif not existing.container_number:
-                                existing.container_number = number
-                                existing.iso_code_1 = getattr(obs.ocr, 'size_type', None)
-                        if obs.confirmed and (not existing.is_twin or (existing.container_number and existing.container_number_2)):
+                        if not existing.container_number or (obs.confirmed and getattr(obs.ocr, 'valid_check_digit', False)):
+                            existing.container_number = number
+                            existing.iso_code_1 = getattr(obs.ocr, 'size_type', None) or existing.iso_code_1
+                        elif not existing.container_number:
+                            existing.container_number = number
+                            existing.iso_code_1 = getattr(obs.ocr, 'size_type', None)
+                        if obs.confirmed:
                             existing.status = 'CONFIRMED'
                         if existing.event_type == 'UNKNOWN' and obs.direction != 'UNKNOWN':
                             existing.event_type = obs.direction
@@ -353,25 +306,14 @@ class GateRepository:
                     if active and active.gate_id == obs.gate_id:
                         existing = active
 
-                if obs.origin_key.startswith('dwell:') and existing and not is_rear_slot:
-                    # Check if the existing event already belongs to this exact same container
-                    is_same_container = False
-                    if number:
-                        c1 = existing.container_number or ''
-                        c2 = existing.container_number_2 or ''
-                        if number in (c1, c2):
-                            is_same_container = True
-                        elif len(number) == 11 and number[4:].isdigit():
-                            if (len(c1) == 11 and c1[4:] == number[4:]) or (len(c2) == 11 and c2[4:] == number[4:]):
-                                is_same_container = True
-
-                    # Only reset existing = None if it is a new cleared passage of a DIFFERENT or UNIDENTIFIED vehicle
+                if obs.origin_key.startswith('dwell:') and existing:
+                    time_diff = datetime_diff_seconds(existing.timestamp, obs.detection.frame_timestamp)
+                    is_same_container = bool(number and number == existing.container_number and time_diff <= 30.0)
                     if not is_same_container:
                         prior_view = session.scalar(select(DetectionRecord.id).where(
                             DetectionRecord.event_id == existing.id,
                             DetectionRecord.camera_id == obs.detection.camera_id,
                             DetectionRecord.origin_key.like('dwell:%'),
-                            ~DetectionRecord.origin_key.like('%:rear'),
                             DetectionRecord.origin_key != obs.origin_key))
                         if prior_view:
                             existing = None  # New cleared passage, not time-window fusion.
@@ -383,21 +325,16 @@ class GateRepository:
                     created = False
                     event_id = existing.id
                 size_type = getattr(obs.ocr, 'size_type', None)
-                size_str = str(size_type or '')
-                is_40ft = size_str.startswith('4') or '40' in size_str or '45' in size_str
-                obs_is_twin = getattr(obs, 'is_twin', False)
-                is_twin_event = (obs_is_twin or (existing and existing.is_twin) or is_rear_slot or (obs.origin_key.endswith(':front') and not obs.origin_key.endswith(':single'))) and not is_40ft
                 if created:
-                    assign_to_rear = is_twin_event and is_rear_slot
                     session.add(GateEvent(
                         id=event_id, gate_id=obs.gate_id, timestamp=obs.detection.frame_timestamp,
-                        container_number=number if not assign_to_rear else None,
-                        container_number_2=number if assign_to_rear else None,
-                        iso_code_1=getattr(obs.ocr, 'size_type', None) if not assign_to_rear else None,
-                        iso_code_2=getattr(obs.ocr, 'size_type', None) if assign_to_rear else None,
-                        is_twin=is_twin_event,
+                        container_number=number,
+                        container_number_2=None,
+                        iso_code_1=size_type,
+                        iso_code_2=None,
+                        is_twin=False,
                         event_type=obs.direction,
-                        status='CONFIRMED' if (obs.confirmed and not is_twin_event) else 'NEEDS_REVIEW',
+                        status='CONFIRMED' if obs.confirmed else 'NEEDS_REVIEW',
                     ))
                     session.flush()
                 else:
@@ -407,52 +344,16 @@ class GateRepository:
                         .where(DetectionRecord.event_id == existing.id, OCRResult.valid_check_digit == True)
                     ) or 0.0
                     obs_conf = getattr(obs.ocr, 'confidence', 0.0) or 0.0
-                    if is_40ft:
-                        existing.is_twin = False
-                        existing.container_number_2 = None
-                        existing.iso_code_2 = None
-                        if obs.confirmed:
-                            if not existing.container_number or obs_conf >= prior_best_conf:
-                                existing.container_number = number
-                                existing.iso_code_1 = size_type or existing.iso_code_1
-                            existing.status = 'CONFIRMED'
-                        elif not existing.container_number:
-                            existing.container_number = number
-                            existing.iso_code_1 = size_type or existing.iso_code_1
-                    elif is_twin_event or existing.is_twin:
-                        existing.is_twin = True
-                        if is_rear_slot:
-                            if (number != existing.container_number or not existing.container_number) and (not existing.container_number_2 or obs.confirmed or obs_conf >= prior_best_conf):
-                                existing.container_number_2 = number
-                                existing.iso_code_2 = getattr(obs.ocr, 'size_type', None) or '22G1'
-                                if not existing.iso_code_1 or not str(existing.iso_code_1).startswith('2'):
-                                    existing.iso_code_1 = '22G1'
-                        else:
-                            if (number != existing.container_number_2 or not existing.container_number_2) and (not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf)):
-                                existing.container_number = number
-                                existing.iso_code_1 = getattr(obs.ocr, 'size_type', None) or '22G1'
-                    else:
-                        if not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf):
-                            existing.container_number = number or existing.container_number
-                        if size_type and not existing.iso_code_1:
-                            existing.iso_code_1 = size_type
-                        elif size_type and obs_conf >= prior_best_conf:
-                            existing.iso_code_1 = size_type
-                        existing.container_number_2 = None
-                        existing.iso_code_2 = None
-                        existing.is_twin = False
-
-                    # Recovery safeguard: If not twin, ensure container_number is never null while container_number_2 has value
-                    if not existing.is_twin and not existing.container_number and existing.container_number_2:
-                        existing.container_number = existing.container_number_2
-                        existing.iso_code_1 = existing.iso_code_2 or existing.iso_code_1
-                        existing.container_number_2 = None
-                        existing.iso_code_2 = None
-
-                    if existing.is_twin:
-                        if existing.container_number and existing.container_number_2:
-                            existing.status = 'CONFIRMED'
-                    elif obs.confirmed:
+                    existing.is_twin = False
+                    existing.container_number_2 = None
+                    existing.iso_code_2 = None
+                    if not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf):
+                        existing.container_number = number or existing.container_number
+                    if size_type and not existing.iso_code_1:
+                        existing.iso_code_1 = size_type
+                    elif size_type and obs_conf >= prior_best_conf:
+                        existing.iso_code_1 = size_type
+                    if obs.confirmed:
                         existing.status = 'CONFIRMED'
                 detection_id = str(uuid4())
                 session.add(DetectionRecord(
@@ -483,11 +384,6 @@ class GateRepository:
 
                 # 1. Primary snapshot for this observation
                 snapshot_id = str(uuid4())
-                if is_rear_slot and getattr(obs, 'slot_position', 'FRONT') != 'REAR':
-                    try:
-                        object.__setattr__(obs, 'slot_position', 'REAR')
-                    except Exception:
-                        pass
                 image_path = snapshots.save(snapshot_id, obs, event_id)
                 existing_path_snap = session.scalar(select(Snapshot).where(
                     Snapshot.event_id == event_id,
@@ -904,8 +800,6 @@ class GateRepository:
                     ocr_sim = ocr_similarity_score(c1, c2)
                     if gap <= 15.0 and ocr_sim >= 0.70:
                         is_match = True
-                    elif gap <= 1.5 and not ev1.is_twin and not ev2.is_twin:
-                        is_match = True
 
                     if is_match:
                         # ev2 is duplicate of ev1
@@ -947,7 +841,7 @@ class GateRepository:
             if event.container_number:
                 for cand in candidates:
                     if cand.timestamp <= event.timestamp:
-                        if cand.container_number == event.container_number or cand.container_number_2 == event.container_number:
+                        if cand.container_number == event.container_number:
                             return cand.id
 
             # 2. Image similarity and capture timestamp comparison
@@ -986,10 +880,6 @@ class GateRepository:
                 # Fuzzy OCR match within short window
                 ocr_sim = ocr_similarity_score(event.container_number, cand.container_number)
                 if time_diff <= 15.0 and ocr_sim >= 0.70:
-                    return cand.id if cand.timestamp <= event.timestamp else cand.id
-
-                # Sub-second physical passage: same lane within 2.0s
-                if time_diff <= 2.0 and not cand.is_twin and not event.is_twin:
                     return cand.id if cand.timestamp <= event.timestamp else cand.id
 
             return event_id

@@ -482,10 +482,6 @@ class CloudOutboxDispatcher:
                     # Query repository for full event record and associated multi-camera snapshots
                     event_record = self.repository.event(event_id) if self.repository else None
                     cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
-                    cntr2 = event_record.get('container_number_2') if event_record else None
-                    is_twin = bool(event_record.get('is_twin')) if event_record else False
-                    if is_twin and (not cntr1 or not cntr2 or cntr1 == cntr2):
-                        raise ValueError('Twin event is incomplete; both distinct container numbers are required')
 
                     containers_list = []
                     if cntr1:
@@ -499,9 +495,6 @@ class CloudOutboxDispatcher:
                             for snap in event_record['snapshots']:
                                 cam_id = snap.get('camera_id')
                                 if not cam_id:
-                                    continue
-                                # Exclude rear-slot snapshots from container 1 if is_twin
-                                if is_twin and (snap.get('image_path') or '').endswith('_rear.jpg'):
                                     continue
                                 cam_snapshots.setdefault(cam_id, []).append(snap)
 
@@ -585,8 +578,6 @@ class CloudOutboxDispatcher:
                             raise ValueError('No verified non-blank container proof image is available; cloud publication deferred')
 
                         iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
-                        if event_record and event_record.get('is_twin') and not iso_s1.startswith('2'):
-                            raise ValueError('Twin container 1 is missing a verified 20-foot ISO size code')
                         cs1 = str((event_record.get('container_size') if event_record else None) or '')
                         # Derive full human-readable size from ISO code when container_size not pre-computed
                         if not cs1 and iso_s1:
@@ -610,85 +601,8 @@ class CloudOutboxDispatcher:
                             'Size': size_1,
                             'ContainerSize': cs1 or None,
                             'SizeCode': iso_s1 or None,
-                            'Position': 'FRONT' if is_twin else 'SINGLE',
+                            'Position': 'SINGLE',
                             'Images': c1_images
-                        })
-
-                    if is_twin and cntr2 and cntr2 != cntr1:
-                        c2_images = []
-                        if event_record and event_record.get('snapshots') and self.snapshots:
-                            cam_c2_snapshots = {}
-                            for snap in event_record['snapshots']:
-                                is_rear_snap = (
-                                    snap.get('id') == event_record.get('rear_snapshot_id') or
-                                    (snap.get('image_path') or '').endswith('_rear.jpg') or
-                                    any(k in (snap.get('camera_id') or '').lower() for k in ('rear', '-3'))
-                                )
-                                if is_rear_snap:
-                                    cam_id = snap.get('camera_id') or 'CAM-02'
-                                    cam_c2_snapshots.setdefault(cam_id, []).append(snap)
-
-                            best_c2_by_camera = {}
-                            for cam_id, snaps in cam_c2_snapshots.items():
-                                best_snap = None
-                                best_data = None
-                                best_score = -1.0
-                                for snap in snaps:
-                                    try:
-                                        snap_p = self.snapshots.path(snap['image_path'])
-                                        if not snap_p.is_file():
-                                            continue
-                                        data = snap_p.read_bytes()
-                                        decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                                        if decoded is None or min(decoded.shape[:2]) < 240:
-                                            continue
-                                        quality = self.snapshots.compute_quality(decoded)
-                                        if quality < 2.0:
-                                            continue
-                                        score = quality
-                                        if snap.get('id') == event_record.get('rear_snapshot_id'):
-                                            score += 1000.0
-                                        if score > best_score:
-                                            best_score = score
-                                            best_snap = snap
-                                            best_data = data
-                                    except Exception:
-                                        pass
-                                if best_snap and best_data:
-                                    best_c2_by_camera[cam_id] = (best_snap, best_data)
-
-                            for cam_id in sorted(best_c2_by_camera.keys()):
-                                snap, data = best_c2_by_camera[cam_id]
-                                c2_images.append({
-                                    'ImageType': 'REAR',
-                                    'CameraId': cam_id,
-                                    'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
-                                    'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
-                                })
-
-                        if not c2_images:
-                            raise ValueError('Rear slot proof image is missing; cloud publication deferred')
-                        iso_s2 = str((event_record.get('iso_code_2') if event_record else None) or '')
-                        if event_record and event_record.get('is_twin') and not iso_s2.startswith('2'):
-                            raise ValueError('Twin container 2 is missing a verified 20-foot ISO size code')
-                        cs2 = str((event_record.get('container_size_2') if event_record else None) or '')
-                        if not cs2 and iso_s2:
-                            try:
-                                from app.ocr.validator import extract_iso_size_code as _esc
-                                _, cs2 = _esc(iso_s2)
-                                cs2 = cs2 or ''
-                            except Exception:
-                                pass
-                        size_2 = '20' if ('20' in cs2 or iso_s2.startswith('2')) else ('45' if ('45' in cs2 or iso_s2.startswith('L')) else '40')
-                        conf_2 = float(event_record.get('confidence_2') or 0.95) if event_record else 0.95
-                        containers_list.append({
-                            'ContainerNumber': cntr2,
-                            'ContainerNumberConfidence': round(conf_2, 2),
-                            'Size': size_2,
-                            'ContainerSize': cs2 or None,
-                            'SizeCode': iso_s2 or None,
-                            'Position': 'REAR',
-                            'Images': c2_images or (c1_images[:1] if c1_images else [])
                         })
 
                     if not containers_list and obs and obs.ocr and obs.ocr.normalized_text:
@@ -696,7 +610,7 @@ class CloudOutboxDispatcher:
                             'ContainerNumber': obs.ocr.normalized_text,
                             'ContainerNumberConfidence': round(float(obs.ocr.confidence), 2),
                             'Size': '20',
-                            'Position': 'FRONT',
+                            'Position': 'SINGLE',
                             'Images': [{
                                 'ImageType': 'FRONT',
                                 'CameraId': obs.detection.camera_id if obs else 'CAM-01',

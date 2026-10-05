@@ -92,14 +92,14 @@ def test_twin_atomic_publishing(tmp_path):
     event_id, created = repo.save_observation(front_obs, snapshots, 30)
     assert created is True
 
-    # Front container is saved, but because it's a twin event, status is held at NEEDS_REVIEW
+    # Front container is saved independently
     ev1 = repo.event(event_id)
-    assert ev1['is_twin'] is True
+    assert ev1['is_twin'] is False
     assert ev1['container_number'] == 'MSCU6546021'
     assert ev1['container_number_2'] is None
-    assert ev1['status'] == 'NEEDS_REVIEW'
+    assert ev1['status'] == 'CONFIRMED'
 
-    # Now Rear container observation arrives for the same event
+    # Now second container observation arrives - processed independently
     rear_det = Detection('cam1', datetime.now(timezone.utc), 'container', 0.9, (600, 100, 1000, 500))
     rear_ocr = Validation('WHSU 216671 2', 'WHSU2166712', 0.95, True, True, 'VALID', '22G1')
     rear_obs = Observation(
@@ -112,16 +112,16 @@ def test_twin_atomic_publishing(tmp_path):
         image=img,
         started_at=datetime.now(timezone.utc),
         confirmed=True,
-        slot_position='REAR'
+        slot_position='SINGLE'
     )
 
-    event_id_2, created_2 = repo.save_observation(rear_obs, snapshots, 30, ongoing_event_id=event_id)
-    assert event_id_2 == event_id
-    assert created_2 is False
+    event_id_2, created_2 = repo.save_observation(rear_obs, snapshots, 30)
+    assert event_id_2 != event_id
+    assert created_2 is True
 
-    # Now both containers are populated and confirmed together atomically
-    ev2 = repo.event(event_id)
-    assert ev2['is_twin'] is True
-    assert ev2['container_number'] == 'MSCU6546021'
-    assert ev2['container_number_2'] == 'WHSU2166712'
+    # Each container has its own confirmed event record
+    ev2 = repo.event(event_id_2)
+    assert ev2['is_twin'] is False
+    assert ev2['container_number'] == 'WHSU2166712'
+    assert ev2['container_number_2'] is None
     assert ev2['status'] == 'CONFIRMED'

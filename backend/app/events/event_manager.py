@@ -82,9 +82,9 @@ class EventManager:
         obs = Observation(job.origin_key, job.gate_id, job.track_id, proof.detection, selected,
                           job.direction, proof.frame.image, job.started_at, confirmed,
                           all_detections=list(getattr(proof, 'all_detections', [])),
-                          slot_position=getattr(job, 'slot_position', 'FRONT'),
+                          slot_position='SINGLE',
                           event_id=getattr(job, 'event_id', None),
-                          is_twin=getattr(job, 'is_twin', False))
+                          is_twin=False)
 
         target_event_id = ongoing_event_id or evidence.event_id or getattr(job, 'event_id', None)
         options = {'ongoing_event_id': target_event_id} if target_event_id else {}
@@ -104,19 +104,7 @@ class EventManager:
         evidence.confirmed = confirmed
 
         # Only dispatch to cloud and buzz for new events or newly confirmed events that haven't been dispatched yet
-        # A twin is one cloud transaction. Do not publish the front slot while
-        # the rear slot or its proof image is still missing; doing so permanently
-        # leaves Prosper with a single-container payload because the dispatcher
-        # deduplicates already-sent event IDs.
-        cloud_ready = True
-        if getattr(obs, 'is_twin', False) and event_id:
-            current = self.repository.event(event_id) or {}
-            snapshots = current.get('snapshots') or []
-            cloud_ready = bool(
-                current.get('container_number') and current.get('container_number_2') and
-                any(str(item.get('image_path', '')).endswith('_rear.jpg') for item in snapshots)
-            )
-        should_dispatch = obs.confirmed and cloud_ready and (event_id not in self._dispatched_events)
+        should_dispatch = obs.confirmed and (event_id not in self._dispatched_events)
         if self.dispatcher and should_dispatch:
             self._dispatched_events.add(event_id)
             self.dispatcher.enqueue(obs, event_id)

@@ -79,24 +79,17 @@ def test_multicamera_distinct_numbers_share_one_review_visit(settings, make_job)
     assert len(collector.groups())==2
 
 
-def test_passage_twin_and_conflicting_iso_stays_review(repository,snapshots,make_job):
+def test_passage_single_container_confirmed(repository,snapshots,make_job):
     ts=make_job().frame.timestamp
     p=Passage('passage-one','camera-1','s','lane-1','one','ENTRY',ts,ts,1,(0,0,150,100),closed=True)
-    for i,number in enumerate(['CSQU3054383','MSCU6639870']):
-        val=Validation(number,number,.95,True,True,'VALID','22G1')
-        job=make_job(origin=f'passage:one:{i}')
-        p.regions.append(Region(votes=Counter({number:2}),reads={number:(val,job)}))
+    number='CSQU3054383'
+    val=Validation(number,number,.95,True,True,'VALID','22G1')
+    job=make_job(origin='passage:one:0')
+    p.regions.append(Region(votes=Counter({number:2}),reads={number:(val,job)}))
     repository.save_passage(p,snapshots,2)
     event=repository.event(p.id)
-    assert event['is_twin'] and event['status']=='CONFIRMED'
-    assert event['lane_id']=='one' and len(event['snapshots'])==4  # two proofs and raw context
-    assert event['rear_snapshot_id']
-    p.id='passage-two'
-    for i,region in enumerate(p.regions):
-        number=next(iter(region.reads));val,job=region.reads[number]
-        region.reads[number]=(replace(val,size_type='45G1' if i else '22G1'),replace(job,origin_key=f'passage:two:{i}'))
-    repository.save_passage(p,snapshots,2)
-    assert repository.event(p.id)['status']=='NEEDS_REVIEW'
+    assert event['is_twin'] is False and event['status']=='CONFIRMED'
+    assert event['lane_id']=='one'
 
 
 def test_cloud_ack_is_persisted(repository,snapshots,make_job):
@@ -145,7 +138,7 @@ def test_runtime_keeps_passage_open_until_clear_and_confirms_two_slots(settings,
         runtime.process_frame(camera,replace(frame,sequence=second,timestamp=frame.timestamp+timedelta(seconds=second)))
     runtime._finalize_passages()
     event=repository.events()['items'][0]
-    assert event['is_twin'] and event['status']=='CONFIRMED' and event['lane_id']=='one'
+    assert event['is_twin'] is False and event['status']=='CONFIRMED' and event['lane_id']=='one'
     assert not runtime.passages.passages
 
 

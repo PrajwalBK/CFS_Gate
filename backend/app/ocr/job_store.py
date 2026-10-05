@@ -117,9 +117,7 @@ class OCRJobStore:
     def save(self, job, crop):
         import cv2
         def encode_img(image, crop_image=False):
-            extension = '.png' if crop_image else '.jpg'
-            options = [cv2.IMWRITE_PNG_COMPRESSION, 1] if crop_image else [cv2.IMWRITE_JPEG_QUALITY, 88]
-            ok, data = cv2.imencode(extension, image, options)
+            ok, data = cv2.imencode('.png', image, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             if not ok:
                 raise OSError('OCR evidence encoding failed')
             return data.tobytes()
@@ -313,6 +311,38 @@ class OCRJobStore:
                        (event_id, time.time(), origin))
 
     def clean_completed(self, max_age_seconds=10, protected_origins=()):
+        if max_age_seconds is not None:
+            cutoff = time.time() - max_age_seconds
+            with self.connection() as db:
+                rows = db.execute(
+                    "SELECT id, origin, crop, image, metadata FROM jobs j WHERE state='DONE' AND retry_at<=? "
+                    "AND NOT EXISTS (SELECT 1 FROM jobs p WHERE p.origin=j.origin AND p.state='PENDING')",
+                    (cutoff,)
+                ).fetchall()
+            for row in rows:
+                if row['origin'] in protected_origins:
+                    continue
+                try:
+                    img_p = self.image_path(row['image'])
+                    crop_p = self.image_path(row['crop'])
+                    img_p.unlink(missing_ok=True)
+                    crop_p.unlink(missing_ok=True)
+                    meta = json.loads(row['metadata']) if row['metadata'] else {}
+                    for comp_rel in meta.get('companion_images', {}).values():
+                        try:
+                            self.image_path(comp_rel).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    parent = img_p.parent
+                    if parent != self.image_root and parent.is_relative_to(self.image_root):
+                        try:
+                            parent.rmdir()
+                        except OSError:
+                            pass
+                    with self.connection() as db:
+                        db.execute('DELETE FROM jobs WHERE id=? AND state=?', (row['id'], 'DONE'))
+                except Exception:
+                    pass
         self._prune_completed(0, protected_origins)
 
     def _prune_completed(self, incoming_bytes, protected_origins=()):
