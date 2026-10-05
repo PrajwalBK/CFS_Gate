@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 def clear_all():
-    base_dir = Path(r"d:\ai-video-based-inventory\ai-video-based-inventory\backend")
+    base_dir = Path(__file__).resolve().parents[1]
     db_path = base_dir / "data" / "gate.db"
     spool_db_path = base_dir / "uploads" / "ocr-spool" / "jobs.sqlite3"
     snapshots_dir = base_dir / "snapshots"
@@ -12,29 +12,43 @@ def clear_all():
 
     # 1. Clear gate.db tables
     if db_path.exists():
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM system_logs")
-        cur.execute("DELETE FROM ocr_results")
-        cur.execute("DELETE FROM snapshots")
-        cur.execute("DELETE FROM detections")
-        cur.execute("DELETE FROM gate_events")
-        conn.commit()
-        cur.execute("VACUUM")
-        conn.commit()
-        conn.close()
-        print("Cleared gate.db tables (gate_events, detections, snapshots, ocr_results, system_logs)")
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM system_logs")
+            cur.execute("DELETE FROM ocr_results")
+            cur.execute("DELETE FROM snapshots")
+            cur.execute("DELETE FROM detections")
+            cur.execute("DELETE FROM gate_events")
+            conn.commit()
+            cur.execute("VACUUM")
+            conn.commit()
+            conn.close()
+            print("Cleared gate.db tables (gate_events, detections, snapshots, ocr_results, system_logs)")
+        except Exception as e:
+            print(f"Error clearing gate.db: {e}")
+
+    # Remove SQLite WAL & SHM files if present
+    for extra in [base_dir / "data" / "gate.db-wal", base_dir / "data" / "gate.db-shm"]:
+        if extra.exists():
+            try:
+                extra.unlink()
+            except Exception as e:
+                print(f"Could not remove {extra.name}: {e}")
 
     # 2. Clear OCR spool database
     if spool_db_path.exists():
-        conn = sqlite3.connect(spool_db_path)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM jobs")
-        conn.commit()
-        cur.execute("VACUUM")
-        conn.commit()
-        conn.close()
-        print("Cleared ocr-spool jobs.sqlite3")
+        try:
+            conn = sqlite3.connect(spool_db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM jobs")
+            conn.commit()
+            cur.execute("VACUUM")
+            conn.commit()
+            conn.close()
+            print("Cleared ocr-spool jobs.sqlite3")
+        except Exception as e:
+            print(f"Error clearing spool db: {e}")
 
     # 3. Clear snapshots directory
     if snapshots_dir.exists():
@@ -83,6 +97,14 @@ def clear_all():
             except Exception as e:
                 print(f"Error removing log {item}: {e}")
         print("Cleared backend/logs directory")
+
+    # 7. Clear live temporary frame images
+    for live_img in base_dir.glob("live_*.jpg"):
+        try:
+            live_img.unlink()
+        except Exception as e:
+            print(f"Error removing {live_img}: {e}")
+    print("Cleared live frame images")
 
 if __name__ == "__main__":
     clear_all()
