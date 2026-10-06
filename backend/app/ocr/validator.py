@@ -90,6 +90,26 @@ def normalize(text: str) -> str:
     return re.sub(r'[^A-Z0-9]', '', text.upper())
 
 
+def is_valid_iso_6346(code: str) -> bool:
+    if not code or len(code) != 11:
+        return False
+    if not STRUCTURE.match(code):
+        return False
+    try:
+        return check_digit(code[:10]) == int(code[10])
+    except (ValueError, IndexError):
+        return False
+
+
+def is_uuid(val: str) -> bool:
+    import uuid
+    try:
+        uuid.UUID(str(val))
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
 # Common visual OCR confusions for check digit (read digit vs calculated digit)
 CHECK_DIGIT_CONFUSIONS = {
     (2, 7), (7, 2),
