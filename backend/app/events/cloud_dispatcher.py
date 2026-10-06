@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Any, Dict, Optional
 import uuid
+import re
 
 import cv2
 import numpy as np
@@ -540,7 +541,30 @@ class CloudOutboxDispatcher:
                             event_record['snapshots'] = manifest['captures']
                             event_record['primary_snapshot_id'] = manifest['primary_snapshot_id']
                             event_record['rear_snapshot_id'] = manifest['rear_snapshot_id']
-                    cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
+                    from app.ocr.validator import is_valid_iso_6346, is_uuid
+
+                    def is_cloud_acceptable(c_num: str, obs_obj=None) -> bool:
+                        if not c_num or is_uuid(c_num):
+                            return False
+                        clean = re.sub(r'[^A-Z0-9]', '', str(c_num).upper())
+                        if len(clean) != 11:
+                            return False
+                        if not (clean[:3].isalpha() and clean[4:].isdigit()):
+                            return False
+                        if obs_obj and getattr(obs_obj, 'ocr', None) and getattr(obs_obj.ocr, 'valid_check_digit', False):
+                            return True
+                        return is_valid_iso_6346(clean)
+
+                    cntr1 = event_record.get('container_number') if event_record else None
+                    if not cntr1 and obs and getattr(obs, 'ocr', None) and getattr(obs, 'confirmed', False):
+                        cntr1 = obs.ocr.normalized_text
+
+                    if not cntr1 or not is_cloud_acceptable(cntr1, obs):
+                        log.warning('prosper_cloud_dispatch_rejected_invalid_container', extra={
+                            'event_id': event_id, 'container_number': cntr1
+                        })
+                        self.queue.task_done()
+                        continue
 
                     containers_list = []
                     if cntr1:
@@ -662,20 +686,6 @@ class CloudOutboxDispatcher:
                             'SizeCode': iso_s1 or None,
                             'Position': 'SINGLE',
                             'Images': c1_images
-                        })
-
-                    if not containers_list and obs and obs.ocr and obs.ocr.normalized_text:
-                        containers_list.append({
-                            'ContainerNumber': obs.ocr.normalized_text,
-                            'ContainerNumberConfidence': round(float(obs.ocr.confidence), 2),
-                            'Size': '20',
-                            'Position': 'SINGLE',
-                            'Images': [{
-                                'ImageType': 'FRONT',
-                                'CameraId': obs.detection.camera_id if obs else 'CAM-01',
-                                'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
-                                'Image': FALLBACK_IMAGE_DATA_URI
-                            }]
                         })
 
                     if obs and hasattr(obs, 'detection'):

@@ -148,12 +148,47 @@ def sanitize_ocr_text(text: str) -> str:
     return cleaned.strip()
 
 
+# UUID pattern for rejecting random IDs
+UUID_PATTERN = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', re.IGNORECASE)
+
+
+def is_uuid(text: str) -> bool:
+    """Return True if the text contains or is a UUID."""
+    if not text:
+        return False
+    return bool(UUID_PATTERN.search(str(text)))
+
+
+def is_valid_iso_6346(number: str) -> bool:
+    """Strict ISO 6346 check: 4 letters + 6 serial digits + 1 check digit.
+    
+    Returns True if and only if:
+    1. Not a UUID or arbitrary non-container string
+    2. Exactly 11 alphanumeric characters
+    3. Matches ^[A-Z]{3}[UJZ][0-9]{7}$ (or ^[A-Z]{4}[0-9]{7}$)
+    4. Mathematical ISO 6346 check digit matches the 11th digit exactly.
+    """
+    if not number or is_uuid(number):
+        return False
+    clean = re.sub(r'[^A-Z0-9]', '', str(number).upper())
+    if len(clean) != 11:
+        return False
+    if not re.fullmatch(r'^[A-Z]{3}[UJZ][0-9]{7}$', clean):
+        if not re.fullmatch(r'^[A-Z]{4}[0-9]{7}$', clean):
+            return False
+    try:
+        expected = check_digit(clean[:10])
+        return expected == int(clean[10])
+    except Exception:
+        return False
+
+
 class ContainerValidator:
     def validate(self, read: OCRRead) -> Validation:
         raw_input = read.raw_text[:4096] if read and read.raw_text else ''
         sanitized = sanitize_ocr_text(raw_input)
-        if not sanitized or normalize(sanitized) in ('', 'CPIPCAM', 'CPIP', 'IPCAM', 'CAM', 'PROOF'):
-            return Validation('', '', 0.0, False, False, 'INVALID_FORMAT')
+        if not sanitized or is_uuid(sanitized) or normalize(sanitized) in ('', 'CPIPCAM', 'CPIP', 'IPCAM', 'CAM', 'PROOF'):
+            return Validation(raw_input, '', 0.0, False, False, 'INVALID_FORMAT')
 
         raw = correct_feet_size_codes(sanitized)
         single_line_raw = ' '.join(raw.splitlines())
@@ -181,11 +216,8 @@ class ContainerValidator:
                     c1_pref = prefix + cleaned_digits[1:7]
                     cd1_expected = int(cleaned_digits[7])
                     cd1_calc = check_digit(c1_pref)
-                    if cd1_calc == cd1_expected or (cd1_expected, cd1_calc) in CHECK_DIGIT_CONFUSIONS:
+                    if cd1_calc == cd1_expected:
                         candidates.add(c1_pref + str(cd1_calc))
-                elif len(cleaned_digits) == 6 and has_separator:
-                    c_pref = prefix + cleaned_digits
-                    candidates.add(c_pref + str(check_digit(c_pref)))
 
         # Handle cases where container prefix and serial digits are separated by size codes or words
         # (e.g. 'TGHU 4561 905915 7' or 'TGHU 45G1 905915 7')
@@ -197,14 +229,10 @@ class ContainerValidator:
                 d_cands = [d[0] + d[1] for d in spaced] + re.findall(r'(?<![0-9])([0-9]{7})(?![0-9])', raw)
                 for dc in d_cands:
                     c_full = prefix + dc
-                    if check_digit(c_full[:10]) == int(c_full[10]) or (int(c_full[10]), check_digit(c_full[:10])) in CHECK_DIGIT_CONFUSIONS:
+                    if check_digit(c_full[:10]) == int(c_full[10]):
                         candidates.add(c_full[:10] + str(check_digit(c_full[:10])))
-                if not candidates:
-                    d6_cands = re.findall(r'(?<![0-9])([0-9]{6})(?![0-9])', raw)
-                    for d6 in d6_cands:
-                        c_pref = prefix + d6
-                        candidates.add(c_pref + str(check_digit(c_pref)))
 
+        normalized = ''
         if len(candidates) > 1:
             valid_cands = [c for c in candidates if bool(STRUCTURE.fullmatch(c)) and check_digit(c[:10]) == int(c[10])]
             if len(valid_cands) == 1:
@@ -234,46 +262,39 @@ class ContainerValidator:
                     read_cd = int(three_letter_match.group(3)) if three_letter_match.group(3) else None
                     candidate_prefix = f"{pref3}U{ser6}"
                     calc_cd = check_digit(candidate_prefix)
-                    if read_cd is None or read_cd == calc_cd or (read_cd, calc_cd) in CHECK_DIGIT_CONFUSIONS:
+                    if read_cd is not None and read_cd == calc_cd:
                         normalized = candidate_prefix + str(calc_cd)
                         subst_found = True
                 if not subst_found:
                     brand_found = False
                     for brand, bic in BRAND_PREFIX_MAP.items():
                         if brand in raw.upper():
-                            digit_match = re.search(r'(?<![0-9])([0-9]{6})(?:[\s-]*([0-9]))?(?![0-9])', raw)
+                            digit_match = re.search(r'(?<![0-9])([0-9]{6})(?:[\s-]*([0-9]))(?![0-9])', raw)
                             if digit_match:
                                 prefix = f"{bic}{digit_match.group(1)}"
-                                normalized = prefix + str(check_digit(prefix))
-                                brand_found = True
-                                break
+                                if check_digit(prefix) == int(digit_match.group(2)):
+                                    normalized = prefix + str(digit_match.group(2))
+                                    brand_found = True
+                                    break
                     if not brand_found:
-                        normalized = normalize(raw)[:256]
+                        # Non-container text, UUIDs, or random words MUST NOT become container numbers
+                        normalized = ''
 
-        valid_format = bool(STRUCTURE.fullmatch(normalized))
+        if not normalized:
+            iso_code, human_size = extract_iso_size_code(raw)
+            return Validation(raw, '', 0.0, False, False, 'INVALID_FORMAT', size_type=iso_code or human_size)
+
+        valid_format = bool(STRUCTURE.fullmatch(normalized)) or bool(re.fullmatch(r'^[A-Z]{4}[0-9]{7}$', normalized))
         valid_digit = False
         if valid_format:
             expected_digit = int(normalized[10])
             calc_digit = check_digit(normalized[:10])
+            # Strict equality: DO NOT GUESS OR BLINDLY REPLACE CHARACTERS
             if calc_digit == expected_digit:
                 valid_digit = True
-            else:
-                # Check if 'C' was misread for 'G' (or 'G' for 'C') in owner letters
-                for pos in range(3):
-                    if normalized[pos] == 'C':
-                        candidate_prefix = normalized[:pos] + 'G' + normalized[pos + 1:10]
-                        if check_digit(candidate_prefix) == expected_digit:
-                            normalized = candidate_prefix + str(expected_digit)
-                            valid_digit = True
-                            break
-                if not valid_digit:
-                    # Check if check digit was visually confused in OCR
-                    if (expected_digit, calc_digit) in CHECK_DIGIT_CONFUSIONS:
-                        normalized = normalized[:10] + str(calc_digit)
-                        valid_digit = True
 
         # Reject known hallucinations from old prompt examples
-        if normalized in ('TIIU5077669', 'MSCU6546021'):
+        if normalized in ('TIIU5077669',):
             return Validation(raw, '', 0.0, False, False, 'PROMPT_LEAK_DISCARDED')
 
         status = 'VALID' if valid_digit else 'INVALID_CHECK_DIGIT' if valid_format else 'INVALID_FORMAT'

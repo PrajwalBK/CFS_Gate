@@ -74,3 +74,59 @@ def test_delimiter_tolerant_container_read():
     assert val.size_type == '22G1'
 
 
+def test_uuid_and_tracker_ids_are_strictly_rejected():
+    from app.ocr.validator import is_uuid, is_valid_iso_6346
+    uuid_str = '3c780c27-e351-408d-b642-bdcf8e046d90'
+    assert is_uuid(uuid_str)
+    assert not is_valid_iso_6346(uuid_str)
+    val = ContainerValidator().validate(OCRRead(uuid_str, 0.99))
+    assert val.normalized_text == ''
+    assert not val.valid_format
+    assert not val.valid_check_digit
+    assert val.validation_status == 'INVALID_FORMAT'
+
+
+def test_iso_6346_check_digit_strictness():
+    from app.ocr.validator import is_valid_iso_6346
+    # Valid ISO containers with mathematically correct check digits
+    assert is_valid_iso_6346('MSCU1234566')  # check digit 6
+    assert is_valid_iso_6346('CSQU3054383')  # check digit 3
+    assert is_valid_iso_6346('TRHU1545895')  # check digit 5
+    assert is_valid_iso_6346('MSCU6639870')  # check digit 0
+    
+    # Check digits must match exactly (no fuzzy substitutions)
+    assert not is_valid_iso_6346('MSCU1234567')  # wrong check digit (expected 6)
+    assert not is_valid_iso_6346('MSCU1234568')  # wrong check digit
+    assert not is_valid_iso_6346('3c780c27-e351-408d-b642-bdcf8e046d90')  # UUID
+    assert not is_valid_iso_6346('UNKNOWN123')
+    assert not is_valid_iso_6346('MSCU12345')  # too short
+    assert not is_valid_iso_6346('MSCU12345678')  # too long
+
+
+def test_user_reported_suspicious_values_handling():
+    from app.ocr.validator import is_valid_iso_6346, is_uuid
+    validator = ContainerValidator()
+
+    # 1. UUID must be completely rejected as an invalid container number
+    uuid_val = '3c780c27-e351-408d-b642-bdcf8e046d90'
+    assert is_uuid(uuid_val)
+    assert not is_valid_iso_6346(uuid_val)
+    res = validator.validate(OCRRead(uuid_val, 0.99))
+    assert res.normalized_text == ''
+    assert not res.valid_format
+    assert not res.valid_check_digit
+
+    # 2. Mathematical check digit validation for the reported examples
+    for candidate in ['IHEU9036531', 'CLLU0041015', 'NLMU2345670']:
+        calc = check_digit(candidate[:10])
+        assert calc == int(candidate[10])
+        assert is_valid_iso_6346(candidate)
+        
+        # Tampered or single noisy misread digit must be strictly rejected
+        tampered = candidate[:10] + str((calc + 1) % 10)
+        assert not is_valid_iso_6346(tampered)
+        t_res = validator.validate(OCRRead(tampered, 0.95))
+        assert not t_res.valid_check_digit
+
+
+

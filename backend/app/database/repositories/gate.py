@@ -1,6 +1,7 @@
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
+import re
 from threading import Lock
 from uuid import uuid4
 from sqlalchemy import func, select, update
@@ -151,7 +152,21 @@ class GateRepository:
                 prior = session.scalar(select(DetectionRecord).where(DetectionRecord.origin_key == obs.origin_key))
                 if prior:
                     return prior.event_id, False
-                number = obs.ocr.normalized_text if (obs.confirmed or getattr(obs.ocr, 'valid_check_digit', False)) else None
+                from app.ocr.validator import is_valid_iso_6346, is_uuid
+                raw_num = obs.ocr.normalized_text if (obs.confirmed or getattr(obs.ocr, 'valid_check_digit', False)) else None
+                def is_acceptable_container(text: str, ocr_obj=None) -> bool:
+                    if not text or is_uuid(text):
+                        return False
+                    clean = re.sub(r'[^A-Z0-9]', '', str(text).upper())
+                    if len(clean) != 11:
+                        return False
+                    if not (clean[:3].isalpha() and clean[4:].isdigit()):
+                        return False
+                    if ocr_obj and getattr(ocr_obj, 'valid_check_digit', False):
+                        return True
+                    return is_valid_iso_6346(clean)
+
+                number = raw_num if (raw_num and is_acceptable_container(raw_num, getattr(obs, 'ocr', None))) else None
                 delta = timedelta(seconds=dedup_seconds)
                 existing = None
 

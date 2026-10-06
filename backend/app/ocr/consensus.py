@@ -188,7 +188,7 @@ class CharacterConsensus:
             read_cd = int(consensus_str[10])
 
             if calc_cd == read_cd:
-                # Direct check digit match!
+                # Direct check digit match from positional voting consensus!
                 return Validation(
                     raw_text=consensus_str,
                     normalized_text=consensus_str,
@@ -198,55 +198,16 @@ class CharacterConsensus:
                     validation_status='VALID_CONSENSUS',
                     size_type=best_size
                 )
-
-            # Check digit mismatch: Try single-character corrections on lowest-confidence positions
-            indexed_conf = sorted(enumerate(char_confidences[:10]), key=lambda x: x[1])
-            for pos, conf in indexed_conf[:3]:  # Test the 3 lowest-confidence positions
-                orig_char = consensus_str[pos]
-                alternatives = position_votes[pos].most_common()
-                alt_chars = [c for c, _ in alternatives if c != orig_char]
-                alt_chars += CHARACTER_CONFUSIONS.get(orig_char, [])
-
-                for alt in alt_chars:
-                    if pos < 3 and not alt.isalpha():
-                        alt = DIGIT_TO_LETTER.get(alt, '')
-                        if not alt.isalpha():
-                            continue
-                    elif pos == 3 and alt not in ('U', 'J', 'Z'):
-                        continue
-                    elif pos >= 4 and not alt.isdigit():
-                        alt = LETTER_TO_DIGIT.get(alt, '')
-                        if not alt.isdigit():
-                            continue
-
-                    test_prefix = consensus_str[:pos] + alt + consensus_str[pos + 1:10]
-                    if check_digit(test_prefix) == read_cd:
-                        fixed_str = test_prefix + str(read_cd)
-                        log.info('consensus_check_digit_recovered_via_substitution', extra={
-                            'original': consensus_str, 'fixed': fixed_str, 'position': pos
-                        })
-                        return Validation(
-                            raw_text=fixed_str,
-                            normalized_text=fixed_str,
-                            confidence=round(min(0.98, max(avg_conf, 0.88)), 3),
-                            valid_format=True,
-                            valid_check_digit=True,
-                            validation_status='VALID_CONSENSUS_RECOVERED',
-                            size_type=best_size
-                        )
-
-            # Check if check digit itself was misread
-            if (read_cd, calc_cd) in CHECK_DIGIT_CONFUSIONS or char_confidences[10] < 0.70:
-                fixed_str = prefix + str(calc_cd)
-                return Validation(
-                    raw_text=fixed_str,
-                    normalized_text=fixed_str,
-                    confidence=round(min(0.97, max(avg_conf, 0.87)), 3),
-                    valid_format=True,
-                    valid_check_digit=True,
-                    validation_status='VALID_CHECK_DIGIT_REPLACED',
-                    size_type=best_size
-                )
+            # If check digit does not match, DO NOT GUESS OR REPLACE CHARACTERS
+            return Validation(
+                raw_text=consensus_str,
+                normalized_text=consensus_str,
+                confidence=round(avg_conf, 3),
+                valid_format=True,
+                valid_check_digit=False,
+                validation_status='INVALID_CHECK_DIGIT',
+                size_type=best_size
+            )
 
         # 6. Fallback if check digit cannot be reconciled
         highest_conf_read = max(reads, key=lambda r: (getattr(r, 'confidence', 0.0) or 0.0))
