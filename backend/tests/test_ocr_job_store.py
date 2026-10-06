@@ -40,6 +40,7 @@ def test_capacity_failure_never_marks_job_saved(tmp_path, make_job):
 
 
 def test_votes_and_validation_recover_and_complete_idempotently(settings, repository, snapshots, camera, make_job):
+    settings = settings.model_copy(update={'ocr_confirmations': 2})
     first = make_job(sequence=1)
     second = make_job(sequence=2)
     crop = np.zeros((30, 40, 3), dtype=np.uint8)

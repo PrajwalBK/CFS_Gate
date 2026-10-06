@@ -14,7 +14,7 @@ class VideoLibrary:
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.manifest = self.root / 'assignments.json'
-        self.assignments = json.loads(self.manifest.read_text(encoding='utf-8')) if self.manifest.exists() else {}
+        self.assignments = json.loads(self.manifest.read_text(encoding='utf-8-sig')) if self.manifest.exists() else {}
 
     def info(self, camera_id):
         with self.lock:

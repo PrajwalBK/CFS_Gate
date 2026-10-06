@@ -48,6 +48,20 @@ def _iso_utc(dt: Any = None) -> str:
     return d.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
 
+def _within_capture_window(left: Any, right: Any, seconds: float = 3.0) -> bool:
+    """Compare camera timestamps safely when joining companion proof frames."""
+    try:
+        l = datetime.fromisoformat(str(left).replace('Z', '+00:00'))
+        r = datetime.fromisoformat(str(right).replace('Z', '+00:00'))
+        if l.tzinfo is None:
+            l = l.replace(tzinfo=timezone.utc)
+        if r.tzinfo is None:
+            r = r.replace(tzinfo=timezone.utc)
+        return abs((l - r).total_seconds()) <= seconds
+    except Exception:
+        return False
+
+
 class ProsperSession:
     """Manages authentication tokens and HTTP requests to Prosper Smart Yard."""
 
@@ -361,7 +375,8 @@ class CloudOutboxDispatcher:
             self._worker_thread.join(timeout=timeout)
         log.info('prosper_cloud_dispatcher_stopped')
 
-    def enqueue(self, obs: Any, event_id: str, image_bytes: Optional[bytes] = None, payload: Optional[dict] = None):
+    def enqueue(self, obs: Any, event_id: str, image_bytes: Optional[bytes] = None,
+                payload: Optional[dict] = None, delay_seconds: float = 0.0):
         """Enqueue confirmed gate event for background dispatch."""
         if not self.enabled:
             return
@@ -394,6 +409,7 @@ class CloudOutboxDispatcher:
             'image_bytes': image_bytes if image_bytes is not None else getattr(obs, 'image', None),
             'payload': payload,
             'enqueued_at': time.monotonic(),
+            'not_before': time.monotonic() + max(0.0, float(delay_seconds or 0.0)),
             'retries': 0,
         }
 
@@ -405,6 +421,22 @@ class CloudOutboxDispatcher:
             log.warning('prosper_cloud_queue_full_event_dropped', extra={'event_id': event_id})
             if self.metrics:
                 self.metrics.increment('prosper_queue_dropped')
+
+    def _proof_is_usable(self, image, quality: float) -> bool:
+        """Reject blank, tiny, badly exposed or blurred frames before cloud POST."""
+        if image is None or getattr(image, 'size', 0) == 0:
+            return False
+        try:
+            h, w = image.shape[:2]
+            if h < 240 or w < 320:
+                return False
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            if float(gray.std()) < 8.0:
+                return False
+            minimum = float(getattr(self.settings, 'cloud_min_proof_quality', 2.5))
+            return float(quality) >= minimum
+        except Exception:
+            return False
 
     def _sweep_offline_backlog(self):
         """
@@ -457,6 +489,16 @@ class CloudOutboxDispatcher:
             img = item['image_bytes']
             pre_payload = item.get('payload')
 
+            # A cloud gate event is effectively immutable after acknowledgement.
+            # Allow late OCR from the other calibrated camera to update the
+            # local event/snapshots before constructing the payload.
+            not_before = float(item.get('not_before') or 0.0)
+            remaining = not_before - time.monotonic()
+            if remaining > 0:
+                if self._stop.wait(remaining):
+                    self.queue.task_done()
+                    break
+
             success = False
             try:
                 # Offline backlog is populated directly from SQLite, so apply
@@ -481,6 +523,18 @@ class CloudOutboxDispatcher:
                 else:
                     # Query repository for full event record and associated multi-camera snapshots
                     event_record = self.repository.event(event_id) if self.repository else None
+                    if event_record and self.snapshots:
+                        # Use the same canonical capture set exposed by the UI;
+                        # never re-rank a different set for the cloud payload.
+                        manifest = self.snapshots.build_evidence_manifest(
+                            event_record,
+                            min_quality=getattr(self.settings, 'cloud_min_proof_quality', 2.5),
+                        )
+                        if isinstance(manifest, dict):
+                            event_record['evidence_manifest'] = manifest
+                            event_record['snapshots'] = manifest['captures']
+                            event_record['primary_snapshot_id'] = manifest['primary_snapshot_id']
+                            event_record['rear_snapshot_id'] = manifest['rear_snapshot_id']
                     cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
 
                     containers_list = []
@@ -515,7 +569,7 @@ class CloudOutboxDispatcher:
                                         if decoded.shape[0] < 240 or decoded.shape[1] < 320:
                                             continue
                                         quality = self.snapshots.compute_quality(decoded)
-                                        if quality < 2.0:
+                                        if not self._proof_is_usable(decoded, quality):
                                             continue
                                         score = quality
                                         if primary_snap_id and snap.get('id') == primary_snap_id:

@@ -13,7 +13,7 @@ from app.snapshots.snapshot_manager import SnapshotManager
 def settings(tmp_path):
     return Settings(_env_file=None, deployment_mode='test', database_url='sqlite+pysqlite:///' + str(tmp_path / 'test.db'),
                     snapshot_directory=tmp_path / 'snapshots', pipeline_enabled=False,
-                    upload_directory=tmp_path / 'uploads',
+                    upload_directory=tmp_path / 'uploads', ocr_confirmations=2,
                     ocr_interval_seconds=.001, reconnect_initial_seconds=.01, reconnect_max_seconds=.02)
 
 
