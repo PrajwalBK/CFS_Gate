@@ -1,5 +1,8 @@
 from pathlib import Path
+import datetime
+import math
 import os
+import cv2
 
 
 class SnapshotManager:
@@ -36,7 +39,6 @@ class SnapshotManager:
         contain only a tiny sliver of the truck/container.  Match detections by
         camera and capture time and reject boxes that are too small or clipped.
         """
-        import datetime as _dt
         try:
             h, w = image.shape[:2]
             if h <= 0 or w <= 0:
@@ -47,7 +49,7 @@ class SnapshotManager:
                     return None
                 text = str(value).replace('Z', '+00:00')
                 try:
-                    return _dt.datetime.fromisoformat(text)
+                    return datetime.datetime.fromisoformat(text)
                 except ValueError:
                     return None
             snap_dt = parse(snap_ts)

@@ -45,7 +45,7 @@ function Get-AvailablePort([string]$hostAddr, [int]$startPort) {
     $p = $startPort
     while ($p -le 65535) {
         $inUse = $false
-        $active = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
+        $active = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
         if ($active) {
             $inUse = $true
         } else {
@@ -74,7 +74,7 @@ foreach ($c in $conns) {
         if ($proc -and $proc.CommandLine -and ($proc.CommandLine -like "*$backendRoot*" -or $proc.ExecutablePath -like "*$backendRoot*")) {
             Write-Host ("Reclaiming port {0} from previous background run of this project (PID {1})..." -f $c.LocalPort, $c.OwningProcess) -ForegroundColor DarkGray
             Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 300
+            Start-Sleep -Milliseconds 500
         }
     } catch {}
 }
@@ -106,5 +106,10 @@ if (-not $NoBrowser) {
 }
 
 Set-Location $backendRoot
-& $backendPython -m uvicorn app.main:app --host $HostAddress --port $Port --workers 1 --no-access-log
+try {
+    & $backendPython -m uvicorn app.main:app --host $HostAddress --port $Port --workers 1 --no-access-log
+} catch {}
+if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1 -or $LASTEXITCODE -eq 0x40010004) {
+    exit 0
+}
 exit $LASTEXITCODE
