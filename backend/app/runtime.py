@@ -670,6 +670,13 @@ class GateRuntime:
                     continue
                 if track.detection.class_name not in self.settings.ocr_classes:
                     continue
+                # Physical minimum dimensions to eliminate noise/glare/chassis specks:
+                t_bw = max(0.0, track.detection.bbox[2] - track.detection.bbox[0])
+                t_bh = max(0.0, track.detection.bbox[3] - track.detection.bbox[1])
+                if track.detection.class_name == 'container_number' and (t_bw < 60.0 or t_bh < 18.0):
+                    continue
+                if track.detection.class_name == 'iso_code' and (t_bw < 24.0 or t_bh < 14.0):
+                    continue
                 if camera.line_axis and direction == 'UNKNOWN':
                     continue
 
@@ -909,7 +916,19 @@ class GateRuntime:
                 elif cls_name == 'iso_code':
                     feet_candidates.append(d)
 
-            cointainer_candidates.sort(key=lambda d: d.confidence, reverse=True)
+            # Enforce minimum physical dimensions (at least 55px wide, 16px high)
+            cointainer_candidates = [
+                d for d in cointainer_candidates
+                if (d.bbox[2] - d.bbox[0]) >= 55.0 and (d.bbox[3] - d.bbox[1]) >= 16.0
+            ]
+            cointainer_candidates.sort(
+                key=lambda d: (d.confidence or 0.8) * np.sqrt(max(1.0, d.bbox[2]-d.bbox[0]) * max(1.0, d.bbox[3]-d.bbox[1])),
+                reverse=True
+            )
+            feet_candidates = [
+                d for d in feet_candidates
+                if (d.bbox[2] - d.bbox[0]) >= 24.0 and (d.bbox[3] - d.bbox[1]) >= 14.0
+            ]
             feet_candidates.sort(key=lambda d: d.confidence, reverse=True)
             targeted_text_seen = bool(cointainer_candidates or feet_candidates)
 

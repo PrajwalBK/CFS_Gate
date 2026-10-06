@@ -73,7 +73,9 @@ class SnapshotManager:
                 # OCR text regions can be narrow on the fixed gate views.  Keep
                 # a modest floor for readable text while still rejecting the
                 # tiny 13-pixel slivers that previously became proof images.
-                if bw < 35.0 or bh < 10.0 or area_ratio < 0.0005:
+                if detection.get('class_name') == 'container_number' and (bw < 55.0 or bh < 16.0 or area_ratio < 0.0008):
+                    continue
+                if detection.get('class_name') == 'iso_code' and (bw < 24.0 or bh < 12.0 or area_ratio < 0.0003):
                     continue
                 # A clipped text box is not reliable proof, even if sharp.
                 if x1 <= 1.0 or y1 <= 1.0 or x2 >= w - 1.0 or y2 >= h - 1.0:

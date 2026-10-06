@@ -54,21 +54,30 @@ class FastFrameSelector:
         img_h, img_w = frame_image.shape[:2]
         
         # 1. Check for targeted text detections first ('container_number' or 'iso_code')
-        text_boxes = [
-            d for d in all_detections
-            if d.class_name in ('container_number', 'iso_code')
-        ]
+        valid_text_boxes = []
+        for d in all_detections:
+            if d.class_name not in ('container_number', 'iso_code'):
+                continue
+            bw = max(1.0, float(d.bbox[2] - d.bbox[0]))
+            bh = max(1.0, float(d.bbox[3] - d.bbox[1]))
+            # Enforce physical minimum dimensions:
+            # 11-digit container number must be >= 60px wide and >= 18px high
+            if d.class_name == 'container_number' and (bw < 60.0 or bh < 18.0):
+                continue
+            # 4-digit ISO size code must be >= 24px wide and >= 14px high
+            if d.class_name == 'iso_code' and (bw < 24.0 or bh < 14.0):
+                continue
+            valid_text_boxes.append((d, bw, bh))
 
-        if text_boxes:
-            # Sort by confidence
-            best_det = max(text_boxes, key=lambda d: d.confidence)
+        if valid_text_boxes:
+            # Rank candidates: prioritize container_number over iso_code, weighted by confidence and area
+            best_det, bw, bh = max(
+                valid_text_boxes,
+                key=lambda item: (
+                    2.0 if item[0].class_name == 'container_number' else 1.0
+                ) * (item[0].confidence or 0.8) * np.sqrt(item[1] * item[2])
+            )
             bx1, by1, bx2, by2 = [int(v) for v in best_det.bbox]
-            bw = max(1, bx2 - bx1)
-            bh = max(1, by2 - by1)
-
-            # Minimum size check: must be at least 30px wide and 10px high
-            if bw < 30 or bh < 10:
-                return False, 0.0, detection_box
 
             # Extract small crop for blur test
             cx1 = max(0, bx1)

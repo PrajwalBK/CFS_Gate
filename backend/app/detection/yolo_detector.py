@@ -59,7 +59,7 @@ class YoloDetector:
                 elif name == 'feet':
                     name = 'iso_code'
                 allowed = set(self.settings.target_classes) | {
-                    'container', 'container_number', 'iso_code', 'truck', 'trailer', 'vehicle'
+                    'container', 'container_number', 'iso_code'
                 }
                 if name not in allowed:
                     continue
