@@ -8,6 +8,8 @@ from pathlib import Path
 import threading
 import time
 import json
+import math
+import numpy as np
 from uuid import uuid4
 
 from app.camera.camera_manager import CameraManager
@@ -922,7 +924,7 @@ class GateRuntime:
                 if (d.bbox[2] - d.bbox[0]) >= 55.0 and (d.bbox[3] - d.bbox[1]) >= 16.0
             ]
             cointainer_candidates.sort(
-                key=lambda d: (d.confidence or 0.8) * np.sqrt(max(1.0, d.bbox[2]-d.bbox[0]) * max(1.0, d.bbox[3]-d.bbox[1])),
+                key=lambda d: (d.confidence or 0.8) * math.sqrt(max(1.0, d.bbox[2]-d.bbox[0]) * max(1.0, d.bbox[3]-d.bbox[1])),
                 reverse=True
             )
             feet_candidates = [
