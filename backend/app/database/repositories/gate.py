@@ -1,7 +1,6 @@
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
-import re
 from threading import Lock
 from uuid import uuid4
 from sqlalchemy import func, select, update
@@ -152,21 +151,7 @@ class GateRepository:
                 prior = session.scalar(select(DetectionRecord).where(DetectionRecord.origin_key == obs.origin_key))
                 if prior:
                     return prior.event_id, False
-                from app.ocr.validator import is_valid_iso_6346, is_uuid
-                raw_num = obs.ocr.normalized_text if (obs.confirmed or getattr(obs.ocr, 'valid_check_digit', False)) else None
-                def is_acceptable_container(text: str, ocr_obj=None) -> bool:
-                    if not text or is_uuid(text):
-                        return False
-                    clean = re.sub(r'[^A-Z0-9]', '', str(text).upper())
-                    if len(clean) != 11:
-                        return False
-                    if not (clean[:3].isalpha() and clean[4:].isdigit()):
-                        return False
-                    if ocr_obj and getattr(ocr_obj, 'valid_check_digit', False):
-                        return True
-                    return is_valid_iso_6346(clean)
-
-                number = raw_num if (raw_num and is_acceptable_container(raw_num, getattr(obs, 'ocr', None))) else None
+                number = obs.ocr.normalized_text if (obs.confirmed or getattr(obs.ocr, 'valid_check_digit', False)) else None
                 delta = timedelta(seconds=dedup_seconds)
                 existing = None
 
@@ -401,11 +386,12 @@ class GateRepository:
                 snapshot_id = str(uuid4())
                 image_path = snapshots.save(snapshot_id, obs, event_id)
                 existing_path_snap = session.scalar(select(Snapshot).where(
-                    Snapshot.event_id == event_id,
                     Snapshot.image_path == image_path
                 ))
                 if existing_path_snap:
                     existing_path_snap.timestamp = obs.detection.frame_timestamp
+                    if existing_path_snap.event_id != event_id:
+                        existing_path_snap.event_id = event_id
                 else:
                     created_paths.append(image_path)
                     session.add(Snapshot(id=snapshot_id, event_id=event_id, camera_id=obs.detection.camera_id,
@@ -441,14 +427,22 @@ class GateRepository:
                                 direction=obs.direction,
                                 text=obs.ocr.normalized_text if obs.confirmed else ''
                             )
-                            if not already_saved:
+                            existing_other_snap = session.scalar(select(Snapshot).where(
+                                Snapshot.image_path == other_path
+                            ))
+                            if existing_other_snap:
+                                existing_other_snap.timestamp = obs.detection.frame_timestamp
+                                if existing_other_snap.event_id != event_id:
+                                    existing_other_snap.event_id = event_id
+                            elif already_saved:
+                                already_saved.image_path = other_path
+                                already_saved.timestamp = obs.detection.frame_timestamp
+                            else:
                                 created_paths.append(other_path)
                                 session.add(Snapshot(
                                     id=other_snap_id, event_id=event_id, camera_id=other_cam_id,
                                     image_path=other_path, timestamp=obs.detection.frame_timestamp
                                 ))
-                            else:
-                                already_saved.timestamp = obs.detection.frame_timestamp
 
                 session.add(SystemLog(id=str(uuid4()), event_id=event_id, level='INFO',
                                       event_name='gate_event_created' if created else 'gate_evidence_associated',

@@ -27,10 +27,10 @@ class FastFrameSelector:
                 gray = cv2.cvtColor(crop_image, cv2.COLOR_BGR2GRAY)
             else:
                 gray = crop_image
-            # Fast downsample if crop is larger than 320x160 to guarantee < 1ms execution
-            if gray.shape[0] > 160 or gray.shape[1] > 320:
-                gray = cv2.resize(gray, (min(gray.shape[1], 320), min(gray.shape[0], 160)), interpolation=cv2.INTER_NEAREST)
-            return float(cv2.Laplacian(gray, cv2.CV_32F).var())
+            # Fast downsample if crop is unnecessarily large
+            if gray.shape[0] > 400 or gray.shape[1] > 800:
+                gray = cv2.resize(gray, (min(gray.shape[1], 400), min(gray.shape[0], 200)))
+            return float(cv2.Laplacian(gray, cv2.CV_64F).var())
         except Exception:
             return 0.0
 
@@ -48,7 +48,7 @@ class FastFrameSelector:
             return False, 0.0, detection_box
 
         # Support synthetic test streams (e.g. FakeStream returning np.zeros)
-        if float(frame_image[::64, ::64].std()) < 0.01:
+        if float(frame_image.std()) < 0.01:
             return True, 50.0, detection_box
 
         img_h, img_w = frame_image.shape[:2]

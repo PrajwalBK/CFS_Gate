@@ -43,42 +43,46 @@ class EventManager:
             evidence.last_sequence = job.frame.sequence
         evidence.reads = evidence.reads[-self.settings.ocr_max_attempts:]
 
-        from app.ocr.validator import is_valid_iso_6346
-
-        good = [
-            r for r in evidence.reads
-            if r and r.valid_check_digit and is_valid_iso_6346(r.normalized_text)
-            and getattr(r, 'confidence', 1.0) >= self.settings.ocr_min_confidence
-        ]
+        good = [r for r in evidence.reads if r and r.valid_check_digit and getattr(r, 'confidence', 1.0) >= self.settings.ocr_min_confidence]
         votes = Counter(r.normalized_text for r in good)
         best, count = votes.most_common(1)[0] if votes else (None, 0)
         tied = sum(v == count for v in votes.values()) > 1
-        confirmed = count >= self.settings.ocr_confirmations and not tied and is_valid_iso_6346(best)
+        confirmed = count >= self.settings.ocr_confirmations and not tied
 
         # Early confirmation: If at least 2 distinct observations agree on a valid check-digit code, confirm immediately
-        if not confirmed and count >= 2 and not tied and is_valid_iso_6346(best):
+        if not confirmed and count >= 2 and not tied:
             confirmed = True
 
         t_cons0 = time.perf_counter()
         consensus_val = None
-        if not confirmed and len(evidence.reads) >= 2:
+        if not confirmed and len(evidence.reads) >= self.settings.ocr_confirmations:
             from app.ocr.consensus import CharacterConsensus
             consensus_val = CharacterConsensus.resolve(evidence.reads, self.settings.ocr_min_confidence)
-            if (consensus_val and consensus_val.valid_check_digit and
-                is_valid_iso_6346(consensus_val.normalized_text) and
-                (consensus_val.validation_status == 'VALID_CONSENSUS' or count >= 2)):
+            if consensus_val and consensus_val.valid_check_digit:
                 confirmed = True
                 best = consensus_val.normalized_text
         if profiler_record:
             profiler_record.consensus_ms = (time.perf_counter() - t_cons0) * 1000.0
 
-        # NEVER confirm on count == 1 alone without multi-frame or consensus verification.
-        # If max attempts reached without confirmation, event stays unconfirmed (NEEDS_REVIEW).
+        # A dwell track can end before the configured vote count is reached
+        # (camera handoff, truck leaving the ROI, or a short queue passage).
+        # If at least two samples were processed and one high-confidence,
+        # check-digit-valid read exists, preserve it as the event identity
+        # rather than silently dropping the completed track.
+        dwell_end_fallback = (
+            job.origin_key.startswith('dwell:') and
+            getattr(job, 'entrance_complete', False) and
+            len(evidence.reads) >= 2 and (count >= 1 or (consensus_val and consensus_val.valid_check_digit)) and not tied
+        )
+        if dwell_end_fallback:
+            confirmed = True
+        if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and (count >= 1 or (consensus_val and consensus_val.valid_check_digit)) and not tied:
+            confirmed = True
         if not confirmed:
             # Let the truck complete its entrance before publishing an unconfirmed / NEEDS_REVIEW event!
             is_entrance_done = getattr(job, 'entrance_complete', True) or getattr(job, 'is_stationary', True)
             if len(evidence.reads) < self.settings.ocr_max_attempts:
-                # If we have a candidate read or passage is in progress, wait for more frames
+                # If we have a valid check-digit candidate, wait for confirmation votes
                 if count >= 1 or not is_entrance_done:
                     return None
             # If all attempts yielded no readable text, flag for review with an alert rather than silently dropping
@@ -91,22 +95,12 @@ class EventManager:
                 log.warning('passage_unreadable_flagged_for_review', extra={
                     'origin': job.origin_key, 'gate_id': job.gate_id, 'track_id': job.track_id
                 })
-
         if confirmed and good and any(r.normalized_text == best for r in good):
             selected = max((r for r in good if r.normalized_text == best), key=lambda r: r.confidence)
-        elif confirmed and consensus_val and consensus_val.valid_check_digit and is_valid_iso_6346(consensus_val.normalized_text):
+        elif confirmed and consensus_val and consensus_val.valid_check_digit:
             selected = consensus_val
         else:
-            # Unconfirmed: Never let an unconfirmed/noisy string or UUID become a container number
-            from app.domain import Validation
-            selected = Validation(
-                raw_text=getattr(validation, 'raw_text', '') or '',
-                normalized_text='',
-                confidence=0.0,
-                valid_format=False,
-                valid_check_digit=False,
-                validation_status='UNCONFIRMED'
-            )
+            selected = consensus_val or validation
         proof = proof_job or job
         obs = Observation(job.origin_key, job.gate_id, job.track_id, proof.detection, selected,
                           job.direction, proof.frame.image, job.started_at, confirmed,
@@ -136,12 +130,7 @@ class EventManager:
         evidence.confirmed = confirmed
 
         # Only dispatch to cloud and buzz for new events or newly confirmed events that haven't been dispatched yet
-        # AND strictly ensure the container number is a valid ISO 6346 code!
-        should_dispatch = (
-            obs.confirmed and
-            is_valid_iso_6346(obs.ocr.normalized_text if obs.ocr else None) and
-            (event_id not in self._dispatched_events)
-        )
+        should_dispatch = obs.confirmed and (event_id not in self._dispatched_events)
         if self.dispatcher and should_dispatch:
             t_api0 = time.perf_counter()
             self._dispatched_events.add(event_id)
