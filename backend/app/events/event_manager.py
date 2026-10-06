@@ -64,7 +64,9 @@ class EventManager:
         if not confirmed and len(evidence.reads) >= 2:
             from app.ocr.consensus import CharacterConsensus
             consensus_val = CharacterConsensus.resolve(evidence.reads, self.settings.ocr_min_confidence)
-            if consensus_val and consensus_val.valid_check_digit and is_valid_iso_6346(consensus_val.normalized_text):
+            if (consensus_val and consensus_val.valid_check_digit and
+                is_valid_iso_6346(consensus_val.normalized_text) and
+                (consensus_val.validation_status == 'VALID_CONSENSUS' or count >= 2)):
                 confirmed = True
                 best = consensus_val.normalized_text
         if profiler_record:

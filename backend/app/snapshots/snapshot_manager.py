@@ -52,11 +52,14 @@ class SnapshotManager:
                     return None
             snap_dt = parse(snap_ts)
             camera = snapshot.get('camera_id')
+            camera_detections = [d for d in (event_record.get('detections') or []) if d.get('camera_id') == camera]
+            if not camera_detections:
+                # Companion camera without its own separate detection record (e.g. synced side/rear camera)
+                return True
+
             candidates = []
-            for detection in event_record.get('detections') or []:
-                if detection.get('camera_id') != camera:
-                    continue
-                if detection.get('class_name') not in ('container_number', 'iso_code'):
+            for detection in camera_detections:
+                if detection.get('class_name') not in ('container_number', 'iso_code', 'container'):
                     continue
                 det_dt = parse(detection.get('timestamp'))
                 if snap_dt and det_dt:
