@@ -219,18 +219,20 @@ class OCRJobStore:
         self._prune_completed(payload_bytes, protected_origins=(job.origin_key,))
         if payload_bytes > self.max_bytes or shutil.disk_usage(self.root).free < payload_bytes + 64 * 1024 * 1024:
             raise OSError('OCR spool lacks free disk space')
+        # Write images before opening the DB transaction to avoid holding a
+        # write lock while doing file I/O.  The folder already exists because
+        # _write_image calls mkdir(parents=True, exist_ok=True) internally.
+        if self.shared_evidence:
+            paths = f'{folder}/{prefix}_crop.png', f'{folder}/{prefix}_frame.png'
+            self._write_image(paths[0], crop_data)
+            self._write_image(paths[1], image_data)
+        else:
+            paths = self._save_images(job.origin_key, job.frame.sequence, crop_data, image_data, folder=folder)
         with self.connection() as db:
-            db.execute('BEGIN IMMEDIATE')
             existing = db.execute('SELECT id FROM jobs WHERE origin=? AND sequence=?',
                                   (job.origin_key, job.frame.sequence)).fetchone()
             if existing:
                 return existing['id']
-            if self.shared_evidence:
-                paths = f'{folder}/{prefix}_crop.png', f'{folder}/{prefix}_frame.png'
-                self._write_image(paths[0], crop_data)
-                self._write_image(paths[1], image_data)
-            else:
-                paths = self._save_images(job.origin_key, job.frame.sequence, crop_data, image_data, folder=folder)
             return db.execute('INSERT INTO jobs(origin,sequence,metadata,crop,image,payload_bytes) VALUES(?,?,?,?,?,?)',
                               (job.origin_key, job.frame.sequence, encoded, *paths, payload_bytes)).lastrowid
 
@@ -374,7 +376,10 @@ class OCRJobStore:
                 def rehome(relative, label):
                     if not relative:
                         return relative
-                    source = self.image_path(relative)
+                    try:
+                        source = self.image_path(relative)
+                    except ValueError:
+                        return relative
                     if not source.is_file():
                         return relative
                     # Preserve camera/sequence names while avoiding collisions
@@ -384,7 +389,15 @@ class OCRJobStore:
                         target = target_dir / f'{job_id}_{source.name}'
                     if source.resolve() != target.resolve():
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(source, target)
+                        try:
+                            os.replace(source, target)
+                        except PermissionError:
+                            import shutil as _shutil
+                            _shutil.copy2(str(source), str(target))
+                        except OSError:
+                            # Cross-device move (e.g. different drives on Windows)
+                            import shutil as _shutil
+                            _shutil.move(str(source), str(target))
                     return str(target.relative_to(self.image_root)).replace('\\', '/')
 
                 crop_path = rehome(row['crop'], 'crop')
@@ -399,7 +412,12 @@ class OCRJobStore:
                            (crop_path, image_path, json.dumps(metadata), event_id, time.time(), job_id))
                 # Remove only an empty provisional visit directory; never delete
                 # files belonging to another job.
-                old_dirs = {self.image_path(row['crop']).parent, self.image_path(row['image']).parent}
+                try:
+                    old_crop_dir = self.image_path(row['crop']).parent
+                    old_img_dir = self.image_path(row['image']).parent
+                    old_dirs = {old_crop_dir, old_img_dir}
+                except (ValueError, FileNotFoundError):
+                    old_dirs = set()
                 for old_dir in old_dirs:
                     if old_dir != target_dir:
                         try:

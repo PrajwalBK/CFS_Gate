@@ -94,6 +94,12 @@ def clear_all():
         for item in logs_dir.glob("*.log"):
             try:
                 item.unlink()
+            except PermissionError:
+                try:
+                    with open(item, "r+", encoding="utf-8", errors="ignore") as f:
+                        f.truncate(0)
+                except Exception as e:
+                    print(f"Error truncating log {item}: {e}")
             except Exception as e:
                 print(f"Error removing log {item}: {e}")
         print("Cleared backend/logs directory")

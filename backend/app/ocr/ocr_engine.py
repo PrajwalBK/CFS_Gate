@@ -61,6 +61,7 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
         # sources. Loading its PyTorch helpers would reintroduce the DLL clash.
         sys.modules['modelscope'] = types.ModuleType('modelscope')
         os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'
+        os.environ['PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT'] = 'False'
         from paddleocr import PaddleOCR
         device = 'gpu:0' if use_gpu and paddle.is_compiled_with_cuda() else 'cpu'
         paddle.set_device(device)
@@ -75,32 +76,35 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
     except BaseException as exc:
         responses.put(('ready', False, f'{type(exc).__name__}: {exc}'))
         return
-    while True:
-        request = requests.get()
-        if request is None:
-            return
-        request_id, image = request
-        try:
-            output = list(engine.predict(image))
-            payload = output[0].json if output else {}
-            text, confidence = _paddle_text(payload)
-            # Handle vertical text crops (e.g. ECMU 5580439 on vertical corner post)
-            if hasattr(image, 'shape') and len(image.shape) >= 2:
-                h, w = image.shape[:2]
-                if h > 1.25 * w or (not text.strip() and h > w):
-                    try:
-                        import cv2
-                        rot_img = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                        rot_out = list(engine.predict(rot_img))
-                        rot_payload = rot_out[0].json if rot_out else {}
-                        rot_text, rot_conf = _paddle_text(rot_payload)
-                        if (not text.strip() and rot_text.strip()) or rot_conf > confidence:
-                            text, confidence = rot_text, rot_conf
-                    except Exception:
-                        pass
-            responses.put(('result', request_id, text, confidence, None))
-        except BaseException as exc:
-            responses.put(('result', request_id, '', 0.0, f'{type(exc).__name__}: {exc}'))
+    try:
+        while True:
+            request = requests.get()
+            if request is None:
+                return
+            request_id, image = request
+            try:
+                output = list(engine.predict(image))
+                payload = output[0].json if output else {}
+                text, confidence = _paddle_text(payload)
+                # Handle vertical text crops (e.g. ECMU 5580439 on vertical corner post)
+                if hasattr(image, 'shape') and len(image.shape) >= 2:
+                    h, w = image.shape[:2]
+                    if h > 1.25 * w or (not text.strip() and h > w):
+                        try:
+                            import cv2
+                            rot_img = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                            rot_out = list(engine.predict(rot_img))
+                            rot_payload = rot_out[0].json if rot_out else {}
+                            rot_text, rot_conf = _paddle_text(rot_payload)
+                            if (not text.strip() and rot_text.strip()) or rot_conf > confidence:
+                                text, confidence = rot_text, rot_conf
+                        except Exception:
+                            pass
+                responses.put(('result', request_id, text, confidence, None))
+            except BaseException as exc:
+                responses.put(('result', request_id, '', 0.0, f'{type(exc).__name__}: {exc}'))
+    except (KeyboardInterrupt, SystemExit):
+        return
 
 
 class PaddleOCREngine:
@@ -199,14 +203,24 @@ class FallbackOCREngine:
         if self._usable(primary):
             return primary
         secondary = self._secondary()
-        return secondary.read(image) if secondary else primary
+        if not secondary:
+            return primary
+        log.info('paddle_ocr_miss_fallback_to_olmocr', extra={'primary_sample': primary.raw_text[:50]})
+        fallback = secondary.read(image)
+        if self._usable(fallback) or not primary.raw_text.strip():
+            return fallback
+        return fallback if fallback.confidence > primary.confidence else primary
 
     def read_iso(self, image) -> OCRRead:
         primary = self.primary.read_iso(image)
-        if primary.raw_text:
+        if primary.raw_text and primary.raw_text.strip():
             return primary
         secondary = self._secondary()
-        return secondary.read_iso(image) if secondary else primary
+        if not secondary:
+            return primary
+        log.info('paddle_ocr_no_iso_fallback_to_olmocr')
+        fallback = secondary.read_iso(image)
+        return fallback if fallback.raw_text and fallback.raw_text.strip() else primary
 
     def close(self):
         for engine in (self.primary, self._fallback):
@@ -483,13 +497,20 @@ class OlmOCREngine:
 def create_ocr_engine(settings) -> OCREngine:
     engine_type = getattr(settings, 'ocr_engine', 'easyocr').lower()
     if engine_type in ('paddleocr', 'paddle', 'ppocr'):
-        primary = PaddleOCREngine(settings)
-        fallback_engine = getattr(settings, 'ocr_fallback_engine', 'none').lower()
-        if fallback_engine in ('olmocr', 'qwen2_vl', 'qwen2vl', 'qwen'):
-            return FallbackOCREngine(primary, lambda: OlmOCREngine(settings))
-        if fallback_engine == 'easyocr':
-            return FallbackOCREngine(primary, lambda: EasyOCREngine(settings))
-        return primary
+        fallback_engine = getattr(settings, 'ocr_fallback_engine', 'olmocr').lower()
+        try:
+            primary = PaddleOCREngine(settings)
+            if fallback_engine in ('olmocr', 'qwen2_vl', 'qwen2vl', 'qwen'):
+                return FallbackOCREngine(primary, lambda: OlmOCREngine(settings))
+            if fallback_engine == 'easyocr':
+                return FallbackOCREngine(primary, lambda: EasyOCREngine(settings))
+            return primary
+        except Exception as exc:
+            # paddle package not installed or GPU context unavailable — fall back
+            # to OlmOCR so the app keeps running without manual .env edits.
+            log.warning('paddle_ocr_unavailable_using_olmocr',
+                        extra={'reason': str(exc)}, exc_info=False)
+            return OlmOCREngine(settings)
     if engine_type in ('olmocr', 'qwen2_vl', 'qwen2vl', 'qwen'):
         return OlmOCREngine(settings)
     return EasyOCREngine(settings)

@@ -19,17 +19,20 @@ CANDIDATE = re.compile(r'(?<![A-Z0-9])([A-Z][\s-]*[A-Z][\s-]*[A-Z][\s-]*[UJZ](?:
 # ISO 6346 defines NO type code 'C'. We correct 'C' to 'G' for all ISO container size-type patterns.
 SIZE_CODE_PATTERN = re.compile(r'(?<![A-Z0-9])([1-4LMN])\s*([0-9])\s*([GVRHBUTP])\s*([0-9A-Z])(?![A-Z0-9])', re.IGNORECASE)
 SIZE_CODE_C_MISTAKE = re.compile(r'(?<![A-Z0-9])([1-4LMN])\s*([0-9])\s*C\s*([0-9A-Z]?)(?![A-Z0-9])', re.IGNORECASE)
+SIZE_CODE_6_MISTAKE = re.compile(r'(?<![A-Z0-9])([1-4LMN])\s*([0-9])\s*6\s*([0-9A-Z]?)(?![A-Z0-9])', re.IGNORECASE)
 
 
 def correct_feet_size_codes(text: str) -> str:
     """
-    Correct OCR misreads where 'G' in container size markings is read as 'C'.
-    E.g. 45C1 -> 45G1, 22C1 -> 22G1, 42C1 -> 42G1, L5C1 -> L5G1, 45C -> 45G1
+    Correct OCR misreads where 'G' in container size markings is read as 'C' or '6'.
+    E.g. 45C1 -> 45G1, 22C1 -> 22G1, 4561 -> 45G1, 2261 -> 22G1, L5C1 -> L5G1
     """
     if not text:
         return ''
     # 1. Correct [Size][C][Char] -> [Size][G][Char]
     corrected = SIZE_CODE_C_MISTAKE.sub(lambda m: f"{m.group(1).upper()}{m.group(2).upper()}G{m.group(3).upper() or '1'}", text)
+    # 2. Correct [Size][6][Char] -> [Size][G][Char]
+    corrected = SIZE_CODE_6_MISTAKE.sub(lambda m: f"{m.group(1).upper()}{m.group(2).upper()}G{m.group(3).upper() or '1'}", corrected)
     return corrected
 
 
@@ -183,6 +186,24 @@ class ContainerValidator:
                 elif len(cleaned_digits) == 6 and has_separator:
                     c_pref = prefix + cleaned_digits
                     candidates.add(c_pref + str(check_digit(c_pref)))
+
+        # Handle cases where container prefix and serial digits are separated by size codes or words
+        # (e.g. 'TGHU 4561 905915 7' or 'TGHU 45G1 905915 7')
+        if not candidates:
+            pref_matches = list(re.finditer(r'(?<![A-Z0-9])([A-Z]{3}[UJZ])(?![A-Z0-9])', raw.upper()))
+            for pm in pref_matches:
+                prefix = pm.group(1)
+                spaced = re.findall(r'(?<![0-9])([0-9]{6})\s*([0-9])(?![0-9])', raw)
+                d_cands = [d[0] + d[1] for d in spaced] + re.findall(r'(?<![0-9])([0-9]{7})(?![0-9])', raw)
+                for dc in d_cands:
+                    c_full = prefix + dc
+                    if check_digit(c_full[:10]) == int(c_full[10]) or (int(c_full[10]), check_digit(c_full[:10])) in CHECK_DIGIT_CONFUSIONS:
+                        candidates.add(c_full[:10] + str(check_digit(c_full[:10])))
+                if not candidates:
+                    d6_cands = re.findall(r'(?<![0-9])([0-9]{6})(?![0-9])', raw)
+                    for d6 in d6_cands:
+                        c_pref = prefix + d6
+                        candidates.add(c_pref + str(check_digit(c_pref)))
 
         if len(candidates) > 1:
             valid_cands = [c for c in candidates if bool(STRUCTURE.fullmatch(c)) and check_digit(c[:10]) == int(c[10])]

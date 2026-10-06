@@ -30,6 +30,8 @@ from app.ocr.container_ocr import crop_identification
 from app.ocr.ocr_engine import EasyOCREngine, create_ocr_engine
 from app.ocr.validator import ContainerValidator, extract_iso_size_code
 from app.ocr.job_store import OCRJobStore
+from app.ocr.fast_selector import FastFrameSelector
+from app.events.pipeline_profiler import PipelineProfiler, LatencyRecord
 
 log = logging.getLogger('gate')
 
@@ -91,6 +93,8 @@ class GateRuntime:
         self.validator = ContainerValidator()
         self.tracker = {c.id: TemporalTracker(settings.track_ttl_seconds) for c in cameras}
         self.queue = Queue(maxsize=settings.ocr_queue_size)
+        self.fast_ocr_queue = Queue(maxsize=settings.ocr_queue_size)
+        self.profiler = PipelineProfiler(self.metrics)
         self.ocr_store = OCRJobStore(settings.upload_directory / 'ocr-spool', settings.ocr_spool_max_mb,
                                      image_root=snapshots.root)
         self.ocr_spool_error = None
@@ -512,27 +516,36 @@ class GateRuntime:
             self.process_frame(camera, frame)
 
     def _initialize_pipeline(self):
-        try:
-            self.detector = self.detector_factory(self.settings)
-            self.model_status['detector'] = 'READY'
-            self.ocr = self.ocr_factory(self.settings)
-            self.model_status['ocr'] = 'READY'
-            if self._stop.is_set():
-                return
-            log.info('models_loaded')
-            infer_thread = threading.Thread(target=self._inference_loop, name='gate-inference', daemon=True)
-            self._threads.append(infer_thread)
-            infer_thread.start()
-            for idx in (1, 2):
-                ocr_thread = threading.Thread(target=self._ocr_loop, name=f'gate-ocr-{idx}', daemon=True)
-                self._threads.append(ocr_thread)
-                ocr_thread.start()
-        except Exception as exc:
-            if self.detector is None:
-                self.model_status['detector'] = 'ERROR'
-            self.model_status['ocr'] = 'ERROR'
-            self.model_status['error_type'] = type(exc).__name__
-            log.error('model_load_failed', extra={'error_type': type(exc).__name__})
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.detector = self.detector_factory(self.settings)
+                self.model_status['detector'] = 'READY'
+                self.ocr = self.ocr_factory(self.settings)
+                self.model_status['ocr'] = 'READY'
+                if self._stop.is_set():
+                    return
+                log.info('models_loaded')
+                infer_thread = threading.Thread(target=self._inference_loop, name='gate-inference', daemon=True)
+                self._threads.append(infer_thread)
+                infer_thread.start()
+                for idx in range(1, 4):
+                    ocr_thread = threading.Thread(target=self._ocr_loop, name=f'gate-ocr-{idx}', daemon=True)
+                    self._threads.append(ocr_thread)
+                    ocr_thread.start()
+                return  # success
+            except Exception as exc:
+                if self.detector is None:
+                    self.model_status['detector'] = 'ERROR'
+                self.model_status['ocr'] = 'ERROR'
+                self.model_status['error_type'] = type(exc).__name__
+                if attempt < max_attempts and not self._stop.is_set():
+                    log.warning('model_load_retry', extra={'attempt': attempt,
+                                 'error_type': type(exc).__name__}, exc_info=True)
+                    self._stop.wait(5)  # wait for GPU memory to be released
+                    self.detector = None  # reset so next attempt re-creates
+                    continue
+                log.error('model_load_failed', extra={'error_type': type(exc).__name__}, exc_info=True)
 
     def stop(self):
         self._stop.set()
@@ -569,6 +582,7 @@ class GateRuntime:
             self._stop.wait(.005)
 
     def process_frame(self, camera, frame):
+        t_frame_start = time.perf_counter()
         with self._accelerator:
             started = time.monotonic()
             detections = self.detector.detect(frame)
@@ -577,13 +591,19 @@ class GateRuntime:
             self.metrics.latency('inference', time.monotonic() - started)
         self.metrics.inference(camera.id)
         self.metrics.increment('inferences')
+        det_ms = (time.perf_counter() - t_frame_start) * 1000.0
+
         if camera.lanes:
             with self._state_lock:
                 self._preview_detections[camera.id] = (frame.source_id, frame.timestamp, tuple(detections))
                 self.passages.update(camera, frame, detections)
                 self._queue_passage_candidates()
             return
+
+        t_track_start = time.perf_counter()
         tracks = self.tracker[camera.id].update(detections, frame.timestamp)
+        track_ms = (time.perf_counter() - t_track_start) * 1000.0
+
         with self._state_lock:
             occupant = self.occupancy[camera.id]
             selected = occupant.update(camera, frame, detections)
@@ -620,9 +640,6 @@ class GateRuntime:
                                 continue
                             other_occ = self.occupancy[other_cam.id].current
                             if other_occ:
-                                # ONLY borrow event_id from a companion camera if the passage is concurrent
-                                # (within cross_camera_view_window_seconds, default 8s) and the companion
-                                # is actively seeing the same passage (not already cleared/stale)
                                 time_gap = abs((frame.timestamp - other_occ.first_seen).total_seconds()) if other_occ.first_seen else 999.0
                                 if time_gap <= self.settings.cross_camera_view_window_seconds and not other_occ.closed and other_occ.clear_since is None:
                                     cand = getattr(other_occ, 'event_id', None) or getattr(other_occ, 'provisional_event_id', None)
@@ -656,6 +673,17 @@ class GateRuntime:
                 if camera.line_axis and direction == 'UNKNOWN':
                     continue
 
+                # Fast Frame Quality & Blur Filtering: skip blurry frames when we already have candidate samples
+                t_filt_start = time.perf_counter()
+                is_usable, quality_score, crop_bbox = FastFrameSelector.evaluate_candidate(
+                    frame.image, track.detection.bbox, detections, min_blur_threshold=28.0
+                )
+                filt_ms = (time.perf_counter() - t_filt_start) * 1000.0
+                if not is_usable and state.get('samples', 0) > 0:
+                    self.metrics.increment('frames_blur_skipped')
+                    continue
+
+                # Parallel multi-camera instant frame collection across this gate's cameras
                 companion_frames = {}
                 for other_cam in self.cameras:
                     if other_cam.gate_id == camera.gate_id and other_cam.id != camera.id:
@@ -667,9 +695,6 @@ class GateRuntime:
                                         getattr(other_cam, 'source_type', 'live') == 'file' and
                                         not getattr(self.settings, 'allow_file_cross_camera_fusion', False)):
                                     continue
-                                # A companion is evidence only when captured in
-                                # the same short observation window. Never save
-                                # a stale frame from another truck as proof.
                                 latest_gap = abs((frame.timestamp - other_latest.timestamp).total_seconds())
                                 if latest_gap > self.settings.cross_camera_view_window_seconds:
                                     continue
@@ -683,7 +708,14 @@ class GateRuntime:
                              companion_frames=companion_frames, slot_position=slot_pos,
                              event_id=event_id, is_stationary=is_stat, entrance_complete=ent_done,
                              is_twin=bool(getattr(occupancy, 'is_twin', False)))
+
+                profiler_rec = self.profiler.new_record(origin)
+                profiler_rec.detection_ms = det_ms
+                profiler_rec.tracking_ms = track_ms
+                profiler_rec.filtering_ms = filt_ms
+
                 try:
+                    self.fast_ocr_queue.put_nowait((job, profiler_rec))
                     self.queue.put_nowait(job)
                     state['pending'] = True
                     state['samples'] = state.get('samples', 0) + 1
@@ -797,7 +829,15 @@ class GateRuntime:
                     self.ocr_store.link_passage(p.id, passage.id)
 
     def _process_saved_ocr(self, job_id):
-        job, crop, validation = self.ocr_store.load(job_id)
+        try:
+            job, crop, validation = self.ocr_store.load(job_id)
+        except (FileNotFoundError, OSError) as exc:
+            # Spool image files missing — likely orphaned DB rows from a previous
+            # crash or cross-device rehome failure.  Skip and discard gracefully.
+            log.warning('ocr_spool_image_missing', extra={'job_id': job_id,
+                         'error_type': type(exc).__name__}, exc_info=False)
+            self.ocr_store.complete(job_id)
+            return
         if job.passage_id and job.passage_id not in self.passages.passages:
             # A replay after restart must preserve its historical lane/event.
             # Interrupted passages require review; no guessed completion.
@@ -831,54 +871,121 @@ class GateRuntime:
                     self.ocr_store.complete(job_id, prior.event_id)
                     self._confirm_occupancy(job, prior.event_id)
                     return  # Already committed occupancy: no repeat OCR, event write or log.
-        if validation is None:
-            started = time.monotonic()
-            read = None
-            validation = None
-            targeted_text_seen = False
+    def _execute_ocr(self, job, crop=None, profiler_record=None):
+        started = time.monotonic()
+        read = None
+        validation = None
+        targeted_text_seen = False
+        t_iso_total = 0.0
 
-            # 1. DIRECT TARGETED TEXT OCR:
-            # If YOLO already detected the text box (cointainer / feet), run OCR
-            # directly on that small cropped region first. Do not waste ~2.5s running
-            # on the entire massive container background.
-            if getattr(job, 'all_detections', None) and getattr(job, 'frame', None) and getattr(job.frame, 'image', None) is not None:
-                c_box = job.detection.bbox  # pixel coords: (x1, y1, x2, y2)
-                c_w = max(1.0, c_box[2] - c_box[0])
-                c_h = max(1.0, c_box[3] - c_box[1])
-                c_area = c_w * c_h
-                margin = 80  # margin around container bbox
+        if crop is None and getattr(job, 'frame', None) and getattr(job.frame, 'image', None) is not None:
+            crop = crop_identification(job.frame.image, job.detection.bbox, job.roi)
 
-                cointainer_candidates = []
-                feet_candidates = []
+        # 1. DIRECT TARGETED TEXT OCR:
+        # If YOLO already detected the text box (container_number / iso_code), run OCR
+        # directly on that small cropped region first.
+        if getattr(job, 'all_detections', None) and getattr(job, 'frame', None) and getattr(job.frame, 'image', None) is not None:
+            c_box = job.detection.bbox
+            c_w = max(1.0, c_box[2] - c_box[0])
+            c_h = max(1.0, c_box[3] - c_box[1])
+            margin = 80
 
-                for d in job.all_detections:
-                    cls_name = d.class_name.lower()
-                    fc_x = (d.bbox[0] + d.bbox[2]) / 2
-                    fc_y = (d.bbox[1] + d.bbox[3]) / 2
-                    within = (
-                        c_box[0] - margin <= fc_x <= c_box[2] + margin and
-                        c_box[1] - margin <= fc_y <= c_box[3] + margin
-                    )
-                    if not within:
-                        continue
+            cointainer_candidates = []
+            feet_candidates = []
 
-                    d_w = max(1.0, d.bbox[2] - d.bbox[0])
-                    d_h = max(1.0, d.bbox[3] - d.bbox[1])
-                    d_area = d_w * d_h
+            for d in job.all_detections:
+                cls_name = d.class_name.lower()
+                fc_x = (d.bbox[0] + d.bbox[2]) / 2
+                fc_y = (d.bbox[1] + d.bbox[3]) / 2
+                within = (
+                    c_box[0] - margin <= fc_x <= c_box[2] + margin and
+                    c_box[1] - margin <= fc_y <= c_box[3] + margin
+                )
+                if not within:
+                    continue
 
-                    if cls_name == 'container_number':
-                        cointainer_candidates.append(d)
-                    elif cls_name == 'iso_code':
-                        feet_candidates.append(d)
+                if cls_name == 'container_number':
+                    cointainer_candidates.append(d)
+                elif cls_name == 'iso_code':
+                    feet_candidates.append(d)
 
-                cointainer_candidates.sort(key=lambda d: d.confidence, reverse=True)
-                feet_candidates.sort(key=lambda d: d.confidence, reverse=True)
-                targeted_text_seen = bool(cointainer_candidates or feet_candidates)
+            cointainer_candidates.sort(key=lambda d: d.confidence, reverse=True)
+            feet_candidates.sort(key=lambda d: d.confidence, reverse=True)
+            targeted_text_seen = bool(cointainer_candidates or feet_candidates)
 
-                img_h, img_w = job.frame.image.shape[:2]
+            img_h, img_w = job.frame.image.shape[:2]
 
-                # Direct OCR on 'cointainer' text crops first
-                for d in cointainer_candidates:
+            # Direct OCR on 'container_number' text crops first
+            for d in cointainer_candidates:
+                bw = max(1.0, d.bbox[2] - d.bbox[0])
+                bh = max(1.0, d.bbox[3] - d.bbox[1])
+                pad_x = max(25, int(bw * 0.15))
+                pad_y = max(15, int(bh * 0.25))
+                y1 = max(0, int(d.bbox[1]) - pad_y)
+                y2 = min(img_h, int(d.bbox[3]) + pad_y)
+                x1 = max(0, int(d.bbox[0]) - pad_x)
+                x2 = min(img_w, int(d.bbox[2]) + pad_x)
+                sub_crop = job.frame.image[y1:y2, x1:x2]
+                if sub_crop.size > 0:
+                    sub_r = self.ocr.read(sub_crop)
+                    t_val0 = time.perf_counter()
+                    sub_v = self.validator.validate(sub_r)
+                    t_iso_total += (time.perf_counter() - t_val0) * 1000.0
+                    if not sub_v.valid_check_digit and (sub_crop.shape[0] >= 1.2 * sub_crop.shape[1] or not sub_r.raw_text.strip()):
+                        import cv2
+                        for rot_code in (cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE):
+                            rot_crop = cv2.rotate(sub_crop, rot_code)
+                            rot_r = self.ocr.read(rot_crop)
+                            t_val0 = time.perf_counter()
+                            rot_v = self.validator.validate(rot_r)
+                            t_iso_total += (time.perf_counter() - t_val0) * 1000.0
+                            if rot_v.valid_check_digit or (not sub_v.valid_check_digit and rot_v.confidence > sub_v.confidence and len(rot_v.normalized_text) >= 4):
+                                sub_r, sub_v = rot_r, rot_v
+                                if sub_v.valid_check_digit:
+                                    break
+                    if sub_v.valid_check_digit:
+                        read = sub_r
+                        validation = sub_v
+                        break
+                    elif validation is None or (sub_v.confidence > validation.confidence and len(sub_v.normalized_text) >= 4):
+                        read = sub_r
+                        validation = sub_v
+
+            # Read ISO code if not yet identified
+            if not (validation and validation.size_type) and feet_candidates:
+                for fd in feet_candidates:
+                    pad = 10
+                    fy1 = max(0, int(fd.bbox[1]) - pad)
+                    fy2 = min(img_h, int(fd.bbox[3]) + pad)
+                    fx1 = max(0, int(fd.bbox[0]) - pad)
+                    fx2 = min(img_w, int(fd.bbox[2]) + pad)
+                    f_crop = job.frame.image[fy1:fy2, fx1:fx2]
+                    if f_crop.size > 0:
+                        iso_reader = getattr(self.ocr, 'read_iso', self.ocr.read)
+                        f_r = iso_reader(f_crop)
+                        iso_c, human_s = extract_iso_size_code(f_r.raw_text)
+                        if iso_c:
+                            if validation:
+                                validation = Validation(
+                                    raw_text=f"{validation.raw_text} {f_r.raw_text}",
+                                    normalized_text=validation.normalized_text,
+                                    confidence=max(validation.confidence, f_r.confidence),
+                                    valid_format=validation.valid_format,
+                                    valid_check_digit=validation.valid_check_digit,
+                                    validation_status=validation.validation_status,
+                                    size_type=iso_c
+                                )
+                            else:
+                                validation = Validation(
+                                    raw_text=f_r.raw_text, normalized_text='', confidence=f_r.confidence,
+                                    valid_format=True, valid_check_digit=False,
+                                    validation_status='VALID_SIZE_CODE', size_type=iso_c
+                                )
+                            break
+
+            # Try feet candidates if check digit still invalid
+            if validation is None or not validation.valid_check_digit:
+                for d in feet_candidates:
                     pad = 10
                     y1 = max(0, int(d.bbox[1]) - pad)
                     y2 = min(img_h, int(d.bbox[3]) + pad)
@@ -887,120 +994,172 @@ class GateRuntime:
                     sub_crop = job.frame.image[y1:y2, x1:x2]
                     if sub_crop.size > 0:
                         sub_r = self.ocr.read(sub_crop)
+                        t_val0 = time.perf_counter()
                         sub_v = self.validator.validate(sub_r)
-                        if not sub_v.valid_check_digit and (sub_crop.shape[0] >= 1.2 * sub_crop.shape[1] or not sub_r.raw_text.strip()):
-                            import cv2
-                            for rot_code in (cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE):
-                                rot_crop = cv2.rotate(sub_crop, rot_code)
-                                rot_r = self.ocr.read(rot_crop)
-                                rot_v = self.validator.validate(rot_r)
-                                if rot_v.valid_check_digit or (not sub_v.valid_check_digit and rot_v.confidence > sub_v.confidence and len(rot_v.normalized_text) >= 4):
-                                    sub_r, sub_v = rot_r, rot_v
-                                    if sub_v.valid_check_digit:
-                                        break
+                        t_iso_total += (time.perf_counter() - t_val0) * 1000.0
                         if sub_v.valid_check_digit:
                             read = sub_r
                             validation = sub_v
                             break
 
-                # ISO is an independent target. Read it even when the container number
-                # is not readable; the ISO code is valuable evidence for 20/40-foot logic.
-                if not (validation and validation.size_type) and feet_candidates:
-                    for fd in feet_candidates:
-                        pad = 10
-                        fy1 = max(0, int(fd.bbox[1]) - pad)
-                        fy2 = min(img_h, int(fd.bbox[3]) + pad)
-                        fx1 = max(0, int(fd.bbox[0]) - pad)
-                        fx2 = min(img_w, int(fd.bbox[2]) + pad)
-                        f_crop = job.frame.image[fy1:fy2, fx1:fx2]
-                        if f_crop.size > 0:
-                            iso_reader = getattr(self.ocr, 'read_iso', self.ocr.read)
-                            f_r = iso_reader(f_crop)
-                            iso_c, human_s = extract_iso_size_code(f_r.raw_text)
-                            if iso_c:
-                                if validation:
-                                    validation = Validation(
-                                        raw_text=f"{validation.raw_text} {f_r.raw_text}",
-                                        normalized_text=validation.normalized_text,
-                                        confidence=max(validation.confidence, f_r.confidence),
-                                        valid_format=validation.valid_format,
-                                        valid_check_digit=validation.valid_check_digit,
-                                        validation_status=validation.validation_status,
-                                        size_type=iso_c
-                                    )
-                                else:
-                                    validation = Validation(
-                                        raw_text=f_r.raw_text, normalized_text='', confidence=f_r.confidence,
-                                        valid_format=True, valid_check_digit=False,
-                                        validation_status='VALID_SIZE_CODE', size_type=iso_c
-                                    )
+        # 2. FALLBACK TO MAIN CONTAINER CROP
+        if (validation is None or not validation.valid_check_digit) and crop is not None:
+            main_read = self.ocr.read(crop)
+            t_val0 = time.perf_counter()
+            main_val = self.validator.validate(main_read)
+            t_iso_total += (time.perf_counter() - t_val0) * 1000.0
+            if validation is None or main_val.valid_check_digit or main_val.confidence > validation.confidence:
+                if validation and validation.size_type and main_val.valid_check_digit:
+                    main_val = Validation(
+                        raw_text=f"{main_val.raw_text} {validation.raw_text}",
+                        normalized_text=main_val.normalized_text,
+                        confidence=max(main_val.confidence, validation.confidence),
+                        valid_format=main_val.valid_format,
+                        valid_check_digit=main_val.valid_check_digit,
+                        validation_status=main_val.validation_status,
+                        size_type=validation.size_type
+                    )
+                read = main_read
+                validation = main_val
+
+        # 3. FALLBACK TO COMPANION CAMERA FRAMES
+        if (validation is None or not validation.valid_check_digit) and not targeted_text_seen:
+            companion_dict = dict(getattr(job, 'companion_frames', {}) or {})
+            fast_ocr = getattr(self.ocr, 'primary', self.ocr)
+            for other_cam_id, comp_img in companion_dict.items():
+                if comp_img is not None and getattr(comp_img, 'size', 0) > 0:
+                    comp_read = fast_ocr.read(comp_img)
+                    t_val0 = time.perf_counter()
+                    comp_val = self.validator.validate(comp_read)
+                    t_iso_total += (time.perf_counter() - t_val0) * 1000.0
+                    if comp_val.valid_check_digit or (validation is None or comp_val.confidence > validation.confidence):
+                        read = comp_read
+                        validation = comp_val
+                        if validation.valid_check_digit:
+                            break
+
+        ocr_duration = time.monotonic() - started
+        self.metrics.latency('ocr', ocr_duration)
+        if profiler_record:
+            profiler_record.ocr_ms = ocr_duration * 1000.0
+            profiler_record.iso_validation_ms = t_iso_total
+
+        return read, validation
+
+    def _process_fast_ocr(self, job, profiler_record=None):
+        with self._state_lock:
+            track_state = self._tracks.get(job.origin_key)
+            if (track_state and track_state.get('done')) or job.origin_key in self._confirmed_origins:
+                return
+
+        read, validation = self._execute_ocr(job, profiler_record=profiler_record)
+        if validation is None:
+            validation = Validation(
+                raw_text='', normalized_text='', confidence=0.0,
+                valid_format=False, valid_check_digit=False, validation_status='NO_TEXT'
+            )
+
+        if job.passage_id:
+            with self._state_lock:
+                self.passages.result(job.passage_id, job.region_id, validation, job)
+            return
+
+        self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
+        try:
+            additional = dict(getattr(job, 'companion_frames', {}) or {})
+            ongoing = getattr(job, 'event_id', None)
+            if validation.valid_check_digit:
+                with self._state_lock:
+                    for view in self.cameras:
+                        state = self.occupancy[view.id].current
+                        if (view.gate_id == job.gate_id and state and state.event_id):
+                            if state.container_number == validation.normalized_text:
+                                ongoing = state.event_id
                                 break
+            result = self.events.observe(job, validation, additional_frames=additional,
+                                         proof_job=job, ongoing_event_id=ongoing,
+                                         profiler_record=profiler_record)
+        finally:
+            self.events.evidence.pop(job.origin_key, None)
 
-                # If still not valid, try 'feet' candidates (might contain full container number / valid code)
-                if validation is None or not validation.valid_check_digit:
-                    for d in feet_candidates:
-                        pad = 10
-                        y1 = max(0, int(d.bbox[1]) - pad)
-                        y2 = min(img_h, int(d.bbox[3]) + pad)
-                        x1 = max(0, int(d.bbox[0]) - pad)
-                        x2 = min(img_w, int(d.bbox[2]) + pad)
-                        sub_crop = job.frame.image[y1:y2, x1:x2]
-                        if sub_crop.size > 0:
-                            sub_r = self.ocr.read(sub_crop)
-                            sub_v = self.validator.validate(sub_r)
-                            if sub_v.valid_check_digit:
-                                read = sub_r
-                                validation = sub_v
-                                break
+        with self._state_lock:
+            state = self._tracks.get(job.origin_key)
+            if state:
+                state['pending'] = False
+                ev = self.repository.event(result[0]) if result else None
+                if ev:
+                    state['done'] = bool(ev.get('container_number'))
+                else:
+                    state['done'] = False
 
-            # 2. FALLBACK TO MAIN CONTAINER CROP:
-            # Only if targeted sub-boxes were missing or failed to produce a valid check digit.
-            if validation is None or not validation.valid_check_digit:
-                main_read = self.ocr.read(crop)
-                main_val = self.validator.validate(main_read)
-                if validation is None or main_val.valid_check_digit or main_val.confidence > validation.confidence:
-                    if validation and validation.size_type and main_val.valid_check_digit:
-                        main_val = Validation(
-                            raw_text=f"{main_val.raw_text} {validation.raw_text}",
-                            normalized_text=main_val.normalized_text,
-                            confidence=max(main_val.confidence, validation.confidence),
-                            valid_format=main_val.valid_format,
-                            valid_check_digit=main_val.valid_check_digit,
-                            validation_status=main_val.validation_status,
-                            size_type=validation.size_type
-                        )
-                    read = main_read
-                    validation = main_val
+        if result:
+            self._confirm_occupancy(job, result[0])
+            ev = self.repository.event(result[0])
+            if ev and ev.get('status') == 'CONFIRMED':
+                is_done = bool(ev.get('container_number'))
+                if is_done:
+                    with self._state_lock:
+                        self._confirmed_origins.add(job.origin_key)
+                    self.ocr_store.cancel_pending(job.origin_key, result[0])
+            self.metrics.increment('events_created' if result[1] else 'evidence_associated')
+            self.metrics.latency('event', (utcnow() - job.started_at).total_seconds())
 
-            # 3. FALLBACK TO COMPANION CAMERA FRAMES (e.g. Side or Rear cameras):
-            # If the primary camera didn't yield a valid container check digit, attempt OCR on companion camera frames
-            if (validation is None or not validation.valid_check_digit) and not targeted_text_seen:
-                companion_dict = dict(getattr(job, 'companion_frames', {}) or {})
-                for other_cam_id, comp_img in companion_dict.items():
-                    if comp_img is not None and getattr(comp_img, 'size', 0) > 0:
-                        comp_read = self.ocr.read(comp_img)
-                        comp_val = self.validator.validate(comp_read)
-                        if comp_val.valid_check_digit or (validation is None or comp_val.confidence > validation.confidence):
-                            read = comp_read
-                            validation = comp_val
-                            if validation.valid_check_digit:
-                                break
+            if profiler_record:
+                cntr = validation.normalized_text if validation else ''
+                self.profiler.record_and_log(profiler_record, container_number=cntr)
+                log.info(profiler_record.summary())
 
-            self.metrics.latency('ocr', time.monotonic() - started)
+    def _process_saved_ocr(self, job_id):
+        try:
+            job, crop, validation = self.ocr_store.load(job_id)
+        except (FileNotFoundError, OSError) as exc:
+            log.warning('ocr_spool_image_missing', extra={'job_id': job_id,
+                         'error_type': type(exc).__name__}, exc_info=False)
+            self.ocr_store.complete(job_id)
+            return
+        if job.passage_id and job.passage_id not in self.passages.passages:
+            from app.events.passages import Passage, Region
+            with self._state_lock:
+                passage = Passage(job.passage_id, job.detection.camera_id, job.frame.source_id,
+                    job.gate_id, job.passage_metadata['lane_id'], job.direction, job.started_at,
+                    job.frame.timestamp, job.track_id, tuple(job.passage_metadata['bbox']),
+                    closed=True, ambiguous=True, source_type=job.passage_metadata.get('source_type','file'),
+                    visit_id=getattr(job, 'event_id', None) or job.passage_id)
+                self.passages.passages[job.passage_id] = passage
+        if job.passage_id:
+            from app.events.passages import Region
+            with self._state_lock:
+                passage = self.passages.passages[job.passage_id]
+                if not any(r.id == job.region_id for r in passage.regions):
+                    passage.regions.append(Region(id=job.region_id, pending=1))
+        with self._state_lock:
+            track_state = self._tracks.get(job.origin_key)
+            if (track_state and track_state.get('done')) or job.origin_key in self._confirmed_origins:
+                prior = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
+                self.ocr_store.complete(job_id, prior.event_id or getattr(job, 'event_id', None))
+                return
+        prior = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
+        if prior.event_id:
+            prior_ev = self.repository.event(prior.event_id)
+            if prior_ev and prior_ev.get('status') == 'CONFIRMED':
+                if not prior_ev.get('iso_code_1') and not prior_ev.get('container_size'):
+                    pass
+                elif prior_ev.get('container_number'):
+                    self.ocr_store.complete(job_id, prior.event_id)
+                    self._confirm_occupancy(job, prior.event_id)
+                    return
+        if validation is None:
+            read, validation = self._execute_ocr(job, crop=crop)
             self.ocr_store.save_validation(job_id, validation)
         if job.passage_id:
             with self._state_lock:
                 self.passages.result(job.passage_id, job.region_id, validation, job)
             self.ocr_store.complete(job_id, job.passage_id)
             return
-        # Recover confirmation votes from disk, including after a restart.
-        # Saved jobs retain historical source/lane/role; never relabel them to
-        # the currently selected camera or attach current-time companion images.
+
         self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
         try:
             additional = dict(getattr(job, 'companion_frames', {}) or {})
-            # OCR may finish long after capture. Never attach current live frames
-            # to a historical event: they can show an entirely different truck.
             proof = self.ocr_store.best_proof(job.origin_key, job_id) or job
             ongoing = getattr(job, 'event_id', None)
             if validation.valid_check_digit:
@@ -1048,6 +1207,21 @@ class GateRuntime:
         while not self._stop.is_set():
             job_id = None
             try:
+                # 1. High-Speed In-Memory OCR Queue (Millisecond Real-Time Processing)
+                try:
+                    fast_item = self.fast_ocr_queue.get_nowait()
+                except Empty:
+                    fast_item = None
+
+                if fast_item is not None:
+                    job, profiler_rec = fast_item if isinstance(fast_item, tuple) else (fast_item, None)
+                    try:
+                        self._process_fast_ocr(job, profiler_rec)
+                    finally:
+                        self.fast_ocr_queue.task_done()
+                    continue
+
+                # 2. Spool Storage Recovery / Backlog
                 job_id = self.ocr_store.next_id()
                 self._finalize_passages()
                 if job_id is None:
@@ -1058,7 +1232,7 @@ class GateRuntime:
                         self.ocr_store.clean_completed(max_age_seconds=10, protected_origins=protected)
                     except Exception:
                         pass
-                    self._stop.wait(.2)
+                    self._stop.wait(.05)
                     continue
                 self._process_saved_ocr(job_id)
                 self.last_processing_error = None
@@ -1071,4 +1245,4 @@ class GateRuntime:
                         self.ocr_store.retry(job_id, type(exc).__name__)
                     except Exception:
                         self.ocr_spool_error = 'RetryWriteFailed'
-                self._stop.wait(.2)
+                self._stop.wait(.05)
