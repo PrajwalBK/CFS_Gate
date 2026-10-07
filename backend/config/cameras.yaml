@@ -19,9 +19,9 @@ camera_sources:
     name: PoE Camera 6 (OUT Rear)
     source_env: CAMERA_6_RTSP
 
-# 3 cameras per gate:
-# 3 cameras configured for the IN gate (gate_id: lane-in): Front/Top, Left, Dedicated Rear
-# 3 cameras configured for the OUT gate (gate_id: lane-out): Front/Top, Left, Dedicated Rear
+# 6 cameras configured across 2 gates:
+# 3 cameras for GATE-IN (gate_id: lane-in): Front/Top, Left, Rear
+# 3 cameras for GATE-OUT (gate_id: lane-out): Front/Top, Left, Rear
 cameras:
   # --- GATE IN (3 CAMERAS) ---
   - id: gate-in-1
@@ -39,6 +39,7 @@ cameras:
     direction: ENTRY
     role: LEFT
     capture_fps: 25
+    occupancy_roi: [0.0, 0.0, 1.0, 1.0]
   - id: gate-in-3
     name: Gate IN 3 (Rear)
     gate_id: lane-in
@@ -46,6 +47,7 @@ cameras:
     direction: ENTRY
     role: REAR
     capture_fps: 25
+    occupancy_roi: [0.0, 0.0, 1.0, 1.0]
 
   # --- GATE OUT (3 CAMERAS) ---
   - id: gate-out-1
@@ -71,4 +73,4 @@ cameras:
     direction: EXIT
     role: REAR
     capture_fps: 25
-    enabled: false
+    occupancy_roi: [0.0, 0.0, 1.0, 1.0]

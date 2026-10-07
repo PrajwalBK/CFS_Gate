@@ -129,8 +129,15 @@ class EventManager:
         evidence.event_id = event_id
         evidence.confirmed = confirmed
 
-        # Only dispatch to cloud and buzz for new events or newly confirmed events that haven't been dispatched yet
-        should_dispatch = obs.confirmed and (event_id not in self._dispatched_events)
+        # Only dispatch to cloud for events confirmed with valid ISO 6346 container number and valid check digit.
+        # CRITICAL: If a multi-camera container passage session is active, do NOT dispatch prematurely!
+        # Finalization and cloud dispatch must happen only after all cameras capture frames and the passage clears.
+        is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
+        has_active_passage = bool(
+            self.runtime and getattr(self.runtime, 'passage_sessions', None)
+            and self.runtime.passage_sessions.get_active_session(obs.gate_id)
+        )
+        should_dispatch = obs.confirmed and is_ocr_valid and (event_id not in self._dispatched_events) and not has_active_passage
         if self.dispatcher and should_dispatch:
             t_api0 = time.perf_counter()
             self._dispatched_events.add(event_id)

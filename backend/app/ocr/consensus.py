@@ -175,8 +175,11 @@ class CharacterConsensus:
                 consensus_chars.append(char)
                 char_confidences.append(score / max(1e-6, total))
             else:
-                consensus_chars.append('?' if idx < 4 else '0')
-                char_confidences.append(0.0)
+                # Incomplete positional votes: all 11 slots must have real votes
+                valid_partial = [r for r in reads if r and r.normalized_text and len(r.normalized_text) >= 4]
+                if valid_partial:
+                    return max(valid_partial, key=lambda r: (r.confidence or 0.0))
+                return reads[-1] if reads else None
 
         consensus_str = ''.join(consensus_chars)
         avg_conf = sum(char_confidences) / 11.0 if char_confidences else 0.5

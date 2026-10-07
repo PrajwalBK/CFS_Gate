@@ -22,7 +22,14 @@ def event(event_id: str, request: Request):
     result['evidence_manifest'] = request.app.state.snapshots.build_evidence_manifest(
         result, min_quality=getattr(request.app.state.runtime.settings, 'cloud_min_proof_quality', 2.5)
     )
-    result['snapshots'] = result['evidence_manifest']['captures'] or result.get('snapshots') or []
+    all_snaps = result.get('snapshots') or []
+    manifest_captures = result.get('evidence_manifest', {}).get('captures') or []
+    manifest_cams = {c.get('camera_id') for c in manifest_captures if c.get('camera_id')}
+    all_cams = {s.get('camera_id') for s in all_snaps if s.get('camera_id')}
+    if len(manifest_cams) >= len(all_cams) and manifest_captures:
+        result['snapshots'] = manifest_captures
+    else:
+        result['snapshots'] = all_snaps
     result['ocr_crops'] = request.app.state.runtime.ocr_store.event_crops(event_id)
     return result
 

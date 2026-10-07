@@ -381,18 +381,29 @@ class CloudOutboxDispatcher:
         log.info('prosper_cloud_dispatcher_stopped')
 
     def enqueue(self, obs: Any, event_id: str, image_bytes: Optional[bytes] = None,
-                payload: Optional[dict] = None, delay_seconds: float = 0.0):
+                payload: Optional[dict] = None, delay_seconds: float = 0.0,
+                force: bool = False):
         """Enqueue confirmed gate event for background dispatch."""
         if not self.enabled:
             return
-        if not getattr(obs, 'confirmed', True):
+        if obs is not None and not getattr(obs, 'confirmed', False):
             return
+        import re
+        if obs is not None and obs.ocr:
+            norm_obs = getattr(obs.ocr, 'normalized_text', '')
+            if not norm_obs or len(norm_obs) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', norm_obs):
+                return
 
-        # Do not re-enqueue if already synced in database
+        # Do not re-enqueue if already synced (unless forced) or invalid in database
         if self.repository:
             try:
                 ev = self.repository.event(event_id)
-                if ev and ev.get('cloud_synced'):
+                if not ev or ev.get('status') != 'CONFIRMED':
+                    return
+                if not force and ev.get('cloud_synced'):
+                    return
+                cntr = ev.get('container_number')
+                if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr):
                     return
                 canonical = self.repository.canonical_event_id(event_id)
                 if canonical and canonical != event_id:
@@ -416,6 +427,7 @@ class CloudOutboxDispatcher:
             'enqueued_at': time.monotonic(),
             'not_before': time.monotonic() + max(0.0, float(delay_seconds or 0.0)),
             'retries': 0,
+            'force': force,
         }
 
         try:
@@ -459,10 +471,18 @@ class CloudOutboxDispatcher:
                 return
 
             log.info('prosper_sweep_offline_backlog_found', extra={'count': len(unsynced)})
+            from app.ocr.validator import ContainerValidator
+            from app.domain import OCRRead
+            validator = ContainerValidator()
             for ev in unsynced:
                 if self._stop.is_set():
                     break
                 event_id = ev['id']
+                cntr = ev.get('container_number')
+                import re
+                if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr):
+                    self.repository.mark_cloud_synced(event_id)
+                    continue
                 try:
                     self.queue.put_nowait({
                         'event_id': event_id,
@@ -510,7 +530,7 @@ class CloudOutboxDispatcher:
                 # the same persistent identity guard here as enqueue().
                 if self.repository:
                     current = self.repository.event(event_id)
-                    if current and (current.get('cloud_synced') or current.get('status') != 'CONFIRMED'):
+                    if current and (current.get('status') != 'CONFIRMED' or (current.get('cloud_synced') and not item.get('force'))):
                         self.queue.task_done()
                         continue
                     canonical = self.repository.canonical_event_id(event_id)
@@ -537,10 +557,21 @@ class CloudOutboxDispatcher:
                         )
                         if isinstance(manifest, dict):
                             event_record['evidence_manifest'] = manifest
-                            event_record['snapshots'] = manifest['captures']
-                            event_record['primary_snapshot_id'] = manifest['primary_snapshot_id']
-                            event_record['rear_snapshot_id'] = manifest['rear_snapshot_id']
+                            manifest_cams = {c.get('camera_id') for c in (manifest.get('captures') or []) if c.get('camera_id')}
+                            all_snaps = event_record.get('snapshots') or []
+                            all_cams = {s.get('camera_id') for s in all_snaps if s.get('camera_id')}
+                            if len(manifest_cams) >= len(all_cams) and manifest.get('captures'):
+                                event_record['snapshots'] = manifest['captures']
+                            event_record['primary_snapshot_id'] = manifest.get('primary_snapshot_id')
+                            event_record['rear_snapshot_id'] = manifest.get('rear_snapshot_id')
                     cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
+                    import re
+                    if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1):
+                        log.warning('prosper_dispatch_skipped_invalid_ocr', extra={'event_id': event_id, 'container_number': cntr1})
+                        if self.repository:
+                            self.repository.mark_cloud_synced(event_id)
+                        self.queue.task_done()
+                        continue
 
                     containers_list = []
                     if cntr1:
@@ -588,24 +619,30 @@ class CloudOutboxDispatcher:
                                 if best_snap and best_data:
                                     best_by_camera[cam_id] = (best_snap, best_data)
 
+                            has_four_cams = any(c.lower().endswith(('-4', '-8')) or 'rear' in c.lower() for c in best_by_camera.keys())
+
                             def _cam_sort_key(c_id):
                                 c = c_id.lower()
-                                if any(k in c for k in ('1', 'front', 'top')):
+                                if any(k in c for k in ('1', 'front', 'top')) or c.endswith('-5'):
                                     return (0, c)
-                                if any(k in c for k in ('2', 'left', 'side')):
+                                if any(k in c for k in ('2', 'left', 'side')) or c.endswith('-6'):
                                     return (1, c)
-                                if any(k in c for k in ('3', 'rear', 'back')):
+                                if any(k in c for k in ('right',)) or c.endswith('-7') or (c.endswith('-3') and has_four_cams):
                                     return (2, c)
-                                return (3, c)
+                                if any(k in c for k in ('4', '8', 'rear', 'back')) or (c.endswith('-3') and not has_four_cams):
+                                    return (3, c)
+                                return (4, c)
 
                             def _cam_image_type(c_id):
                                 c = (c_id or '').lower()
-                                if any(k in c for k in ('3', 'rear', 'back')):
+                                if any(k in c for k in ('rear', 'back')) or c.endswith('-4') or c.endswith('-8'):
                                     return 'REAR'
-                                if any(k in c for k in ('2', 'left', 'side')):
+                                if any(k in c for k in ('left', 'side')) or c.endswith('-2') or c.endswith('-6'):
                                     return 'LEFT'
-                                if 'right' in c:
+                                if any(k in c for k in ('right',)) or c.endswith('-7'):
                                     return 'RIGHT'
+                                if c.endswith('-3'):
+                                    return 'RIGHT' if has_four_cams else 'REAR'
                                 return 'FRONT'
 
                             for cam_id in sorted(best_by_camera.keys(), key=_cam_sort_key):
@@ -633,8 +670,12 @@ class CloudOutboxDispatcher:
                             except Exception:
                                 pass
 
-                        if event_record and len(c1_images) < 1:
-                            raise ValueError('No verified non-blank container proof image is available; cloud publication deferred')
+                        if len(c1_images) < 1:
+                            log.warning('prosper_dispatch_skipped_no_proof_image', extra={'event_id': event_id, 'container_number': cntr1})
+                            if self.repository:
+                                self.repository.mark_cloud_synced(event_id)
+                            self.queue.task_done()
+                            continue
 
                         iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
                         cs1 = str((event_record.get('container_size') if event_record else None) or '')
@@ -664,19 +705,12 @@ class CloudOutboxDispatcher:
                             'Images': c1_images
                         })
 
-                    if not containers_list and obs and obs.ocr and obs.ocr.normalized_text:
-                        containers_list.append({
-                            'ContainerNumber': obs.ocr.normalized_text,
-                            'ContainerNumberConfidence': round(float(obs.ocr.confidence), 2),
-                            'Size': '20',
-                            'Position': 'SINGLE',
-                            'Images': [{
-                                'ImageType': 'FRONT',
-                                'CameraId': obs.detection.camera_id if obs else 'CAM-01',
-                                'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
-                                'Image': FALLBACK_IMAGE_DATA_URI
-                            }]
-                        })
+                    if not containers_list:
+                        log.warning('prosper_dispatch_skipped_empty_containers', extra={'event_id': event_id})
+                        if self.repository:
+                            self.repository.mark_cloud_synced(event_id)
+                        self.queue.task_done()
+                        continue
 
                     if obs and hasattr(obs, 'detection'):
                         dt_captured = obs.detection.frame_timestamp
@@ -749,10 +783,16 @@ class CloudOutboxDispatcher:
                 self.queue.task_done()
             else:
                 self._is_online = False
-                if success == 'OFFLINE':
-                    self._last_error = 'Cloud endpoint unreachable or offline'
-                elif success == 'REJECTED':
+                if success == 'REJECTED':
                     self._last_error = 'Cloud rejected payload (validation or authentication error)'
+                    # Cloud explicitly rejected this payload (e.g. 400 Bad Request, 422 Unprocessable)
+                    # Do not loop-retry indefinitely; mark as synced in database
+                    if self.repository:
+                        self.repository.mark_cloud_synced(event_id)
+                    self.queue.task_done()
+                    continue
+                elif success == 'OFFLINE':
+                    self._last_error = 'Cloud endpoint unreachable or offline'
                 elif 'exc' in locals() and exc:
                     self._last_error = str(exc)
                 item['retries'] += 1

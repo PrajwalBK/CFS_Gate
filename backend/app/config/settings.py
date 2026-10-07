@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     # stored under snapshots, so this must stay bounded on an edge device.
     ocr_spool_max_mb: int = Field(default=2048, ge=256)
     gate_clear_seconds: float = Field(default=7, ge=1, le=60)
+    passage_target_frames_per_camera: int = Field(default=10, ge=1, le=100)
     # Keep a confirmed event local briefly so OCR evidence can finalize
     # before the immutable cloud POST happens.
     cloud_dispatch_grace_seconds: float = Field(default=3, ge=0, le=60)

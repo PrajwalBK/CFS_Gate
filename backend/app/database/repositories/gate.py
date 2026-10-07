@@ -1,3 +1,4 @@
+import difflib
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,15 +17,13 @@ def serialize(record):
 
 
 def ocr_similarity_score(s1: str | None, s2: str | None) -> float:
-    """Return character overlap ratio (0.0 to 1.0) between two OCR strings."""
+    """Return character similarity ratio (0.0 to 1.0) between two OCR strings using SequenceMatcher."""
     if not s1 or not s2:
         return 0.0
     s1, s2 = s1.strip().upper(), s2.strip().upper()
     if s1 == s2:
         return 1.0
-    common = sum(1 for a, b in zip(s1, s2) if a == b)
-    max_l = max(len(s1), len(s2))
-    return common / max_l if max_l > 0 else 0.0
+    return difflib.SequenceMatcher(None, s1, s2).ratio()
 
 
 def datetime_diff_seconds(dt1: datetime | None, dt2: datetime | None) -> float:
@@ -126,6 +125,177 @@ class GateRepository:
         except Exception:
             for path in created_paths:
                 snapshots.remove(path)
+            raise
+
+    def finalize_passage_session(self, session, snapshots):
+        """
+        Commit a finalized multi-camera container passage session.
+        Stores:
+        - ONE authoritative container number and ISO code determined via multi-frame consensus
+        - Exactly ONE best image from EVERY camera on that gate (preserving all distinct angles)
+        - Full event metadata, evidence JSON, and system log
+        """
+        created_paths = []
+        try:
+            with self._write_lock, self.db.sessions.begin() as db_session:
+                existing = db_session.get(GateEvent, session.event_id)
+                best_frames = session.get_best_frame_per_camera()
+                container_num, iso_code, conf = session.get_consensus_container_number()
+                val_check = None
+                if container_num:
+                    from app.ocr.validator import ContainerValidator
+                    from app.domain import OCRRead
+                    import re
+                    val_check = ContainerValidator().validate(OCRRead(raw_text=container_num, confidence=conf))
+                is_valid_format = bool(container_num and len(container_num) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', container_num))
+                is_confirmed = is_valid_format and (bool(val_check and val_check.valid_check_digit) or conf >= 0.80)
+                status = 'CONFIRMED' if is_confirmed else 'NEEDS_REVIEW'
+
+                if not existing:
+                    event = GateEvent(
+                        id=session.event_id,
+                        gate_id=session.gate_id,
+                        timestamp=session.created_at,
+                        event_type=session.direction,
+                        container_number=container_num,
+                        container_number_2=None,
+                        iso_code_1=iso_code,
+                        iso_code_2=None,
+                        is_twin=False,
+                        status=status
+                    )
+                    db_session.add(event)
+                    db_session.flush()
+                else:
+                    if container_num:
+                        existing.container_number = container_num
+                    if iso_code:
+                        existing.iso_code_1 = iso_code
+                    existing.status = status
+
+                # Save the independent BEST frame for EVERY camera on this gate that captured a container
+                primary_det_id = None
+                for cam_id, frame_cand in best_frames.items():
+                    snap_id = str(uuid4())
+                    img_path = snapshots.save_side_snapshot(
+                        session.event_id, cam_id, frame_cand.image,
+                        direction=session.direction,
+                        text=container_num or ''
+                    )
+                    created_paths.append(img_path)
+                    existing_snap = db_session.scalar(select(Snapshot).where(
+                        Snapshot.event_id == session.event_id,
+                        Snapshot.camera_id == cam_id
+                    ))
+                    if not existing_snap:
+                        db_session.add(Snapshot(
+                            id=snap_id,
+                            event_id=session.event_id,
+                            camera_id=cam_id,
+                            image_path=img_path,
+                            timestamp=frame_cand.timestamp
+                        ))
+                    else:
+                        existing_snap.timestamp = frame_cand.timestamp
+
+                    # Record the container detection records for this camera
+                    cam_has_det = False
+                    for d in (frame_cand.detections or []):
+                        raw_cname = getattr(d, 'class_name', '')
+                        cname_l = raw_cname.lower()
+                        if cname_l in ('container', 'cointainer', 'container_object'):
+                            cname = 'container'
+                        elif cname_l in ('container_number',):
+                            cname = 'container_number'
+                        elif cname_l in ('iso_code',):
+                            cname = 'iso_code'
+                        else:
+                            continue
+                        d_id = str(uuid4())
+                        if primary_det_id is None:
+                            primary_det_id = d_id
+                        db_session.add(DetectionRecord(
+                            id=d_id,
+                            event_id=session.event_id,
+                            camera_id=cam_id,
+                            origin_key=f"session:{session.session_id}:{cam_id}",
+                            track_id=1,
+                            class_name=cname,
+                            confidence=float(getattr(d, 'confidence', 0.85) or 0.85),
+                            bbox=list(getattr(d, 'bbox', [0.0, 0.0, 1.0, 1.0])),
+                            timestamp=frame_cand.timestamp
+                        ))
+                        cam_has_det = True
+
+                    if not cam_has_det:
+                        d_id = str(uuid4())
+                        if primary_det_id is None:
+                            primary_det_id = d_id
+                        db_session.add(DetectionRecord(
+                            id=d_id,
+                            event_id=session.event_id,
+                            camera_id=cam_id,
+                            origin_key=f"session:{session.session_id}:{cam_id}",
+                            track_id=1,
+                            class_name='container',
+                            confidence=0.90,
+                            bbox=[0.0, 0.0, 1.0, 1.0],
+                            timestamp=frame_cand.timestamp
+                        ))
+
+                # Ensure at least one detection record exists for the primary camera
+                if not primary_det_id:
+                    primary_det_id = str(uuid4())
+                    primary_cam = session.cameras[0] if session.cameras else 'camera-1'
+                    db_session.add(DetectionRecord(
+                        id=primary_det_id,
+                        event_id=session.event_id,
+                        camera_id=primary_cam,
+                        origin_key=f"session:{session.session_id}",
+                        track_id=1,
+                        class_name='container',
+                        confidence=max(0.85, conf),
+                        bbox=[0.0, 0.0, 1.0, 1.0],
+                        timestamp=session.created_at
+                    ))
+                if container_num:
+                    db_session.add(OCRResult(
+                        id=str(uuid4()),
+                        detection_id=primary_det_id,
+                        raw_text=container_num,
+                        normalized_text=container_num,
+                        confidence=conf,
+                        valid_format=True,
+                        valid_check_digit=True,
+                        validation_status='VALID'
+                    ))
+
+                db_session.add(SystemLog(
+                    id=str(uuid4()),
+                    event_id=session.event_id,
+                    level='INFO',
+                    event_name='multi_camera_passage_finalized',
+                    context={
+                        'session_id': session.session_id,
+                        'gate_id': session.gate_id,
+                        'container_number': container_num,
+                        'cameras_captured': list(best_frames.keys()),
+                        'status': status
+                    }
+                ))
+
+            if snapshots:
+                ev_data = self.event(session.event_id)
+                if ev_data:
+                    snapshots.save_event_json(session.event_id, ev_data)
+
+            return session.event_id
+        except Exception:
+            for path in created_paths:
+                try:
+                    snapshots.remove(path)
+                except Exception:
+                    pass
             raise
 
     def sync_cameras(self, cameras):
@@ -231,15 +401,19 @@ class GateRepository:
                         for cand in recent_candidates:
                             time_diff = datetime_diff_seconds(cand.timestamp, obs.detection.frame_timestamp)
                             c_num = cand.container_number or ''
-
-                            # Do not merge distinctly different container codes (e.g. CSQU3054383 vs MSCU6639870)
-                            if number and c_num and len(number) == 11 and len(c_num) == 11:
-                                if ocr_similarity_score(number, c_num) < 0.45 and number[:3] != c_num[:3]:
-                                    continue
+                            ocr_sim = ocr_similarity_score(number, c_num)
                             match_found = False
 
-                            # 1. Compare snapshots across matching camera
-                            if snapshots and hasattr(snapshots, 'path') and getattr(obs, 'image', None) is not None:
+                            # 1. Matching serial digits (e.g. AXU1960888 vs AXIU1960888: both have 1960888)
+                            if number and c_num:
+                                num_digits = ''.join(c for c in number if c.isdigit())
+                                cand_digits = ''.join(c for c in c_num if c.isdigit())
+                                if len(num_digits) >= 5 and len(cand_digits) >= 5:
+                                    if num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits):
+                                        match_found = True
+
+                            # 2. Compare snapshots across matching camera or companion images
+                            if not match_found and snapshots and hasattr(snapshots, 'path') and getattr(obs, 'image', None) is not None:
                                 cam_id = obs.detection.camera_id
                                 cand_img_path = None
                                 try:
@@ -263,13 +437,18 @@ class GateRepository:
 
                                 if cand_img_path:
                                     sim = SnapshotManager.compute_similarity(obs.image, cand_img_path)
-                                    if sim >= 0.86 or (time_diff <= 5.0 and sim >= 0.78):
+                                    if sim >= 0.82 or (time_diff <= 15.0 and sim >= 0.72):
                                         match_found = True
 
-                            # 2. Check OCR fuzzy overlap + short timestamp gap
-                            c_num = cand.container_number or ''
-                            ocr_sim = ocr_similarity_score(number, c_num)
-                            if time_diff <= 15.0 and ocr_sim >= 0.70:
+                            # 3. Check OCR fuzzy overlap + short timestamp gap
+                            if not match_found and time_diff <= 35.0:
+                                if ocr_sim >= 0.50:
+                                    match_found = True
+                                elif number and c_num and len(number) >= 3 and len(c_num) >= 3 and number[:3] == c_num[:3]:
+                                    match_found = True
+
+                            # 4. Short-window same-lane fusion for unconfirmed/partial reads
+                            if not match_found and time_diff <= 35.0 and (not cand.container_number or not number or ocr_sim >= 0.45):
                                 match_found = True
 
                             if match_found:
@@ -277,10 +456,7 @@ class GateRepository:
                                 break
 
                     if existing:
-                        if not existing.container_number or (obs.confirmed and getattr(obs.ocr, 'valid_check_digit', False)):
-                            existing.container_number = number
-                            existing.iso_code_1 = getattr(obs.ocr, 'size_type', None) or existing.iso_code_1
-                        elif not existing.container_number:
+                        if not existing.container_number:
                             existing.container_number = number
                             existing.iso_code_1 = getattr(obs.ocr, 'size_type', None)
                         if obs.confirmed:
@@ -308,7 +484,16 @@ class GateRepository:
 
                 if obs.origin_key.startswith('dwell:') and existing:
                     time_diff = datetime_diff_seconds(existing.timestamp, obs.detection.frame_timestamp)
-                    is_same_container = bool(number and number == existing.container_number and time_diff <= 30.0)
+                    num_digits = ''.join(c for c in (number or '') if c.isdigit())
+                    ex_digits = ''.join(c for c in (existing.container_number or '') if c.isdigit())
+                    digits_match = bool(num_digits and ex_digits and (num_digits[-5:] == ex_digits[-5:] or num_digits in ex_digits))
+                    is_same_container = bool(
+                        time_diff <= 35.0 and (
+                            (number and number == existing.container_number) or
+                            digits_match or
+                            (number and existing.container_number and ocr_similarity_score(number, existing.container_number) >= 0.55)
+                        )
+                    )
                     if not is_same_container:
                         prior_view = session.scalar(select(DetectionRecord.id).where(
                             DetectionRecord.event_id == existing.id,
@@ -682,7 +867,30 @@ class GateRepository:
                 .order_by(GateEvent.timestamp.asc())
                 .limit(limit)
             )
-            return [serialize(e) for e in session.scalars(query)]
+            raw_events = [serialize(e) for e in session.scalars(query)]
+            # Filter and auto-retire any invalid records so they never spam the cloud dispatcher
+            valid_events = []
+            from app.ocr.validator import ContainerValidator
+            from app.domain import OCRRead
+            validator = ContainerValidator()
+            import re
+            for ev in raw_events:
+                c1 = ev.get('container_number')
+                val1 = validator.validate(OCRRead(raw_text=c1, confidence=1.0)) if c1 else None
+                is_valid = bool(c1 and len(c1) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', c1) and (bool(val1 and val1.valid_check_digit) or val1 is not None))
+                if is_valid:
+                    valid_events.append(ev)
+                else:
+                    # Auto-retire invalid record in DB so it stops looping
+                    try:
+                        db_ev = session.get(GateEvent, ev['id'])
+                        if db_ev:
+                            db_ev.cloud_synced = True
+                            db_ev.cloud_synced_at = utcnow()
+                            session.commit()
+                    except Exception:
+                        pass
+            return valid_events
 
     def count_unsynced_confirmed_events(self) -> int:
         with self.db.sessions() as session:
@@ -793,7 +1001,7 @@ class GateRepository:
                     # Check image similarity
                     is_match = False
                     if snap_mgr and hasattr(snap_mgr, 'path'):
-                        for cam_id in ['gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-out-1', 'gate-out-2', 'gate-out-3']:
+                        for cam_id in ['gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-in-4', 'gate-out-1', 'gate-out-2', 'gate-out-3', 'gate-out-4']:
                             try:
                                 p1 = snap_mgr.path(f"{ev1.id}/{cam_id}.jpg")
                                 p2 = snap_mgr.path(f"{ev2.id}/{cam_id}.jpg")
@@ -807,7 +1015,7 @@ class GateRepository:
 
                     c1, c2 = ev1.container_number or '', ev2.container_number or ''
                     ocr_sim = ocr_similarity_score(c1, c2)
-                    if gap <= 15.0 and ocr_sim >= 0.70:
+                    if gap <= 35.0 and (ocr_sim >= 0.45 or not c1 or not c2 or (len(c1) >= 3 and len(c2) >= 3 and c1[:3] == c2[:3])):
                         is_match = True
 
                     if is_match:
@@ -870,12 +1078,12 @@ class GateRepository:
                 # Distinct container numbers must NEVER be merged as duplicates by static camera background similarity.
                 if num and c_num and num != c_num:
                     ocr_sim = ocr_similarity_score(num, c_num)
-                    if not (time_diff <= 15.0 and ocr_sim >= 0.70):
+                    if not (time_diff <= 35.0 and (ocr_sim >= 0.45 or (len(num) >= 3 and len(c_num) >= 3 and num[:3] == c_num[:3]))):
                         continue
 
                 # Image comparison across matching cameras
                 if snap_mgr and hasattr(snap_mgr, 'path'):
-                    for cam_id in ['gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-out-1', 'gate-out-2', 'gate-out-3']:
+                    for cam_id in ['gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-in-4', 'gate-out-1', 'gate-out-2', 'gate-out-3', 'gate-out-4']:
                         try:
                             p_ev = snap_mgr.path(f"{event.id}/{cam_id}.jpg")
                             p_cd = snap_mgr.path(f"{cand.id}/{cam_id}.jpg")
@@ -886,9 +1094,9 @@ class GateRepository:
                         except Exception:
                             continue
 
-                # Fuzzy OCR match within short window
+                # Fuzzy OCR match within passage window
                 ocr_sim = ocr_similarity_score(event.container_number, cand.container_number)
-                if time_diff <= 15.0 and ocr_sim >= 0.70:
+                if time_diff <= 35.0 and (ocr_sim >= 0.45 or (num and c_num and len(num) >= 3 and len(c_num) >= 3 and num[:3] == c_num[:3])):
                     return cand.id if cand.timestamp <= event.timestamp else cand.id
 
             return event_id

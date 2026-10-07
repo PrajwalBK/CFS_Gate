@@ -156,3 +156,109 @@ def test_multicamera_event_snapshot_bundling(repository, snapshots, make_job):
     assert event_dir.is_dir()
     saved_files = list(event_dir.glob('*.jpg'))
     assert len(saved_files) == 4
+
+
+def test_single_passage_multicamera_and_noisy_reads_fused_into_single_event(repository, snapshots, make_job):
+    repository.sync_cameras([
+        CameraConfig(id='gate-out-1', name='Gate OUT 1', gate_id='lane-out', source_env='CAM_OUT_1'),
+        CameraConfig(id='gate-out-2', name='Gate OUT 2', gate_id='lane-out', source_env='CAM_OUT_2'),
+    ])
+    from app.domain import OCRRead
+    from app.ocr.validator import ContainerValidator
+
+    val_valid = ContainerValidator().validate(OCRRead('AXIU 196088 8', 0.99))
+    val_partial = ContainerValidator().validate(OCRRead('AXU1960888', 0.95))
+    val_noisy = ContainerValidator().validate(OCRRead('AXIU 981038 0', 0.85))
+
+    job1 = make_job(camera_id='gate-out-1', gate_id='lane-out', origin='dwell:gate-out-1:track1', direction='EXIT')
+    obs1 = Observation(job1.origin_key, job1.gate_id, job1.track_id, job1.detection, val_valid, job1.direction,
+                       job1.frame.image, job1.started_at, True)
+    eid1, created1 = repository.save_observation(obs1, snapshots, 35)
+    assert created1
+
+    # Second camera (gate-out-2) sees partial read AXU1960888 within 4 seconds
+    job2 = make_job(camera_id='gate-out-2', gate_id='lane-out', origin='dwell:gate-out-2:track2', direction='EXIT',
+                    timestamp=job1.frame.timestamp + timedelta(seconds=4))
+    obs2 = Observation(job2.origin_key, job2.gate_id, job2.track_id, job2.detection, val_partial, job2.direction,
+                       job2.frame.image, job2.started_at, False)
+    eid2, created2 = repository.save_observation(obs2, snapshots, 35)
+    assert not created2
+    assert eid2 == eid1
+
+    # First camera sees another track on the same moving container within 15 seconds
+    job3 = make_job(camera_id='gate-out-1', gate_id='lane-out', origin='dwell:gate-out-1:track3', direction='EXIT',
+                    timestamp=job1.frame.timestamp + timedelta(seconds=15))
+    obs3 = Observation(job3.origin_key, job3.gate_id, job3.track_id, job3.detection, val_noisy, job3.direction,
+                       job3.frame.image, job3.started_at, True)
+    eid3, created3 = repository.save_observation(obs3, snapshots, 35)
+    assert not created3
+    assert eid3 == eid1
+
+    # Exactly ONE event in repository for this single container passage
+    events = repository.events()
+    assert events['total'] == 1
+    event = repository.event(eid1)
+    assert event['container_number'] == 'AXIU1960888'
+
+
+def test_gate_in_and_gate_out_multicamera_trigger_and_companion_snapshots(repository, snapshots, make_job):
+    import numpy as np
+    from app.ocr.validator import ContainerValidator
+    from app.domain import OCRRead
+
+    # 1. Sync full gate setup: 3 cameras for Gate IN, 2 cameras for Gate OUT
+    repository.sync_cameras([
+        CameraConfig(id='gate-in-1', name='Gate IN 1 (Front/Top)', gate_id='lane-in', source_env='CAM_IN_1', role='FRONT_TOP', direction='ENTRY'),
+        CameraConfig(id='gate-in-2', name='Gate IN 2 (Left)', gate_id='lane-in', source_env='CAM_IN_2', role='LEFT', direction='ENTRY'),
+        CameraConfig(id='gate-in-3', name='Gate IN 3 (Rear)', gate_id='lane-in', source_env='CAM_IN_3', role='REAR', direction='ENTRY'),
+        CameraConfig(id='gate-out-1', name='Gate OUT 1 (Front/Top)', gate_id='lane-out', source_env='CAM_OUT_1', role='FRONT_TOP', direction='EXIT'),
+        CameraConfig(id='gate-out-2', name='Gate OUT 2 (Left)', gate_id='lane-out', source_env='CAM_OUT_2', role='LEFT', direction='EXIT'),
+    ])
+
+    # ------------------ TEST GATE IN (ENTRY) ------------------
+    # gate-in-1 triggers detection and captures companion frames from gate-in-2 and gate-in-3
+    job_in = make_job(camera_id='gate-in-1', gate_id='lane-in', origin='dwell:gate-in-1:trk1', direction='ENTRY')
+    val_in = ContainerValidator().validate(OCRRead('MSKU 123456 7', 0.98))
+    extra_in = {
+        'gate-in-2': np.full((100, 100, 3), 120, dtype=np.uint8),
+        'gate-in-3': np.full((100, 100, 3), 180, dtype=np.uint8),
+    }
+    obs_in = Observation(job_in.origin_key, job_in.gate_id, job_in.track_id, job_in.detection, val_in, job_in.direction,
+                         job_in.frame.image, job_in.started_at, True)
+    eid_in, created_in = repository.save_observation(obs_in, snapshots, 35, additional_frames=extra_in)
+    assert created_in
+    ev_in = repository.event(eid_in)
+    assert ev_in['gate_id'] == 'lane-in'
+    assert ev_in['event_type'] == 'ENTRY'
+    assert ev_in['container_number'] == 'MSKU1234567'
+    assert len(ev_in['snapshots']) == 3
+    in_cam_ids = {s['camera_id'] for s in ev_in['snapshots']}
+    assert in_cam_ids == {'gate-in-1', 'gate-in-2', 'gate-in-3'}
+
+    # ------------------ TEST GATE OUT (EXIT) ------------------
+    # gate-out-1 triggers detection and captures companion frame from gate-out-2
+    job_out = make_job(camera_id='gate-out-1', gate_id='lane-out', origin='dwell:gate-out-1:trk2', direction='EXIT')
+    val_out = ContainerValidator().validate(OCRRead('AXIU 196088 8', 0.99))
+    extra_out = {
+        'gate-out-2': np.full((100, 100, 3), 200, dtype=np.uint8),
+    }
+    obs_out = Observation(job_out.origin_key, job_out.gate_id, job_out.track_id, job_out.detection, val_out, job_out.direction,
+                          job_out.frame.image, job_out.started_at, True)
+    eid_out, created_out = repository.save_observation(obs_out, snapshots, 35, additional_frames=extra_out)
+    assert created_out
+    ev_out = repository.event(eid_out)
+    assert ev_out['gate_id'] == 'lane-out'
+    assert ev_out['event_type'] == 'EXIT'
+    assert ev_out['container_number'] == 'AXIU1960888'
+    assert len(ev_out['snapshots']) == 2
+    out_cam_ids = {s['camera_id'] for s in ev_out['snapshots']}
+    assert out_cam_ids == {'gate-out-1', 'gate-out-2'}
+
+    # Verify disk files exist for all snapshots of both events
+    in_dir = snapshots.root / eid_in
+    assert in_dir.is_dir()
+    assert len(list(in_dir.glob('*.jpg'))) == 3
+
+    out_dir = snapshots.root / eid_out
+    assert out_dir.is_dir()
+    assert len(list(out_dir.glob('*.jpg'))) == 2

@@ -157,7 +157,7 @@ class ViewOccupancy:
                 state.entrance_complete = state.stationary or (
                     (now - state.first_seen).total_seconds() >= self.settings.gate_observation_gap_seconds
                 )
-                if state.closed:
+                if state.closed and state.clear_since is not None:
                     return None
                 return det
             else:

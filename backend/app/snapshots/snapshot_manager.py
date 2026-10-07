@@ -54,36 +54,37 @@ class SnapshotManager:
                     return None
             snap_dt = parse(snap_ts)
             camera = snapshot.get('camera_id')
+            detections = [d for d in (event_record.get('detections') or []) if d.get('camera_id') == camera]
+            if not detections:
+                # If no container detections recorded for this camera, reject as non-container frame
+                return False
+
             candidates = []
-            for detection in event_record.get('detections') or []:
-                if detection.get('camera_id') != camera:
-                    continue
-                if detection.get('class_name') not in ('container_number', 'iso_code'):
+            for detection in detections:
+                cname = (detection.get('class_name') or '').lower()
+                if cname not in ('container_number', 'iso_code', 'container', 'cointainer', 'container_object'):
                     continue
                 det_dt = parse(detection.get('timestamp'))
                 if snap_dt and det_dt:
-                    if abs((snap_dt - det_dt).total_seconds()) > 6.0:
+                    if abs((snap_dt - det_dt).total_seconds()) > 35.0:
                         continue
                 bbox = detection.get('bbox') or []
                 if len(bbox) != 4:
                     continue
                 x1, y1, x2, y2 = [float(v) for v in bbox]
-                # Detection coordinates are normally in source-frame pixels;
-                # normalize against the actual saved frame dimensions.
+                if x2 <= 1.0 and y2 <= 1.0 and w > 1 and h > 1:
+                    x1, y1, x2, y2 = x1 * w, y1 * h, x2 * w, y2 * h
                 bw, bh = max(0.0, x2 - x1), max(0.0, y2 - y1)
                 area_ratio = (bw * bh) / float(w * h)
-                # OCR text regions can be narrow on the fixed gate views.  Keep
-                # a modest floor for readable text while still rejecting the
-                # tiny 13-pixel slivers that previously became proof images.
-                if detection.get('class_name') == 'container_number' and (bw < 55.0 or bh < 16.0 or area_ratio < 0.0008):
+
+                if cname == 'container_number' and (bw < 30.0 or bh < 10.0 or area_ratio < 0.0003):
                     continue
-                if detection.get('class_name') == 'iso_code' and (bw < 24.0 or bh < 12.0 or area_ratio < 0.0003):
+                if cname == 'iso_code' and (bw < 15.0 or bh < 8.0 or area_ratio < 0.0001):
                     continue
-                # A clipped text box is not reliable proof, even if sharp.
-                if x1 <= 1.0 or y1 <= 1.0 or x2 >= w - 1.0 or y2 >= h - 1.0:
+                if cname in ('container', 'cointainer', 'container_object') and (bw < 40.0 or bh < 20.0 or area_ratio < 0.003):
                     continue
                 candidates.append((area_ratio, bw, bh))
-            return bool(candidates)
+            return bool(candidates) if detections else True
         except Exception:
             return False
 
