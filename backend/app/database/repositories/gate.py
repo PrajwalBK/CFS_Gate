@@ -196,6 +196,7 @@ class GateRepository:
                             timestamp=frame_cand.timestamp
                         ))
                     else:
+                        existing_snap.image_path = img_path
                         existing_snap.timestamp = frame_cand.timestamp
 
                     # Record the container detection records for this camera
@@ -620,7 +621,12 @@ class GateRepository:
                                 if existing_other_snap.event_id != event_id:
                                     existing_other_snap.event_id = event_id
                             elif already_saved:
-                                already_saved.image_path = other_path
+                                if snapshots and hasattr(snapshots, 'path'):
+                                    try:
+                                        if snapshots.path(other_path).is_file():
+                                            already_saved.image_path = other_path
+                                    except Exception:
+                                        pass
                                 already_saved.timestamp = obs.detection.frame_timestamp
                             else:
                                 created_paths.append(other_path)
