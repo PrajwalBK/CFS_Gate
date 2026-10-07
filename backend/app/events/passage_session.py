@@ -456,6 +456,7 @@ class PassageSessionManager:
             if session:
                 session.add_ocr_candidate(read)
 
+
     def check_and_finalize(self, now: datetime,
                            gate_clear_seconds: float = 6.0) -> list[ContainerPassageSession]:
         """

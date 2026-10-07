@@ -26,7 +26,7 @@ from app.domain import Frame, Detection, Validation, utcnow
 from app.events.cloud_dispatcher import CloudOutboxDispatcher
 from app.events.event_manager import EventManager
 from app.events.gate_logic import update_direction
-from app.events.occupancy import ViewOccupancy
+from app.events.occupancy import ViewOccupancy, containment
 from app.events.passages import PassageCollector
 from app.metrics import Metrics
 from app.ocr.container_ocr import crop_identification
@@ -725,10 +725,27 @@ class GateRuntime:
             selected_set.add(selected)
 
         for track in tracks:
-            if selected_set and track.detection not in selected_set and not any(
-                iou(track.detection.bbox, sd.bbox) >= 0.20 for sd in selected_set
-            ):
+            is_valid_track = False
+            if not selected_set:
+                is_valid_track = True
+            elif track.detection in selected_set:
+                is_valid_track = True
+            else:
+                tb = track.detection.bbox
+                tcx = (tb[0] + tb[2]) / 2.0
+                tcy = (tb[1] + tb[3]) / 2.0
+                for sd in selected_set:
+                    sb = sd.bbox
+                    if iou(tb, sb) >= 0.20:
+                        is_valid_track = True
+                        break
+                    if track.detection.class_name in ('container_number', 'iso_code'):
+                        if (sb[0] <= tcx <= sb[2] and sb[1] <= tcy <= sb[3]) or containment(tb, sb) > 0.3:
+                            is_valid_track = True
+                            break
+            if not is_valid_track:
                 continue
+
             direction = update_direction(camera, track, frame.image.shape)
             with self._state_lock:
                 occupancy = occupant.current
@@ -737,12 +754,21 @@ class GateRuntime:
 
                 slot_pos = 'CONTAINER_1'
                 if len(primary_containers) >= 2:
+                    tb = track.detection.bbox
+                    tcx = (tb[0] + tb[2]) / 2.0
+                    tcy = (tb[1] + tb[3]) / 2.0
                     best_match_idx = 0
-                    best_overlap = -1.0
+                    min_dist = float('inf')
                     for c_idx, pc in enumerate(primary_containers):
-                        ov = iou(track.detection.bbox, pc.bbox)
-                        if ov > best_overlap:
-                            best_overlap = ov
+                        pb = pc.bbox
+                        if pb[0] <= tcx <= pb[2] and pb[1] <= tcy <= pb[3]:
+                            best_match_idx = c_idx
+                            break
+                        pcx = (pb[0] + pb[2]) / 2.0
+                        pcy = (pb[1] + pb[3]) / 2.0
+                        dist = ((tcx - pcx)**2 + (tcy - pcy)**2)**0.5
+                        if dist < min_dist:
+                            min_dist = dist
                             best_match_idx = c_idx
                     slot_pos = f"CONTAINER_{best_match_idx + 1}"
                 else:
@@ -1248,12 +1274,14 @@ class GateRuntime:
         try:
             additional = dict(getattr(job, 'companion_frames', {}) or {})
             ongoing = getattr(job, 'event_id', None)
-            active_session = self.passage_sessions.get_active_session(job.gate_id)
+            slot_pos = getattr(job, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+            active_session = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
             if active_session:
                 ongoing = ongoing or active_session.event_id
-                self.passage_sessions.record_ocr_result(job.gate_id, validation)
+                self.passage_sessions.record_ocr_result(job.gate_id, validation, container_slot=slot_pos)
             with self._state_lock:
-                active_lane = self._active_lane_events.get(job.gate_id)
+                lane_key = f"{job.gate_id}:{slot_pos}"
+                active_lane = self._active_lane_events.get(lane_key) or self._active_lane_events.get(job.gate_id)
                 if active_lane and active_lane.get('event_id'):
                     ongoing = ongoing or active_lane['event_id']
                 for view in self.cameras:
