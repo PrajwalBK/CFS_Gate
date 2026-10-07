@@ -275,9 +275,9 @@ class ContainerPassageSession:
                     best = max(frames, key=lambda f: f.quality_score)
                     if best.quality_score > 0.0:
                         has_container = any(
-                            getattr(d, 'class_name', '') in ('container', 'container_number', 'iso_code')
+                            getattr(d, 'class_name', '').lower() in ('container', 'cointainer', 'container_object', 'container_number', 'iso_code')
                             for d in (best.detections or [])
-                        )
+                        ) or best.quality_score > 10.0
                         if has_container:
                             best_by_camera[cam_id] = best
             return best_by_camera

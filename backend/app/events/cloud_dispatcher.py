@@ -597,6 +597,25 @@ class CloudOutboxDispatcher:
                                     try:
                                         snap_p = self.snapshots.path(snap['image_path'])
                                         if not snap_p.is_file():
+                                            event_id_str = str(event_record.get('id') if event_record else '')
+                                            camera_id_str = str(snap.get('camera_id') or cam_id)
+                                            snap_id_str = str(snap.get('id') or '')
+                                            event_dir = self.snapshots.root / event_id_str
+                                            if event_dir.is_dir():
+                                                cands = [
+                                                    event_dir / f"{camera_id_str}_{snap_id_str}.jpg",
+                                                    event_dir / f"{camera_id_str}_{snap_id_str}_rear.jpg",
+                                                    event_dir / f"{camera_id_str}.jpg",
+                                                    event_dir / f"{camera_id_str}.png",
+                                                ]
+                                                cands += list(event_dir.glob(f"*{camera_id_str}*.jpg"))
+                                                cands += list(event_dir.glob(f"*{camera_id_str}*.png"))
+                                                cands += list(event_dir.glob(f"*companion_{camera_id_str}.png"))
+                                                for cand in cands:
+                                                    if cand.is_file():
+                                                        snap_p = cand
+                                                        break
+                                        if not snap_p.is_file():
                                             continue
                                         data = snap_p.read_bytes()
                                         decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -619,22 +638,30 @@ class CloudOutboxDispatcher:
                                 if best_snap and best_data:
                                     best_by_camera[cam_id] = (best_snap, best_data)
 
-                            has_four_cams = any(c.lower().endswith(('-4', '-8')) or 'rear' in c.lower() for c in best_by_camera.keys())
+                            cam_roles = {}
+                            if self.runtime and getattr(self.runtime, 'cameras', None):
+                                for c in self.runtime.cameras:
+                                    cam_roles[c.id.lower()] = getattr(c, 'role', '')
+                            elif self.repository and hasattr(self.repository, 'cameras'):
+                                try:
+                                    for c in self.repository.cameras():
+                                        cam_roles[c.id.lower()] = getattr(c, 'role', '')
+                                except Exception:
+                                    pass
 
-                            def _cam_sort_key(c_id):
-                                c = c_id.lower()
-                                if any(k in c for k in ('1', 'front', 'top')) or c.endswith('-5'):
-                                    return (0, c)
-                                if any(k in c for k in ('2', 'left', 'side')) or c.endswith('-6'):
-                                    return (1, c)
-                                if any(k in c for k in ('right',)) or c.endswith('-7') or (c.endswith('-3') and has_four_cams):
-                                    return (2, c)
-                                if any(k in c for k in ('4', '8', 'rear', 'back')) or (c.endswith('-3') and not has_four_cams):
-                                    return (3, c)
-                                return (4, c)
+                            has_four_cams = any(c.lower().endswith(('-4', '-8')) or 'rear' in c.lower() for c in best_by_camera.keys())
 
                             def _cam_image_type(c_id):
                                 c = (c_id or '').lower()
+                                role = (cam_roles.get(c) or '').upper()
+                                if role in ('FRONT_TOP', 'FRONT'):
+                                    return 'FRONT'
+                                if role in ('LEFT', 'SIDE'):
+                                    return 'LEFT'
+                                if role in ('RIGHT',):
+                                    return 'RIGHT'
+                                if role in ('REAR', 'BACK'):
+                                    return 'REAR'
                                 if any(k in c for k in ('rear', 'back')) or c.endswith('-4') or c.endswith('-8'):
                                     return 'REAR'
                                 if any(k in c for k in ('left', 'side')) or c.endswith('-2') or c.endswith('-6'):
@@ -644,6 +671,11 @@ class CloudOutboxDispatcher:
                                 if c.endswith('-3'):
                                     return 'RIGHT' if has_four_cams else 'REAR'
                                 return 'FRONT'
+
+                            def _cam_sort_key(c_id):
+                                itype = _cam_image_type(c_id)
+                                order = {'FRONT': 0, 'LEFT': 1, 'RIGHT': 2, 'REAR': 3}
+                                return (order.get(itype, 4), c_id.lower())
 
                             for cam_id in sorted(best_by_camera.keys(), key=_cam_sort_key):
                                 snap, data = best_by_camera[cam_id]

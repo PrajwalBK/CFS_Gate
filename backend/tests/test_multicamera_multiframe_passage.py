@@ -642,6 +642,55 @@ def test_three_camera_per_gate_setup_dispatch(settings, repository, snapshots):
         assert img_types == ['FRONT', 'LEFT', 'REAR']
 
 
+def test_gate_out_three_camera_setup_dispatch(settings, repository, snapshots):
+    configs = [
+        CameraConfig(id='gate-out-1', name='Gate OUT 1', gate_id='lane-out', source_env='CAM_4', role='FRONT_TOP', direction='EXIT'),
+        CameraConfig(id='gate-out-2', name='Gate OUT 2', gate_id='lane-out', source_env='CAM_5', role='LEFT', direction='EXIT'),
+        CameraConfig(id='gate-out-3', name='Gate OUT 3', gate_id='lane-out', source_env='CAM_6', role='REAR', direction='EXIT'),
+    ]
+    repository.sync_cameras(configs)
+    session = ContainerPassageSession('TRACK_GATE_OUT_3CAM', 'lane-out', 'EXIT', [c.id for c in configs], datetime.now(timezone.utc))
+    t = datetime.now(timezone.utc)
+    for cam in configs:
+        pattern = 'C1_FRONT' if '1' in cam.id else ('C2_LEFT' if '2' in cam.id else 'C4_REAR')
+        img = _create_synthetic_test_frame(pattern)
+        session.add_frame(cam.id, img, t, [Detection(cam.id, t, 'container', 0.95, (10, 10, 300, 200))])
+
+    session.add_ocr_candidate(OCRRead('WXYZ 987654 3', 0.95))
+
+    event_id = repository.finalize_passage_session(session, snapshots)
+
+    cloud_settings = settings.model_copy(update={
+        'prosper_enabled': True,
+        'prosper_api_base_url': 'http://syapi.test.prosper.com',
+        'prosper_bearer_token': SecretStr('test-token'),
+    })
+    dispatcher = CloudOutboxDispatcher(cloud_settings, repository=repository, snapshots=snapshots)
+    with patch.object(dispatcher.session, 'post_gate_event', return_value=True) as mock_post:
+        dispatcher.start()
+        dispatcher.enqueue(None, event_id, force=True)
+
+        for _ in range(30):
+            if dispatcher.queue.empty() and mock_post.called:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+        payload = mock_post.call_args[0][0]
+        assert payload['id'] == event_id
+        assert payload['EventType'] == 'GATE_OUT'
+        assert payload['Containers'][0]['ContainerNumber'] == 'WXYZ9876543'
+
+        images = payload['Containers'][0]['Images']
+        assert len(images) == 3
+        cam_ids = [img['CameraId'] for img in images]
+        assert cam_ids == ['gate-out-1', 'gate-out-2', 'gate-out-3']
+        img_types = [img['ImageType'] for img in images]
+        assert img_types == ['FRONT', 'LEFT', 'REAR']
+
+
+
 
 
 
