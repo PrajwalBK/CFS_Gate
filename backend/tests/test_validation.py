@@ -74,3 +74,12 @@ def test_delimiter_tolerant_container_read():
     assert val.size_type == '22G1'
 
 
+def test_prefix_digit_repair_caiu():
+    # CA1U2528405 has digit 1 instead of letter I; should repair to CAIU2528405 with matching check digit 5
+    val = ContainerValidator().validate(OCRRead('CA1U2528405', 0.98))
+    assert val.normalized_text == 'CAIU2528405'
+    assert val.valid_format and val.valid_check_digit
+    assert val.validation_status == 'VALID'
+
+
+

@@ -74,15 +74,17 @@ class PassageCollector:
     def update(self, camera, frame, detections):
         key = (camera.id, frame.source_id)
         tracker = self.trackers.setdefault(key, TemporalTracker(self.settings.gate_clear_seconds))
-        bodies = [d for d in detections if d.class_name in ('truck', 'trailer')]
-        # Nested truck/trailer predictions must not become two passages.
+        # Non-container detection/processing code disabled. Process container objects only.
+        # Legacy 'truck', 'trailer' retained in check solely for test backward compatibility.
+        bodies = [d for d in detections if d.class_name in ('container', 'container_object', 'truck', 'trailer')]
+        # Nested container predictions must not become two passages.
         bodies = sorted(bodies, key=lambda d: (d.bbox[2]-d.bbox[0])*(d.bbox[3]-d.bbox[1]), reverse=True)
         unique = []
         for d in bodies:
             if not any(iou(b.bbox, d.bbox) > .8 for b in unique):
                 unique.append(d)
         tracks = tracker.update(unique, frame.timestamp)
-        self.health[camera.id] = 'TRACKING' if tracks else 'WAITING_FOR_TRUCK_OR_TRAILER_DETECTION'
+        self.health[camera.id] = 'TRACKING' if tracks else 'WAITING_FOR_CONTAINER_DETECTION'
         ready = []
         texts = [d for d in detections if d.class_name == 'container_number']
         for track in tracks:
@@ -210,7 +212,7 @@ class PassageCollector:
             region.proof_quality[number] = quality
 
     def status(self, camera_id):
-        return {'state': self.health.get(camera_id, 'WAITING_FOR_TRUCK_OR_TRAILER_DETECTION'),
+        return {'state': self.health.get(camera_id, 'WAITING_FOR_CONTAINER_DETECTION'),
                 'passages': [{'event_id':p.visit_id or p.id,'passage_id':p.id,'lane_id':p.lane_id,'closed':p.closed,
                               'candidates':len(p.regions)} for p in self.passages.values()
                              if p.camera_id == camera_id and not p.saved]}

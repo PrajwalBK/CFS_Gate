@@ -143,7 +143,9 @@ class ContainerPassageSession:
 
     def __init__(self, session_id: str, gate_id: str, direction: str,
                  cameras: list[str], created_at: datetime,
-                 target_frames_per_camera: int = 10):
+                 target_frames_per_camera: int = 10,
+                 container_slot: str = 'CONTAINER_1',
+                 track_id: Optional[int] = None):
         self.session_id = session_id
         self.gate_id = gate_id
         self.direction = direction
@@ -152,6 +154,8 @@ class ContainerPassageSession:
         self.last_seen = created_at
         self.clear_since: Optional[datetime] = None
         self.target_frames_per_camera = target_frames_per_camera
+        self.container_slot = container_slot
+        self.track_id = track_id
 
         self.event_id: str = str(uuid4())
         self.finalized: bool = False
@@ -333,8 +337,11 @@ class ContainerPassageSession:
 class PassageSessionManager:
     """
     Coordinates container passage sessions across Gate IN and Gate OUT lanes.
-    Guarantees that 1 physical container passage = 1 tracking session with 4 cameras
+    Guarantees that 1 physical container passage = 1 tracking session with all cameras
     and multiple frames per camera.
+    CRITICAL: Never merges or skips physical containers. Every container (including
+    two 20ft containers on a trailer) maintains its own independent session, track ID,
+    OCR consensus, and event ID.
     """
 
     def __init__(self, settings=None, target_frames_per_camera: Optional[int] = None):
@@ -343,18 +350,21 @@ class PassageSessionManager:
             self.target_frames_per_camera = target_frames_per_camera
         else:
             self.target_frames_per_camera = getattr(settings, 'passage_target_frames_per_camera', 10) if settings else 10
-        self.active_sessions: Dict[str, ContainerPassageSession] = {}  # gate_id -> session
+        self.active_sessions: Dict[str, ContainerPassageSession] = {}  # session_key -> session
         self.completed_sessions: Dict[str, ContainerPassageSession] = {}  # event_id -> session
         self._lock = threading.Lock()
 
     def get_or_create_session(self, gate_id: str, direction: str, timestamp: datetime,
-                              gate_cameras: list[str]) -> ContainerPassageSession:
+                              gate_cameras: list[str],
+                              container_slot: str = 'CONTAINER_1',
+                              track_id: Optional[int] = None) -> ContainerPassageSession:
         """
-        Retrieve active session for gate_id or initialize a new tracking session.
-        Fully dynamic: works with any number of cameras configured for that gate.
+        Retrieve active session for gate_id + container_slot or initialize a new tracking session.
+        Guarantees that each physical container (Container 1, Container 2) has its own independent session.
         """
+        key = f"{gate_id}:{container_slot}"
         with self._lock:
-            session = self.active_sessions.get(gate_id)
+            session = self.active_sessions.get(key)
             if session is None or session.finalized:
                 session_id = f"TRACK_{uuid4().hex[:8].upper()}"
                 session = ContainerPassageSession(
@@ -363,48 +373,86 @@ class PassageSessionManager:
                     direction=direction,
                     cameras=gate_cameras or [],
                     created_at=timestamp,
-                    target_frames_per_camera=self.target_frames_per_camera
+                    target_frames_per_camera=self.target_frames_per_camera,
+                    container_slot=container_slot,
+                    track_id=track_id
                 )
-                self.active_sessions[gate_id] = session
+                self.active_sessions[key] = session
                 log.info('passage_session_started', extra={
-                    'session_id': session_id, 'gate_id': gate_id, 'cameras': gate_cameras,
+                    'session_id': session_id, 'gate_id': gate_id,
+                    'container_slot': container_slot, 'track_id': track_id,
+                    'cameras': gate_cameras,
                     'target_frames_per_camera': self.target_frames_per_camera
                 })
             else:
                 session.last_seen = max(session.last_seen, timestamp)
                 session.clear_since = None
+                if track_id is not None and session.track_id is None:
+                    session.track_id = track_id
                 for c in (gate_cameras or []):
                     if c not in session.cameras:
                         session.cameras.append(c)
                         session.captured_frames.setdefault(c, [])
             return session
 
-    def get_active_session(self, gate_id: str) -> Optional[ContainerPassageSession]:
+    def get_active_session(self, gate_id: str, container_slot: str = 'CONTAINER_1') -> Optional[ContainerPassageSession]:
+        key = f"{gate_id}:{container_slot}"
         with self._lock:
-            return self.active_sessions.get(gate_id)
+            if key in self.active_sessions:
+                return self.active_sessions[key]
+            # Fallback to direct key or any active session on this gate
+            if gate_id in self.active_sessions:
+                return self.active_sessions[gate_id]
+            for k, s in self.active_sessions.items():
+                if k.startswith(f"{gate_id}:"):
+                    return s
+            return None
 
-    def mark_clearing(self, gate_id: str, timestamp: datetime):
+    def get_all_active_sessions(self, gate_id: Optional[str] = None) -> list[ContainerPassageSession]:
         with self._lock:
-            session = self.active_sessions.get(gate_id)
-            if session and not session.clear_since:
-                session.clear_since = timestamp
+            if gate_id:
+                return [s for k, s in self.active_sessions.items() if k.startswith(f"{gate_id}:") or k == gate_id]
+            return list(self.active_sessions.values())
+
+    def mark_clearing(self, gate_id: str, timestamp: datetime, container_slot: Optional[str] = None):
+        with self._lock:
+            if container_slot:
+                key = f"{gate_id}:{container_slot}"
+                session = self.active_sessions.get(key)
+                if session and not session.clear_since:
+                    session.clear_since = timestamp
+            else:
+                for k, session in self.active_sessions.items():
+                    if (k == gate_id or k.startswith(f"{gate_id}:")) and not session.clear_since:
+                        session.clear_since = timestamp
 
     def record_frame(self, camera_id: str, gate_id: str, direction: str,
                      image: np.ndarray, timestamp: datetime,
                      detections: list[Any] = (), ocr_read: Optional[OCRRead] = None,
-                     gate_cameras: list[str] = None, camera_role: str = '') -> CapturedFrameCandidate:
+                     gate_cameras: list[str] = None, camera_role: str = '',
+                     container_slot: str = 'CONTAINER_1',
+                     track_id: Optional[int] = None) -> Optional[CapturedFrameCandidate]:
         """
-        Record a frame into the active container passage session.
+        Record a frame into the active container passage session for the specified container slot.
         """
         cams = gate_cameras or [camera_id]
-        session = self.get_or_create_session(gate_id, direction, timestamp, cams)
+        session = self.get_or_create_session(
+            gate_id, direction, timestamp, cams,
+            container_slot=container_slot, track_id=track_id
+        )
         if detections:
             session.clear_since = None
         return session.add_frame(camera_id, image, timestamp, detections, ocr_read, camera_role)
 
-    def record_ocr_result(self, gate_id: str, read: OCRRead):
+    def record_ocr_result(self, gate_id: str, read: OCRRead, container_slot: str = 'CONTAINER_1'):
         with self._lock:
-            session = self.active_sessions.get(gate_id)
+            key = f"{gate_id}:{container_slot}"
+            session = self.active_sessions.get(key)
+            if not session:
+                for k, s in self.active_sessions.items():
+                    if k.startswith(f"{gate_id}:") or k == gate_id:
+                        session = s
+                        break
             if session:
                 session.add_ocr_candidate(read)
 
@@ -412,10 +460,11 @@ class PassageSessionManager:
                            gate_clear_seconds: float = 6.0) -> list[ContainerPassageSession]:
         """
         Check all active sessions and finalize those that are complete.
+        Each physical container finalizes into its own independent session and event.
         """
         ready_to_finalize = []
         with self._lock:
-            for gate_id, session in list(self.active_sessions.items()):
+            for key, session in list(self.active_sessions.items()):
                 if session.is_ready_to_finalize(now, gate_clear_seconds=gate_clear_seconds):
                     session.finalized = True
                     num, iso, conf = session.get_consensus_container_number()
@@ -426,14 +475,17 @@ class PassageSessionManager:
                     if conf > session.confirmed_confidence:
                         session.confirmed_confidence = conf
 
-                    self.active_sessions.pop(gate_id, None)
+                    self.active_sessions.pop(key, None)
                     self.completed_sessions[session.event_id] = session
                     ready_to_finalize.append(session)
                     log.info('passage_session_finalized', extra={
                         'session_id': session.session_id,
                         'event_id': session.event_id,
-                        'gate_id': gate_id,
+                        'gate_id': session.gate_id,
+                        'container_slot': session.container_slot,
+                        'track_id': session.track_id,
                         'frames_collected': {c: len(f) for c, f in session.captured_frames.items()},
                         'container_number': session.confirmed_container_number
                     })
         return ready_to_finalize
+

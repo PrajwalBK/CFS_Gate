@@ -225,6 +225,33 @@ class ContainerValidator:
                         c_pref = prefix + d6
                         candidates.add(c_pref + str(check_digit(c_pref)))
 
+        # Tolerant prefix digit repair: handles common OCR digit/letter confusions in owner prefix
+        # e.g. 'CA1U2528405' -> 'CAIU2528405', '0NEU1234567' -> 'ONEU1234567', 'T6HU1234567' -> 'TGHU1234567'
+        if not candidates:
+            prefix_digit_map = {
+                '1': ('I', 'L', 'T'),
+                '0': ('O', 'U'),
+                '8': ('B',),
+                '5': ('S',),
+                '6': ('G',),
+                '2': ('Z',),
+            }
+            cleaned_upper = normalize(raw)
+            for m in re.finditer(r'(?<![A-Z0-9])([A-Z0-9]{4})([0-9]{7})(?![A-Z0-9])', cleaned_upper):
+                pref = m.group(1)
+                ser = m.group(2)
+                exp_cd = int(ser[6])
+                lists = [prefix_digit_map.get(ch, (ch,)) if not ch.isalpha() else (ch,) for ch in pref[:3]]
+                last_chars = ('U', 'J', 'Z') if pref[3] in ('0', 'O', '1', 'U', 'J', 'Z') else (pref[3],)
+                lists.append(last_chars)
+                import itertools
+                for p_tuple in itertools.product(*lists):
+                    cand_code = ''.join(p_tuple) + ser
+                    if STRUCTURE.fullmatch(cand_code):
+                        calc_cd = check_digit(cand_code[:10])
+                        if calc_cd == exp_cd or (exp_cd, calc_cd) in CHECK_DIGIT_CONFUSIONS:
+                            candidates.add(cand_code[:10] + str(calc_cd))
+
         if len(candidates) > 1:
             valid_cands = [c for c in candidates if bool(STRUCTURE.fullmatch(c)) and check_digit(c[:10]) == int(c[10])]
             if len(valid_cands) == 1:

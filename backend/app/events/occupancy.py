@@ -111,6 +111,9 @@ class ViewOccupancy:
             if not any(containment(b, ex[1]) > 0.5 for ex in candidates):
                 candidates.append((d, b))
 
+        # Store all validated container candidates in ROI for multi-container tracking
+        self.selected_detections = [c[0] for c in candidates]
+
         state = self.current
         if state and state.source_id != frame.source_id:
             self.current = state = None  # Explicit source/calibration generation change.

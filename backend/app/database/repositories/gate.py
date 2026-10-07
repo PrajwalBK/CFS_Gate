@@ -219,8 +219,8 @@ class GateRepository:
                             id=d_id,
                             event_id=session.event_id,
                             camera_id=cam_id,
-                            origin_key=f"session:{session.session_id}:{cam_id}",
-                            track_id=1,
+                            origin_key=f"session:{session.session_id}:{cam_id}:{d_id}",
+                            track_id=int(getattr(session, 'track_id', 1) or 1),
                             class_name=cname,
                             confidence=float(getattr(d, 'confidence', 0.85) or 0.85),
                             bbox=list(getattr(d, 'bbox', [0.0, 0.0, 1.0, 1.0])),
@@ -236,8 +236,8 @@ class GateRepository:
                             id=d_id,
                             event_id=session.event_id,
                             camera_id=cam_id,
-                            origin_key=f"session:{session.session_id}:{cam_id}",
-                            track_id=1,
+                            origin_key=f"session:{session.session_id}:{cam_id}:{d_id}",
+                            track_id=int(getattr(session, 'track_id', 1) or 1),
                             class_name='container',
                             confidence=0.90,
                             bbox=[0.0, 0.0, 1.0, 1.0],
@@ -253,7 +253,7 @@ class GateRepository:
                         event_id=session.event_id,
                         camera_id=primary_cam,
                         origin_key=f"session:{session.session_id}",
-                        track_id=1,
+                        track_id=int(getattr(session, 'track_id', 1) or 1),
                         class_name='container',
                         confidence=max(0.85, conf),
                         bbox=[0.0, 0.0, 1.0, 1.0],
@@ -412,6 +412,14 @@ class GateRepository:
                                 if len(num_digits) >= 5 and len(cand_digits) >= 5:
                                     if num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits):
                                         match_found = True
+
+                            # Distinct verified container numbers must NEVER be merged as duplicates by static camera background similarity.
+                            if number and c_num and number != c_num:
+                                num_digits = ''.join(c for c in number if c.isdigit())
+                                cand_digits = ''.join(c for c in c_num if c.isdigit())
+                                digits_match = bool(len(num_digits) >= 5 and len(cand_digits) >= 5 and (num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits)))
+                                if not (ocr_sim >= 0.50 or digits_match):
+                                    continue  # Distinct physical containers! NEVER merge!
 
                             # 2. Compare snapshots across matching camera or companion images
                             if not match_found and snapshots and hasattr(snapshots, 'path') and getattr(obs, 'image', None) is not None:

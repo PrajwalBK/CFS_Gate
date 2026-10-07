@@ -64,3 +64,78 @@ def test_clipped_identification_crop():
     assert crop_identification(image, (-30, -10, 250, 150), (.5, .5, 1, 1)).shape == (50, 100, 3)
     with pytest.raises(ValueError):
         crop_identification(image, (300, 100, 350, 120))
+
+
+def test_non_container_objects_strictly_filtered_by_yolo_detector(settings, make_job):
+    class Box:
+        def __init__(self, cls_id):
+            self.cls = np.array(cls_id)
+            self.conf = np.array(.90)
+            self.xyxy = np.array([[10, 10, 100, 80]])
+
+    class MultiClassModel:
+        def predict(self, **kwargs):
+            # Model outputs truck, car, person, trailer, and container classes
+            names = {
+                0: 'truck',
+                1: 'car',
+                2: 'person',
+                3: 'trailer',
+                4: 'container',
+                5: 'container_number',
+                6: 'iso_code',
+            }
+            boxes = [Box(i) for i in range(7)]
+            return [SimpleNamespace(names=names, boxes=boxes)]
+
+    frame = make_job().frame
+    detector = YoloDetector(settings, MultiClassModel())
+
+    # detect_vehicles is disabled and returns empty list
+    assert detector.detect_vehicles(frame) == []
+
+    # detect() strictly discards truck, car, person, trailer; outputs only container classes
+    detections = detector.detect(frame)
+    detected_classes = [d.class_name for d in detections]
+    assert 'truck' not in detected_classes
+    assert 'car' not in detected_classes
+    assert 'person' not in detected_classes
+    assert 'trailer' not in detected_classes
+    assert set(detected_classes) == {'container', 'container_number', 'iso_code'}
+
+
+def test_runtime_processes_only_containers(settings, camera, repository, snapshots, make_job):
+    from app.runtime import GateRuntime
+
+    runtime = GateRuntime(settings, [camera], repository, snapshots)
+
+    class ContainerAndNonContainerDetector:
+        def detect(self, frame):
+            # Mix of container and non-container objects
+            return [
+                Detection(camera.id, frame.timestamp, 'truck', 0.95, (10, 10, 120, 80)),
+                Detection(camera.id, frame.timestamp, 'person', 0.90, (5, 5, 30, 70)),
+                Detection(camera.id, frame.timestamp, 'container', 0.92, (20, 20, 140, 90)),
+                Detection(camera.id, frame.timestamp, 'container_number', 0.94, (30, 30, 90, 50)),
+            ]
+
+    runtime.detector = ContainerAndNonContainerDetector()
+    frame = make_job().frame
+
+    runtime.process_frame(camera, frame)
+
+    # Preview detections must contain only container and container_number
+    _src, _ts, preview = runtime._preview_detections[camera.id]
+    assert len(preview) == 2
+    preview_classes = {d.class_name for d in preview}
+    assert preview_classes == {'container', 'container_number'}
+    assert 'truck' not in preview_classes
+    assert 'person' not in preview_classes
+
+    # Active passage session received only container detections
+    active_sess = runtime.passage_sessions.get_active_session(camera.gate_id)
+    assert active_sess is not None
+    assert len(active_sess.captured_frames[camera.id]) >= 1
+    recorded_dets = active_sess.captured_frames[camera.id][0].detections
+    assert all(d.class_name in ('container', 'container_number', 'iso_code') for d in recorded_dets)
+

@@ -48,6 +48,36 @@ class TemporalTracker:
             observed.append(track)
             used_tracks.add(tid)
             used_detections.add(index)
+
+        # Proximity recovery: recover temporarily missed container tracks when visible again
+        for tid, track in self.tracks.items():
+            if tid in used_tracks:
+                continue
+            tb = track.detection.bbox
+            tcx, tcy = (tb[0] + tb[2]) / 2.0, (tb[1] + tb[3]) / 2.0
+            tw, th = max(1.0, tb[2] - tb[0]), max(1.0, tb[3] - tb[1])
+            tdiag = (tw**2 + th**2)**0.5
+            best_idx = None
+            best_dist = float('inf')
+            for index, det in enumerate(detections):
+                if index in used_detections or det.class_name != track.detection.class_name:
+                    continue
+                db = det.bbox
+                dcx, dcy = (db[0] + db[2]) / 2.0, (db[1] + db[3]) / 2.0
+                dist = ((tcx - dcx)**2 + (tcy - dcy)**2)**0.5
+                norm_dist = dist / tdiag
+                dw, dh = max(1.0, db[2] - db[0]), max(1.0, db[3] - db[1])
+                area_ratio = min(tw * th, dw * dh) / max(tw * th, dw * dh)
+                if norm_dist <= 0.65 and area_ratio >= 0.35 and dist < best_dist:
+                    best_dist = dist
+                    best_idx = index
+            if best_idx is not None:
+                track.detection, track.last_seen = detections[best_idx], timestamp
+                track.hits += 1
+                observed.append(track)
+                used_tracks.add(tid)
+                used_detections.add(best_idx)
+
         for index, detection in enumerate(detections):
             if index not in used_detections:
                 track = Track(self._next, detection, timestamp, timestamp)
