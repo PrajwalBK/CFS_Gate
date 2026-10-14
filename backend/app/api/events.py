@@ -47,9 +47,7 @@ def event_json(event_id: str, request: Request):
     result = request.app.state.repository.event(event_id)
     if result is None:
         raise HTTPException(404, 'Event not found')
-    json_path = request.app.state.snapshots.root / event_id / 'event.json'
-    if not json_path.is_file():
-        json_path = request.app.state.snapshots.save_event_json(event_id, result)
+    json_path = request.app.state.snapshots.save_event_json(event_id, result)
     return FileResponse(json_path, media_type='application/json', filename=f'event_{event_id}.json')
 
 
@@ -66,27 +64,7 @@ def snapshot(snapshot_id: str, request: Request, proof: bool = False):
         raise HTTPException(404, 'Snapshot not found')
     path = request.app.state.snapshots.path(row['image_path'])
     if not path.is_file():
-        # Fallback resolution across possible filenames for this camera and event
-        event_id = row.get('event_id')
-        camera_id = row.get('camera_id')
-        snap_mgr = request.app.state.snapshots
-        event_dir = snap_mgr.root / str(event_id)
-        if event_dir.is_dir():
-            candidates = [
-                event_dir / f"{camera_id}_{snapshot_id}.jpg",
-                event_dir / f"{camera_id}_{snapshot_id}_rear.jpg",
-                event_dir / f"{camera_id}.jpg",
-                event_dir / f"{camera_id}.png",
-            ]
-            candidates += list(event_dir.glob(f"*{camera_id}*.jpg"))
-            candidates += list(event_dir.glob(f"*{camera_id}*.png"))
-            candidates += list(event_dir.glob(f"*companion_{camera_id}.png"))
-            for cand in candidates:
-                if cand.is_file():
-                    path = cand
-                    break
-        if not path.is_file():
-            raise HTTPException(404, 'Snapshot file unavailable')
+        raise HTTPException(404, 'Snapshot file unavailable')
     if proof:
         event_record = request.app.state.repository.event(row['event_id'])
         data = proof_jpeg(path.read_bytes(), row, event_record or {})

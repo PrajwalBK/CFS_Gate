@@ -174,157 +174,29 @@ class ContainerValidator:
         sanitized = sanitize_ocr_text(raw_input)
         if not sanitized or normalize(sanitized) in ('', 'CPIPCAM', 'CPIP', 'IPCAM', 'CAM', 'PROOF'):
             return Validation('', '', 0.0, False, False, 'INVALID_FORMAT')
-
         raw = correct_feet_size_codes(sanitized)
-        single_line_raw = ' '.join(raw.splitlines())
-
+        # Only normalize separators around characters actually read. A checksum
+        # cannot establish an unseen digit, owner prefix, or character repair.
         candidates = {normalize(m.group(1)) for m in CANDIDATE.finditer(raw.upper())}
-        if not candidates and single_line_raw != raw:
-            candidates = {normalize(m.group(1)) for m in CANDIDATE.finditer(single_line_raw.upper())}
-
-        # Tolerant delimiter candidate matching: handles OCR delimiter noise like 'TRHU1 1545895',
-        # 'TRHU | 154589 [5]', 'TRHU - 154589 5', 'TRHU/1545895'
         if not candidates:
-            tolerant_matches = re.finditer(
-                r'(?<![A-Z0-9])([A-Z]{3}[UJZ])[ \t\r\n\-.:/|]*([0-9Il|/ \t\-.:]{6,12})(?![0-9])',
-                raw.upper()
-            )
-            for m in tolerant_matches:
-                prefix = m.group(1)
-                first_line_digits = m.group(2).splitlines()[0]
-                cleaned_digits = re.sub(r'[^0-9]', '', first_line_digits.replace('I', '1').replace('L', '1').replace('|', '1'))
-                has_separator = any(c in m.group(0) for c in ' \t\r\n-.:/|')
-                if len(cleaned_digits) == 7:
-                    candidates.add(prefix + cleaned_digits)
-                elif len(cleaned_digits) == 8 and has_separator:
-                    # Delimiter character read as 1/0/I before serial number (e.g. TRHU1 1545895 -> TRHU 154589 5)
-                    c1_pref = prefix + cleaned_digits[1:7]
-                    cd1_expected = int(cleaned_digits[7])
-                    cd1_calc = check_digit(c1_pref)
-                    if cd1_calc == cd1_expected or (cd1_expected, cd1_calc) in CHECK_DIGIT_CONFUSIONS:
-                        candidates.add(c1_pref + str(cd1_calc))
-                elif len(cleaned_digits) == 6 and has_separator:
-                    c_pref = prefix + cleaned_digits
-                    candidates.add(c_pref + str(check_digit(c_pref)))
-
-        # Handle cases where container prefix and serial digits are separated by size codes or words
-        # (e.g. 'TGHU 4561 905915 7' or 'TGHU 45G1 905915 7')
-        if not candidates:
-            pref_matches = list(re.finditer(r'(?<![A-Z0-9])([A-Z]{3}[UJZ])(?![A-Z0-9])', raw.upper()))
-            for pm in pref_matches:
-                prefix = pm.group(1)
-                spaced = re.findall(r'(?<![0-9])([0-9]{6})\s*([0-9])(?![0-9])', raw)
-                d_cands = [d[0] + d[1] for d in spaced] + re.findall(r'(?<![0-9])([0-9]{7})(?![0-9])', raw)
-                for dc in d_cands:
-                    c_full = prefix + dc
-                    if check_digit(c_full[:10]) == int(c_full[10]) or (int(c_full[10]), check_digit(c_full[:10])) in CHECK_DIGIT_CONFUSIONS:
-                        candidates.add(c_full[:10] + str(check_digit(c_full[:10])))
-                if not candidates:
-                    d6_cands = re.findall(r'(?<![0-9])([0-9]{6})(?![0-9])', raw)
-                    for d6 in d6_cands:
-                        c_pref = prefix + d6
-                        candidates.add(c_pref + str(check_digit(c_pref)))
-
-        # Tolerant prefix digit repair: handles common OCR digit/letter confusions in owner prefix
-        # e.g. 'CA1U2528405' -> 'CAIU2528405', '0NEU1234567' -> 'ONEU1234567', 'T6HU1234567' -> 'TGHU1234567'
-        if not candidates:
-            prefix_digit_map = {
-                '1': ('I', 'L', 'T'),
-                '0': ('O', 'U'),
-                '8': ('B',),
-                '5': ('S',),
-                '6': ('G',),
-                '2': ('Z',),
-            }
-            cleaned_upper = normalize(raw)
-            for m in re.finditer(r'(?<![A-Z0-9])([A-Z0-9]{4})([0-9]{7})(?![A-Z0-9])', cleaned_upper):
-                pref = m.group(1)
-                ser = m.group(2)
-                exp_cd = int(ser[6])
-                lists = [prefix_digit_map.get(ch, (ch,)) if not ch.isalpha() else (ch,) for ch in pref[:3]]
-                last_chars = ('U', 'J', 'Z') if pref[3] in ('0', 'O', '1', 'U', 'J', 'Z') else (pref[3],)
-                lists.append(last_chars)
-                import itertools
-                for p_tuple in itertools.product(*lists):
-                    cand_code = ''.join(p_tuple) + ser
-                    if STRUCTURE.fullmatch(cand_code):
-                        calc_cd = check_digit(cand_code[:10])
-                        if calc_cd == exp_cd or (exp_cd, calc_cd) in CHECK_DIGIT_CONFUSIONS:
-                            candidates.add(cand_code[:10] + str(calc_cd))
-
+            delimiters = re.compile(
+                r'(?<![A-Z0-9])([A-Z]{3}[UJZ])[\s\-.:/|\[\]()]*'
+                r'((?:[0-9][\s\-.:/|\[\]()]*){7})(?![0-9A-Z])')
+            candidates = {m.group(1) + re.sub(r'[^0-9]', '', m.group(2))
+                          for m in delimiters.finditer(raw.upper())}
         if len(candidates) > 1:
-            valid_cands = [c for c in candidates if bool(STRUCTURE.fullmatch(c)) and check_digit(c[:10]) == int(c[10])]
-            if len(valid_cands) == 1:
-                normalized = valid_cands[0]
-            else:
-                return Validation(raw, '', read.confidence, False, False, 'AMBIGUOUS')
-        elif candidates:
+            return Validation(raw, '', read.confidence, False, False, 'AMBIGUOUS')
+        if candidates:
             normalized = next(iter(candidates))
         else:
-            six_match = re.search(r'(?<![A-Z0-9])([A-Z][\s-]*[A-Z][\s-]*[A-Z][\s-]*[UJZ](?:[\s-]*[0-9]){6})(?![A-Z0-9])', raw.upper())
-            if six_match:
-                prefix = normalize(six_match.group(1))
-                normalized = prefix + str(check_digit(prefix))
-            else:
-                # 1. Check if this reading is strictly an ISO size/type code (e.g. 22G1, 45G1)
-                size_match = SIZE_CODE_PATTERN.search(raw)
-                if size_match and sum(1 for c in normalize(raw) if c.isalpha()) <= 2:
-                    iso_code = f'{size_match.group(1)}{size_match.group(2)}{size_match.group(3).upper()}{size_match.group(4).upper()}'
-                    return Validation(raw, iso_code, read.confidence, True, False, 'VALID_SIZE_CODE', size_type=iso_code)
-
-                # Check for 3 owner letters followed by 6 digits where the 4th letter 'U' was omitted or read as '0'/'O'
-                three_letter_match = re.search(r'(?<![A-Z0-9])([A-Z]{3})[\s-]*[0O]?[\s-]*([0-9]{6})(?:[\s-]*([0-9]))?(?![A-Z0-9])', raw.upper())
-                subst_found = False
-                if three_letter_match:
-                    pref3 = three_letter_match.group(1)
-                    ser6 = three_letter_match.group(2)
-                    read_cd = int(three_letter_match.group(3)) if three_letter_match.group(3) else None
-                    candidate_prefix = f"{pref3}U{ser6}"
-                    calc_cd = check_digit(candidate_prefix)
-                    if read_cd is None or read_cd == calc_cd or (read_cd, calc_cd) in CHECK_DIGIT_CONFUSIONS:
-                        normalized = candidate_prefix + str(calc_cd)
-                        subst_found = True
-                if not subst_found:
-                    brand_found = False
-                    for brand, bic in BRAND_PREFIX_MAP.items():
-                        if brand in raw.upper():
-                            digit_match = re.search(r'(?<![0-9])([0-9]{6})(?:[\s-]*([0-9]))?(?![0-9])', raw)
-                            if digit_match:
-                                prefix = f"{bic}{digit_match.group(1)}"
-                                normalized = prefix + str(check_digit(prefix))
-                                brand_found = True
-                                break
-                    if not brand_found:
-                        normalized = normalize(raw)[:256]
-
+            size_match = SIZE_CODE_PATTERN.fullmatch(raw.strip())
+            if size_match:
+                code = ''.join(size_match.groups()).upper()
+                return Validation(raw, code, read.confidence, True, False, 'VALID_SIZE_CODE', size_type=code)
+            normalized = normalize(raw)[:256]
         valid_format = bool(STRUCTURE.fullmatch(normalized))
-        valid_digit = False
-        if valid_format:
-            expected_digit = int(normalized[10])
-            calc_digit = check_digit(normalized[:10])
-            if calc_digit == expected_digit:
-                valid_digit = True
-            else:
-                # Check if 'C' was misread for 'G' (or 'G' for 'C') in owner letters
-                for pos in range(3):
-                    if normalized[pos] == 'C':
-                        candidate_prefix = normalized[:pos] + 'G' + normalized[pos + 1:10]
-                        if check_digit(candidate_prefix) == expected_digit:
-                            normalized = candidate_prefix + str(expected_digit)
-                            valid_digit = True
-                            break
-                if not valid_digit:
-                    # Check if check digit was visually confused in OCR
-                    if (expected_digit, calc_digit) in CHECK_DIGIT_CONFUSIONS:
-                        normalized = normalized[:10] + str(calc_digit)
-                        valid_digit = True
-
-        # Reject known hallucinations from old prompt examples
-        if normalized in ('TIIU5077669', 'MSCU6546021'):
-            return Validation(raw, '', 0.0, False, False, 'PROMPT_LEAK_DISCARDED')
-
+        valid_digit = is_valid_iso_6346(normalized)
         status = 'VALID' if valid_digit else 'INVALID_CHECK_DIGIT' if valid_format else 'INVALID_FORMAT'
         iso_code, human_size = extract_iso_size_code(raw)
-        return Validation(raw, normalized, read.confidence, valid_format, valid_digit, status, size_type=iso_code or human_size)
-
-
+        return Validation(raw, normalized, read.confidence, valid_format, valid_digit, status,
+                          size_type=iso_code or human_size)

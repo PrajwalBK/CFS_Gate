@@ -9,6 +9,19 @@ from app.runtime import OCRJob
 from app.snapshots.snapshot_manager import SnapshotManager
 
 
+def pytest_addoption(parser):
+    parser.addoption('--run-live-deployment', action='store_true', default=False,
+                     help='Run read-only checks against the server on localhost:8001')
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption('--run-live-deployment'):
+        skip = pytest.mark.skip(reason='Live checks require --run-live-deployment')
+        for item in items:
+            if 'live_deployment' in item.keywords:
+                item.add_marker(skip)
+
+
 @pytest.fixture
 def settings(tmp_path):
     return Settings(_env_file=None, deployment_mode='test', database_url='sqlite+pysqlite:///' + str(tmp_path / 'test.db'),

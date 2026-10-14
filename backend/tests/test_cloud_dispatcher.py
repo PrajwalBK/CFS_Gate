@@ -81,7 +81,7 @@ def test_prosper_session_post_gate_event(mock_settings):
         'id': 'event-1',
         'gateId': 'gate-lane-1',
         'timestamp': '2026-09-09T12:00:00.000Z',
-        'containerNumber': 'MSKU1234567',
+        'containerNumber': 'MSKU1234565',
         'eventType': 'ENTRY',
         'deviceId': 'device-uuid-1',
         'confidence': 0.95,
@@ -160,7 +160,7 @@ def test_cloud_dispatcher_enqueue_and_sync(mock_settings):
         confidence=0.95,
         bbox=(10.0, 10.0, 50.0, 50.0),
     )
-    val = Validation(raw_text='MSKU 123456-7', normalized_text='MSKU1234567',
+    val = Validation(raw_text='MSKU 123456-5', normalized_text='MSKU1234565',
                      confidence=0.95, valid_format=True, valid_check_digit=True,
                      validation_status='VALID')
     obs = Observation('origin-1', 'gate-lane-1', 1, det, val, 'ENTRY', dummy_img, utcnow(), confirmed=True)
@@ -182,7 +182,7 @@ def test_cloud_dispatcher_enqueue_and_sync(mock_settings):
         assert mock_post.called
         call_payload = mock_post.call_args[0][0]
         assert call_payload['id'] == 'evt-uuid-123'
-        assert call_payload['containerNumber'] == 'MSKU1234567'
+        assert call_payload['containerNumber'] == 'MSKU1234565'
         assert call_payload['EventType'] in ('GATE_IN', 'GATE_OUT')
         assert metrics.increment.called
 
@@ -197,7 +197,7 @@ def test_syapi_gate_event_schema(mock_settings):
         confidence=0.96,
         bbox=(5.0, 5.0, 25.0, 25.0),
     )
-    val = Validation(raw_text='MSCU 111111 1', normalized_text='MSCU1111111',
+    val = Validation(raw_text='MSCU 111111 3', normalized_text='MSCU1111113',
                      confidence=0.96, valid_format=True, valid_check_digit=True,
                      validation_status='VALID', size_type='22G1')
     obs = Observation('origin-syapi', 'LANE-1', 10, det, val, 'ENTRY', dummy_img, utcnow(), confirmed=True)
@@ -222,7 +222,7 @@ def test_syapi_gate_event_schema(mock_settings):
         assert payload['Driver'] is None
         assert len(payload['Containers']) == 1
         container = payload['Containers'][0]
-        assert container['ContainerNumber'] == 'MSCU1111111'
+        assert container['ContainerNumber'] == 'MSCU1111113'
         assert container['ContainerNumberConfidence'] == 0.96
         assert container['Size'] == '20'
         assert container['Position'] == 'SINGLE'
@@ -277,6 +277,12 @@ def test_each_camera_sends_one_image_without_duplicate_views(mock_settings, tmp_
             {'id': 'snap-3', 'camera_id': 'gate-in-3', 'image_path': 'evt-123/gate-in-3.jpg', 'timestamp': '2026-09-30T10:00:03Z'},
         ]
     }
+    import hashlib
+    for snapshot in mock_repo.event.return_value['snapshots']:
+        snapshot['provenance'] = {'image_sha256': hashlib.sha256(buf.tobytes()).hexdigest()}
+    selected = [s for s in mock_repo.event.return_value['snapshots'] if s['id'] != 'snap-2b']
+    mock_snaps.build_evidence_manifest.return_value = {'captures': selected,
+        'primary_snapshot_id': 'snap-2a', 'rear_snapshot_id': 'snap-3'}
     mock_repo.canonical_event_id.return_value = 'evt-123'
 
     dispatcher = CloudOutboxDispatcher(mock_settings, repository=mock_repo, snapshots=mock_snaps)

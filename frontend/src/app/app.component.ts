@@ -298,4 +298,9 @@ export class AppComponent {
       }
     });
   }
+
+  cloudFailureCount() {
+    const counts = this.cloudSync()?.delivery_counts;
+    return (counts?.['REJECTED'] || 0) + (counts?.['BLOCKED'] || 0) + (counts?.['CONFLICT'] || 0);
+  }
 }

@@ -726,7 +726,9 @@ class CloudOutboxDispatcher:
                             size_1 = '45'
                         else:
                             size_1 = '40'
-                        conf_1 = float(getattr(obs.ocr, 'confidence', 0.95)) if (obs and obs.ocr and obs.ocr.confidence) else 0.95
+                        confidences = [float(o.get('confidence') or 0) for o in (event_record.get('ocr_results') or [])
+                            if o.get('normalized_text') == cntr1 and o.get('valid_check_digit')] if event_record else []
+                        conf_1 = max(confidences, default=float(obs.ocr.confidence) if (obs and obs.ocr and obs.ocr.confidence) else 0.95)
                         containers_list.append({
                             'ContainerNumber': cntr1,
                             'ContainerNumberConfidence': round(conf_1, 2),
@@ -774,6 +776,14 @@ class CloudOutboxDispatcher:
                         'Containers': containers_list
                     }
 
+                from app.ocr.validator import is_valid_iso_6346
+                numbers = [c.get('ContainerNumber') for c in payload.get('Containers', [])]
+                if not numbers or not all(is_valid_iso_6346(n) for n in numbers):
+                    if self.repository:
+                        self.repository.mark_cloud_delivery(event_id, 'BLOCKED', 'Invalid container checksum')
+                    self.queue.task_done()
+                    continue
+
                 success = self.session.post_gate_event(payload)
                 if success == 'REJECTED' and self.runtime:
                     try:
@@ -794,10 +804,10 @@ class CloudOutboxDispatcher:
                     log.info('prosper_event_buffered_offline: Event %s buffered locally; will auto-sync when cloud service is available.', event_id)
 
             except Exception as exc:
-                log.warning('prosper_dispatch_exception', extra={'event_id': event_id, 'error': str(exc)})
+                log.exception('prosper_dispatch_exception: %s', exc)
                 success = 'OFFLINE'
 
-            if success in (True, 'CONFLICT') or isinstance(success, dict):
+            if success is True or isinstance(success, dict):
                 self._is_online = True
                 self._last_sync_time = datetime.now(timezone.utc).isoformat()
                 self._last_error = None
@@ -815,12 +825,21 @@ class CloudOutboxDispatcher:
                 self.queue.task_done()
             else:
                 self._is_online = False
+                if self.repository:
+                    try:
+                        self.repository.mark_cloud_delivery(
+                            event_id,
+                            success if success in ('REJECTED', 'CONFLICT', 'OFFLINE') else 'OFFLINE',
+                            'Cloud did not accept event'
+                        )
+                    except Exception:
+                        pass
                 if success == 'REJECTED':
                     self._last_error = 'Cloud rejected payload (validation or authentication error)'
-                    # Cloud explicitly rejected this payload (e.g. 400 Bad Request, 422 Unprocessable)
-                    # Do not loop-retry indefinitely; mark as synced in database
-                    if self.repository:
-                        self.repository.mark_cloud_synced(event_id)
+                    self.queue.task_done()
+                    continue
+                elif success == 'CONFLICT':
+                    self._last_error = 'Cloud conflict; event remains pending for retry'
                     self.queue.task_done()
                     continue
                 elif success == 'OFFLINE':

@@ -1,0 +1,24 @@
+{
+  "configuration": {
+    "model": "models\\acceptance-candidate.pt",
+    "image_size": 960,
+    "confidence": 0.35
+  },
+  "groups": {
+    "00170a25-2d73-4cd4-8a16-785daf33a76b": {
+      "frames": 14,
+      "frames_with_body": 13
+    },
+    "009bd7d9-c895-49d9-89b5-0803e2398440": {
+      "frames": 3,
+      "frames_with_body": 3
+    },
+    "03936924-a3f9-49f1-9ba6-2883235e9f3f": {
+      "frames": 37,
+      "frames_with_body": 37
+    }
+  },
+  "warm_p50_ms": 88.08630000203266,
+  "warm_p95_ms": 93.6126399989007,
+  "scope": "body detection presence, not independently labelled box accuracy or end-to-end API latency; tests ran concurrently"
+}

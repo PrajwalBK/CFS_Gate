@@ -1,5 +1,6 @@
 import difflib
-from dataclasses import asdict
+import hashlib
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -9,6 +10,7 @@ from sqlalchemy import func, select, update
 from app.database.models import Camera, DetectionRecord, GateEvent, OCRResult, Snapshot, SystemLog
 from app.domain import Observation, utcnow
 from app.snapshots.snapshot_manager import SnapshotManager
+from app.ocr.validator import is_valid_iso_6346
 
 
 def serialize(record):
@@ -40,6 +42,20 @@ class GateRepository:
         self.db = db
         self._write_lock = Lock()
 
+    def _capture_provenance(self, session, snapshots, snapshot_id, event_id, camera_id,
+                            timestamp, image_path, detections, number, source_id='', sequence=0,
+                            identity_basis='OCR'):
+        exact = [asdict(d) for d in detections if d.camera_id == camera_id and d.frame_timestamp == timestamp
+                 and d.class_name in ('container', 'container_object')]
+        context = {'snapshot_id': snapshot_id, 'event_id': event_id, 'camera_id': camera_id,
+                   'timestamp': timestamp.isoformat() + 'Z', 'source_id': source_id,
+                   'frame_sequence': sequence, 'container_number': number,
+                   'identity_basis': identity_basis,
+                   'image_sha256': hashlib.sha256(snapshots.path(image_path).read_bytes()).hexdigest(),
+                   'container_detections': [{**d, 'frame_timestamp': d['frame_timestamp'].isoformat() + 'Z'} for d in exact]}
+        session.add(SystemLog(id=str(uuid4()), event_id=event_id, level='INFO',
+                              event_name='capture_provenance', context=context))
+
     def save_passage(self, passage, snapshots, confirmations):
         """Commit one completed truck, including independently voted identities.
 
@@ -54,6 +70,9 @@ class GateRepository:
                 uncertain = True
                 continue
             number, count = votes[0]
+            if not is_valid_iso_6346(number):
+                uncertain = True
+                continue
             if count < confirmations or (len(votes) > 1 and votes[1][1] == count):
                 uncertain = True
             validation, job = region.reads[number]
@@ -139,8 +158,37 @@ class GateRepository:
         try:
             with self._write_lock, self.db.sessions.begin() as db_session:
                 existing = db_session.get(GateEvent, session.event_id)
+                committed = db_session.scalar(select(SystemLog.id).where(
+                    SystemLog.event_id == session.event_id,
+                    SystemLog.event_name == 'multi_camera_passage_finalized'))
+                if committed:
+                    return session.event_id
                 best_frames = session.get_best_frame_per_camera()
                 container_num, iso_code, conf = session.get_consensus_container_number()
+
+                # Ghost/passerby elimination guard:
+                # If there is NO container number AND NO physical container proof on any camera,
+                # discard this spurious session without cluttering the database or operator UI with empty events.
+                has_container_proof = False
+                for c_id, f_cand in (best_frames or {}).items():
+                    if any(
+                        getattr(d, 'class_name', '') == 'container'
+                        and len(getattr(d, 'bbox', [])) == 4
+                        and (d.bbox[2] - d.bbox[0]) >= 50.0
+                        and (d.bbox[3] - d.bbox[1]) >= 40.0
+                        for d in getattr(f_cand, 'detections', [])
+                    ):
+                        has_container_proof = True
+                        break
+
+                if not container_num and not has_container_proof:
+                    log.info('spurious_passage_discarded_no_container', extra={
+                        'session_id': session.session_id,
+                        'event_id': session.event_id,
+                        'gate_id': session.gate_id
+                    })
+                    return session.event_id
+
                 val_check = None
                 if container_num:
                     from app.ocr.validator import ContainerValidator
@@ -148,7 +196,7 @@ class GateRepository:
                     import re
                     val_check = ContainerValidator().validate(OCRRead(raw_text=container_num, confidence=conf))
                 is_valid_format = bool(container_num and len(container_num) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', container_num))
-                is_confirmed = is_valid_format and (bool(val_check and val_check.valid_check_digit) or conf >= 0.80)
+                is_confirmed = is_valid_format and is_valid_iso_6346(container_num)
                 status = 'CONFIRMED' if is_confirmed else 'NEEDS_REVIEW'
 
                 if not existing:
@@ -180,7 +228,8 @@ class GateRepository:
                     img_path = snapshots.save_side_snapshot(
                         session.event_id, cam_id, frame_cand.image,
                         direction=session.direction,
-                        text=container_num or ''
+                        text=container_num or '',
+                        force=True
                     )
                     created_paths.append(img_path)
                     existing_snap = db_session.scalar(select(Snapshot).where(
@@ -198,6 +247,9 @@ class GateRepository:
                     else:
                         existing_snap.image_path = img_path
                         existing_snap.timestamp = frame_cand.timestamp
+                    self._capture_provenance(db_session, snapshots, existing_snap.id if existing_snap else snap_id,
+                        session.event_id, cam_id, frame_cand.timestamp, img_path, frame_cand.detections,
+                        container_num, frame_cand.source_id, frame_cand.frame_sequence, "PASSAGE")
 
                     # Record the container detection records for this camera
                     cam_has_det = False
@@ -220,7 +272,7 @@ class GateRepository:
                             event_id=session.event_id,
                             camera_id=cam_id,
                             origin_key=f"session:{session.session_id}:{cam_id}:{d_id}",
-                            track_id=int(getattr(session, 'track_id', 1) or 1),
+                            track_id=int(frame_cand.track_id or 1),
                             class_name=cname,
                             confidence=float(getattr(d, 'confidence', 0.85) or 0.85),
                             bbox=list(getattr(d, 'bbox', [0.0, 0.0, 1.0, 1.0])),
@@ -266,9 +318,9 @@ class GateRepository:
                         raw_text=container_num,
                         normalized_text=container_num,
                         confidence=conf,
-                        valid_format=True,
-                        valid_check_digit=True,
-                        validation_status='VALID'
+                        valid_format=is_valid_format,
+                        valid_check_digit=is_valid_iso_6346(container_num),
+                        validation_status='VALID' if is_confirmed else 'INVALID_CHECK_DIGIT'
                     ))
 
                 db_session.add(SystemLog(
@@ -288,7 +340,12 @@ class GateRepository:
             if snapshots:
                 ev_data = self.event(session.event_id)
                 if ev_data:
-                    snapshots.save_event_json(session.event_id, ev_data)
+                    try:
+                        snapshots.save_event_json(session.event_id, ev_data)
+                    except OSError:
+                        # JSON is derived; never delete committed proof images
+                        # when this optional export fails after the transaction.
+                        pass
 
             return session.event_id
         except Exception:
@@ -316,6 +373,8 @@ class GateRepository:
                          additional_frames: dict | None = None, ongoing_event_id=None,
                          same_container_window_seconds: float = 900):
         """One writer per service; DB uniqueness also protects retried track writes."""
+        if obs.ocr and not is_valid_iso_6346(obs.ocr.normalized_text):
+            obs = replace(obs, confirmed=False, ocr=replace(obs.ocr, valid_check_digit=False))
         created_paths = []
         try:
             with self._write_lock, self.db.sessions.begin() as session:
@@ -453,8 +512,6 @@ class GateRepository:
                             if not match_found and time_diff <= 35.0:
                                 if ocr_sim >= 0.50:
                                     match_found = True
-                                elif number and c_num and len(number) >= 3 and len(c_num) >= 3 and number[:3] == c_num[:3]:
-                                    match_found = True
 
                             # 4. Short-window same-lane fusion for unconfirmed/partial reads
                             if not match_found and time_diff <= 35.0 and (not cand.container_number or not number or ocr_sim >= 0.45):
@@ -512,6 +569,14 @@ class GateRepository:
                         if prior_view:
                             existing = None  # New cleared passage, not time-window fusion.
 
+                if (existing and number and existing.container_number and
+                        number != existing.container_number and
+                        is_valid_iso_6346(number) and is_valid_iso_6346(existing.container_number)):
+                    # An explicit event link cannot turn different valid identities
+                    # into corroborating evidence. Keep the passage for review.
+                    existing.status = 'NEEDS_REVIEW'
+                    obs = replace(obs, confirmed=False)
+                    number = existing.container_number
                 created = existing is None
                 event_id = existing.id if existing else (getattr(obs, 'event_id', None) or str(uuid4()))
                 if created and session.get(GateEvent, event_id):
@@ -590,6 +655,12 @@ class GateRepository:
                     created_paths.append(image_path)
                     session.add(Snapshot(id=snapshot_id, event_id=event_id, camera_id=obs.detection.camera_id,
                                          image_path=image_path, timestamp=obs.detection.frame_timestamp))
+
+                self._capture_provenance(session, snapshots, existing_path_snap.id if existing_path_snap else snapshot_id,
+                    event_id, obs.detection.camera_id, obs.detection.frame_timestamp, image_path,
+                    list(obs.all_detections or []) + [obs.detection],
+                    obs.proof_container_number if obs.proof_container_number is not None else obs.ocr.normalized_text,
+                    obs.source_id, obs.frame_sequence)
 
                 # 2. Multi-camera snapshots for all other cameras covering this gate event
                 if additional_frames:
@@ -732,6 +803,13 @@ class GateRepository:
             result['ocr_results'] = [serialize(o) for o in session.scalars(select(OCRResult).where(
                 OCRResult.detection_id.in_([d.id for d in detections])))]
             snapshots_list = [serialize(s) for s in session.scalars(select(Snapshot).where(Snapshot.event_id == event_id))]
+            provenance = {}
+            for log in session.scalars(select(SystemLog).where(SystemLog.event_id == event_id,
+                    SystemLog.event_name == 'capture_provenance')):
+                context = log.context or {}
+                provenance[context.get('snapshot_id')] = context
+            for snapshot in snapshots_list:
+                snapshot['provenance'] = provenance.get(snapshot['id'])
             # Select best primary (front) camera: Prefer front/top cameras, exclude rear cameras from primary
             best_front_cam = None
             best_front_score = -1.0
@@ -796,13 +874,35 @@ class GateRepository:
                     if candidate_cam:
                         return candidate_cam
                 return None
-            front_snap = identity_proof(result.get('container_number'), False)
-            rear_snap = identity_proof(result.get('container_number_2'), True) if result.get('is_twin') else None
+            proof_front = identity_proof(result.get('container_number'), False)
+            if proof_front:
+                front_snap = proof_front
+            proof_rear = identity_proof(result.get('container_number_2'), True) if result.get('is_twin') else None
+            if proof_rear:
+                rear_snap = proof_rear
             primary_cam = front_snap['camera_id'] if front_snap else None
             result['primary_camera_id'] = primary_cam
             result['primary_snapshot_id'] = front_snap['id'] if front_snap else None
             result['rear_snapshot_id'] = rear_snap['id'] if rear_snap else None
             result['snapshots'] = snapshots_list
+
+            # Top-level tracking identification
+            track_ids = [d.track_id for d in detections if getattr(d, 'track_id', None) is not None]
+            result['track_id'] = track_ids[0] if track_ids else None
+            session_ids = [
+                d.origin_key.split(':')[1]
+                for d in detections
+                if getattr(d, 'origin_key', '') and d.origin_key.startswith('session:') and len(d.origin_key.split(':')) > 1
+            ]
+            result['tracking_id'] = session_ids[0] if session_ids else (f"TRACK_{result['track_id']}" if result.get('track_id') else None)
+
+            # Per-camera best image mapping for UI and API
+            best_cam_map = {}
+            for s in snapshots_list:
+                cid = s.get('camera_id')
+                if cid and cid not in best_cam_map:
+                    best_cam_map[cid] = s
+            result['best_camera_images'] = best_cam_map
             
             from app.ocr.validator import extract_iso_size_code
             container_size = None
@@ -850,9 +950,25 @@ class GateRepository:
             ev = session.get(GateEvent, event_id)
             if ev:
                 ev.cloud_synced = True
+                ev.cloud_delivery_state = 'DELIVERED'
+                ev.cloud_delivery_error = None
                 ev.cloud_synced_at = utcnow()
                 if cloud_event_id:
                     ev.cloud_event_id = str(cloud_event_id)
+
+    def mark_cloud_delivery(self, event_id: str, state: str, error: str | None = None):
+        if state not in ('PENDING', 'OFFLINE', 'REJECTED', 'CONFLICT', 'BLOCKED', 'DUPLICATE'):
+            raise ValueError('Invalid cloud delivery state')
+        with self.db.sessions.begin() as session:
+            ev = session.get(GateEvent, event_id)
+            if ev:
+                if ev.cloud_synced and ev.cloud_delivery_state == 'DELIVERED':
+                    return
+                ev.cloud_delivery_state = state
+                ev.cloud_delivery_error = error[:256] if error else None
+                ev.cloud_synced = False
+                ev.cloud_synced_at = None
+                ev.cloud_event_id = None
 
     def mark_duplicate_event(self, duplicate_id: str, primary_id: str):
         """Retain an audit row but remove a duplicate from active visits/outbox."""
@@ -865,9 +981,24 @@ class GateRepository:
             session.execute(update(Snapshot).where(Snapshot.event_id == duplicate.id).values(event_id=primary.id))
             session.execute(update(SystemLog).where(SystemLog.event_id == duplicate.id).values(event_id=primary.id))
             duplicate.status = 'DUPLICATE'
-            duplicate.cloud_synced = True
-            duplicate.cloud_synced_at = utcnow()
+            duplicate.cloud_delivery_state = 'DUPLICATE'
+            duplicate.cloud_synced = False
+            duplicate.cloud_synced_at = None
             return True
+
+    def reset_cloud_failures(self):
+        """Operator retry resets terminal failures; actual acknowledgements stay intact."""
+        with self.db.sessions.begin() as session:
+            session.execute(update(GateEvent).where(
+                GateEvent.status == 'CONFIRMED', GateEvent.cloud_synced == False,
+                GateEvent.cloud_delivery_state.in_(['REJECTED', 'BLOCKED'])
+            ).values(cloud_delivery_state='PENDING', cloud_delivery_error=None))
+
+    def cloud_delivery_counts(self):
+        with self.db.sessions() as session:
+            return {state or 'PENDING': count for state, count in session.execute(
+                select(GateEvent.cloud_delivery_state, func.count(GateEvent.id))
+                .group_by(GateEvent.cloud_delivery_state))}
 
     def get_unsynced_confirmed_events(self, limit: int = 50):
         with self.db.sessions() as session:
@@ -875,6 +1006,7 @@ class GateRepository:
                 select(GateEvent)
                 .where(
                     GateEvent.status == 'CONFIRMED',
+                    func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_(['PENDING', 'OFFLINE', 'CONFLICT']),
                     (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
                     (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
                 )
@@ -891,7 +1023,7 @@ class GateRepository:
             for ev in raw_events:
                 c1 = ev.get('container_number')
                 val1 = validator.validate(OCRRead(raw_text=c1, confidence=1.0)) if c1 else None
-                is_valid = bool(c1 and len(c1) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', c1) and (bool(val1 and val1.valid_check_digit) or val1 is not None))
+                is_valid = is_valid_iso_6346(c1)
                 if is_valid:
                     valid_events.append(ev)
                 else:
@@ -899,8 +1031,8 @@ class GateRepository:
                     try:
                         db_ev = session.get(GateEvent, ev['id'])
                         if db_ev:
-                            db_ev.cloud_synced = True
-                            db_ev.cloud_synced_at = utcnow()
+                            db_ev.cloud_delivery_state = 'BLOCKED'
+                            db_ev.cloud_delivery_error = 'Invalid container checksum'
                             session.commit()
                     except Exception:
                         pass
@@ -912,6 +1044,7 @@ class GateRepository:
                 select(func.count(GateEvent.id))
                 .where(
                     GateEvent.status == 'CONFIRMED',
+                    func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_(['PENDING', 'OFFLINE', 'CONFLICT']),
                     (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
                     (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
                 )
@@ -1029,7 +1162,7 @@ class GateRepository:
 
                     c1, c2 = ev1.container_number or '', ev2.container_number or ''
                     ocr_sim = ocr_similarity_score(c1, c2)
-                    if gap <= 35.0 and (ocr_sim >= 0.45 or not c1 or not c2 or (len(c1) >= 3 and len(c2) >= 3 and c1[:3] == c2[:3])):
+                    if gap <= 35.0 and (c1 == c2 or (c1 and c2 and ocr_sim >= 0.80)):
                         is_match = True
 
                     if is_match:
@@ -1060,7 +1193,7 @@ class GateRepository:
                 GateEvent.id != event.id,
                 GateEvent.gate_id == event.gate_id,
                 direction_match,
-                GateEvent.status.in_(['CONFIRMED', 'NEEDS_REVIEW', 'DUPLICATE']),
+                GateEvent.status == 'CONFIRMED',
                 GateEvent.timestamp >= event.timestamp - delta,
                 GateEvent.timestamp <= event.timestamp + delta,
             ).order_by(GateEvent.timestamp.asc())).all()
@@ -1091,8 +1224,10 @@ class GateRepository:
 
                 # Distinct container numbers must NEVER be merged as duplicates by static camera background similarity.
                 if num and c_num and num != c_num:
+                    if is_valid_iso_6346(num) and is_valid_iso_6346(c_num):
+                        continue
                     ocr_sim = ocr_similarity_score(num, c_num)
-                    if not (time_diff <= 35.0 and (ocr_sim >= 0.45 or (len(num) >= 3 and len(c_num) >= 3 and num[:3] == c_num[:3]))):
+                    if not (time_diff <= 35.0 and ocr_sim >= 0.80):
                         continue
 
                 # Image comparison across matching cameras
@@ -1110,7 +1245,7 @@ class GateRepository:
 
                 # Fuzzy OCR match within passage window
                 ocr_sim = ocr_similarity_score(event.container_number, cand.container_number)
-                if time_diff <= 35.0 and (ocr_sim >= 0.45 or (num and c_num and len(num) >= 3 and len(c_num) >= 3 and num[:3] == c_num[:3])):
+                if time_diff <= 35.0 and (num == c_num or (num and c_num and ocr_sim >= 0.80)):
                     return cand.id if cand.timestamp <= event.timestamp else cand.id
 
             return event_id

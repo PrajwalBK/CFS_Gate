@@ -263,12 +263,39 @@ def _extract_text_from_items(items):
 
 class EasyOCREngine:
     def __init__(self, settings):
+        self.min_confidence = settings.ocr_min_confidence
         import easyocr
         self.reader = easyocr.Reader(['en'], gpu=settings.ocr_gpu,
                                      model_storage_directory=str(settings.ocr_model_directory),
                                      download_enabled=settings.ocr_download_enabled, verbose=False)
 
     def read(self, image) -> OCRRead:
+        """Retry small unreadable text at higher resolution without repairing text."""
+        import cv2
+        from app.ocr.validator import ContainerValidator
+        first = self._read_image(image)
+        validator = ContainerValidator()
+        value = validator.validate(first)
+        minimum = getattr(self, 'min_confidence', .6)
+        if value.valid_check_digit and first.confidence >= minimum:
+            return first
+        if value.validation_status == 'VALID_SIZE_CODE':
+            return first
+        if image is None or getattr(image, 'size', 0) == 0:
+            return first
+        height, width = image.shape[:2]
+        if width > 400 or height > 300:
+            return first
+        enlarged = cv2.resize(image, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC)
+        retry = self._read_image(enlarged)
+        revised = validator.validate(retry)
+        if revised.valid_check_digit and retry.confidence >= minimum:
+            if value.valid_check_digit and value.normalized_text != revised.normalized_text:
+                return OCRRead('', 0.0)  # Conflicting observed identities remain unresolved.
+            return retry
+        return first
+
+    def _read_image(self, image) -> OCRRead:
         import re
         import cv2
         from app.ocr.validator import CANDIDATE, STRUCTURE
@@ -282,7 +309,7 @@ class EasyOCREngine:
         proc_img = image
         if max(h, w) > 1280:
             scale = 1280.0 / max(h, w)
-            proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            proc_img = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
             h, w = proc_img.shape[:2]
 
         is_vertical = h > 1.5 * w
@@ -290,7 +317,7 @@ class EasyOCREngine:
         if is_vertical:
             if w < 100:
                 scale = min(3.0, 120.0 / max(1, w))
-                proc_img = cv2.resize(proc_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+                proc_img = cv2.resize(proc_img, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_CUBIC)
             proc_img = cv2.copyMakeBorder(proc_img, 25, 25, 25, 25, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
         # 1. Fast standard 0-degree pass
@@ -328,7 +355,7 @@ class EasyOCREngine:
             base_img = image
             if w < 100:
                 scale = min(3.0, 120.0 / max(1, w))
-                base_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+                base_img = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_CUBIC)
             items2 = self.reader.readtext(
                 base_img, detail=1, paragraph=False,
                 allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
@@ -411,7 +438,7 @@ class OlmOCREngine:
             h, w = image.shape[:2]
             if max(h, w) > 768:
                 scale = 768.0 / max(h, w)
-                proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                proc_img = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
             else:
                 proc_img = image
 
@@ -506,11 +533,15 @@ def create_ocr_engine(settings) -> OCREngine:
                 return FallbackOCREngine(primary, lambda: EasyOCREngine(settings))
             return primary
         except Exception as exc:
-            # paddle package not installed or GPU context unavailable — fall back
-            # to OlmOCR so the app keeps running without manual .env edits.
-            log.warning('paddle_ocr_unavailable_using_olmocr',
-                        extra={'reason': str(exc)}, exc_info=False)
-            return OlmOCREngine(settings)
+            # Initialization failures must honor the configured fallback too.
+            # A disabled fallback must not silently initialize another model.
+            log.warning('paddle_ocr_unavailable',
+                        extra={'reason': str(exc), 'fallback': fallback_engine}, exc_info=False)
+            if fallback_engine == 'easyocr':
+                return EasyOCREngine(settings)
+            if fallback_engine in ('olmocr', 'qwen2_vl', 'qwen2vl', 'qwen'):
+                return OlmOCREngine(settings)
+            raise
     if engine_type in ('olmocr', 'qwen2_vl', 'qwen2vl', 'qwen'):
         return OlmOCREngine(settings)
     return EasyOCREngine(settings)

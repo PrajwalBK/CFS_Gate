@@ -1,0 +1,18 @@
+{
+  "selected_model": "backend/models/acceptance-candidate.pt",
+  "sha256": "ab133ac4314ad164a5f76ed4a0cb5ddfb61f0d2d67c4d7becc95b772756fc9e2",
+  "model_image_size": 640,
+  "confidence_threshold": 0.35,
+  "class_aliases": {},
+  "previous_model_preserved": "backend/models/best.pt",
+  "service_restarted": false,
+  "ground_truth_body_true_positive": 873,
+  "ground_truth_body_false_positive": 0,
+  "ground_truth_body_false_negative": 0,
+  "archive_frames_with_body": 40,
+  "archive_total_frames": 54,
+  "requires_physical_acceptance": true,
+  "status": "REVERTED at user request; earlier best.pt configuration restored",
+  "currently_selected_model": "backend/models/best.pt",
+  "currently_selected_confidence": 0.28
+}

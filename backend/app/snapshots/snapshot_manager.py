@@ -99,6 +99,11 @@ class SnapshotManager:
             try:
                 import cv2, numpy as np
                 data = self.path(image_path).read_bytes()
+                prov = snap.get('provenance') or {}
+                if prov.get('image_sha256'):
+                    import hashlib
+                    if hashlib.sha256(data).hexdigest() != prov['image_sha256']:
+                        continue
                 decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if decoded is None or decoded.size == 0 or decoded.shape[0] < 240 or decoded.shape[1] < 320:
                     continue

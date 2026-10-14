@@ -1,0 +1,28 @@
+{
+  "images": 873,
+  "iou_threshold": 0.5,
+  "confidence_threshold": 0.35,
+  "classes": {
+    "container_number": {
+      "tp": 1052,
+      "fp": 66,
+      "fn": 40,
+      "precision": 0.9409660107334525,
+      "recall": 0.9633699633699634
+    },
+    "iso_code": {
+      "tp": 675,
+      "fp": 12,
+      "fn": 3,
+      "precision": 0.982532751091703,
+      "recall": 0.995575221238938
+    },
+    "container": {
+      "tp": 797,
+      "fp": 711,
+      "fn": 76,
+      "precision": 0.5285145888594165,
+      "recall": 0.9129438717067583
+    }
+  }
+}

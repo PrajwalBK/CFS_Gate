@@ -1,5 +1,55 @@
 # Gate Module backend
 
+## Reliability update — October 9, 2026
+
+Container identities must pass the actual ISO checksum before confirmation or
+cloud dispatch; OCR confidence and a reader's validation flag cannot override
+this check. Invalid evidence remains available for review.
+
+Cloud delivery now persists `PENDING`, `OFFLINE`, `CONFLICT`, `REJECTED`,
+`BLOCKED`, `DUPLICATE`, or `DELIVERED` independently of event confirmation.
+Only an accepted cloud response sets `cloud_synced=true`. Conflicts and outages
+remain eligible for automatic retry. Rejected/blocked events require operator
+retry after correcting the payload, credentials or evidence. The retry button
+resets these failures without resetting acknowledged deliveries. Event JSON
+and cloud status expose outcomes and counts; the dashboard shows delivery issues.
+
+**Existing databases:** stop the service, back up the database, then run this
+additive schema upgrade from `backend` before restarting:
+
+```powershell
+.\.venv\Scripts\python -m app.database.initialize
+```
+
+Initialization adds the two delivery-state columns while preserving events.
+Older `cloud_synced` rows become `LEGACY`: historical acknowledgements cannot
+be distinguished from the old rejected/skipped behavior. They are not automatically
+resent. SQLite deployment startup also runs initialization; MySQL requires the
+explicit command. Health checks reject schemas missing these columns.
+
+Finalized multi-camera sessions are saved transactionally, including lossless
+best-frame images and OCR metadata, in
+`uploads/ocr-spool/passage-outbox.sqlite3` before removal from active memory.
+Database failures retry with bounded backoff; recovery runs after restart even
+when AI is disabled. Replaying a committed session does not duplicate evidence.
+This store protects finalized sessions; active sessions and frames waiting in the
+capture-to-save queue remain in memory. Monitor disk and
+`/api/health`'s `passage_finalizations_pending` during prolonged outages.
+
+OCR now consumes only persisted jobs through one worker. This prevents duplicate
+consumption and ensures disk save completes before OCR. The previous fast in-memory
+OCR queue is removed; measure throughput on deployment hardware after this change.
+
+The default pytest suite uses temporary databases and snapshot folders. Live
+deployment verification is read-only and requires explicit opt-in:
+
+```powershell
+.\.venv\Scripts\python -m pytest -q tests/test_production_readiness.py --run-live-deployment
+```
+
+The real MySQL integration test remains opt-in through `TEST_MYSQL_URL`, pointing
+to a disposable database named `gate_test_*`.
+
 This is the active FastAPI/MySQL Gate service. The former root `../app` Flask application has been retired and removed; the remaining `../web` folder is not used by this service. Run commands **from this backend directory** so Python imports this service's `app` package. The complete operating design is in [the project brain](../docs/brain.md).
 
 ## Development startup

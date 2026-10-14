@@ -53,6 +53,7 @@ export interface CloudSyncStatus {
   enabled: boolean;
   is_online: boolean;
   pending_count: number;
+  delivery_counts?: Record<string, number>;
   queue_depth: number;
   last_sync_time: string | null;
   last_error: string | null;

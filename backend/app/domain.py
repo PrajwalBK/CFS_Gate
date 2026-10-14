@@ -58,4 +58,6 @@ class Observation:
     slot_position: str = 'FRONT'
     event_id: str | None = None
     is_twin: bool = False
-
+    source_id: str = ''
+    frame_sequence: int = 0
+    proof_container_number: str | None = None

@@ -28,8 +28,8 @@ def create_mock_frame(camera_id, t, sequence=1):
 def test_runtime_e2e_trailer_with_two_20ft_containers(settings, camera, repository, snapshots):
     """
     Test complete GateRuntime pipeline with a trailer carrying two 20ft containers:
-    - Container 1: Lead 20ft (ABCU1234567, 22G1)
-    - Container 2: Trail 20ft (XYZU7654321, 22G1)
+    - Container 1: Lead 20ft (ABCU1234560, 22G1)
+    - Container 2: Trail 20ft (XYZU7654323, 22G1)
     Both containers pass through the gate, are tracked, OCR'd, finalized, and dispatched independently.
     """
     camera.gate_exit_axis = 'x'
@@ -49,12 +49,12 @@ def test_runtime_e2e_trailer_with_two_20ft_containers(settings, camera, reposito
         if cx >= 320:
             if job.detection.class_name == 'iso_code':
                 return OCRRead('22G1', 0.95), Validation('22G1', '22G1', 0.95, False, False, 'VALID_SIZE_CODE', size_type='22G1')
-            return OCRRead('ABCU1234567', 0.98), Validation('ABCU1234567', 'ABCU1234567', 0.98, True, True, 'VALID', size_type='22G1')
+            return OCRRead('ABCU1234560', 0.98), Validation('ABCU1234560', 'ABCU1234560', 0.98, True, True, 'VALID', size_type='22G1')
         else:
             # Left half of frame (< 320): Container 2 (Trail)
             if job.detection.class_name == 'iso_code':
                 return OCRRead('22G1', 0.94), Validation('22G1', '22G1', 0.94, False, False, 'VALID_SIZE_CODE', size_type='22G1')
-            return OCRRead('XYZU7654321', 0.97), Validation('XYZU7654321', 'XYZU7654321', 0.97, True, True, 'VALID', size_type='22G1')
+            return OCRRead('XYZU7654323', 0.97), Validation('XYZU7654323', 'XYZU7654323', 0.97, True, True, 'VALID', size_type='22G1')
 
     runtime._execute_ocr = mock_ocr
 
@@ -87,10 +87,15 @@ def test_runtime_e2e_trailer_with_two_20ft_containers(settings, camera, reposito
         runtime.detector = FrameDetector(dets)
         runtime.process_frame(camera, frame)
 
-    # Drain OCR queues so all reads are processed
-    while not runtime.fast_ocr_queue.empty():
-        job, profiler = runtime.fast_ocr_queue.get_nowait()
-        runtime._process_fast_ocr(job, profiler)
+    # Exercise the production save-before-OCR path.
+    from app.ocr.container_ocr import crop_identification
+    while not runtime.queue.empty():
+        job = runtime.queue.get_nowait()
+        crop = crop_identification(job.frame.image, job.detection.bbox, job.roi)
+        job_id = runtime.ocr_store.save(job, crop)
+        runtime._pending_event_saves[job.event_id] -= 1  # Mirror the durable writer acknowledgement.
+        runtime._process_saved_ocr(job_id)
+        runtime.queue.task_done()
 
     # Now simulate trailer clearing the gate: send frames with no container
     clear_start = base_time + timedelta(seconds=2)
@@ -107,11 +112,11 @@ def test_runtime_e2e_trailer_with_two_20ft_containers(settings, camera, reposito
     assert len(items) >= 2, f"Expected at least 2 distinct events, got {len(items)}"
 
     nums = [it.get('container_number') for it in items]
-    assert 'ABCU1234567' in nums, "Container 1 (ABCU1234567) must be detected and recorded!"
-    assert 'XYZU7654321' in nums, "Container 2 (XYZU7654321) must be detected and recorded!"
+    assert 'ABCU1234560' in nums, "Container 1 (ABCU1234560) must be detected and recorded!"
+    assert 'XYZU7654323' in nums, "Container 2 (XYZU7654323) must be detected and recorded!"
 
-    ev1 = next(it for it in items if it.get('container_number') == 'ABCU1234567')
-    ev2 = next(it for it in items if it.get('container_number') == 'XYZU7654321')
+    ev1 = next(it for it in items if it.get('container_number') == 'ABCU1234560')
+    ev2 = next(it for it in items if it.get('container_number') == 'XYZU7654323')
 
     # MANDATORY RULES CHECK:
     # 1. Unique event/visit ID

@@ -82,23 +82,23 @@ def test_cross_camera_multi_frame_ocr_consensus():
     """
     Requirement 6:
     Combine OCR candidates across 4 cameras and multi-frames:
-    C1: ABCD1234567 (91%)
-    C2: ABCD1234567 (96%)
+    C1: ABCU1234560 (91%)
+    C2: ABCU1234560 (96%)
     C3: ABCD12345?7 (87%)
-    C4: ABCD1234567 (94%)
-    Final consensus: ABCD1234567
+    C4: ABCU1234560 (94%)
+    Final consensus: ABCU1234560
     """
     cams = ['gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-in-4']
     session = ContainerPassageSession('TRACK_001', 'lane-in', 'ENTRY', cams, datetime.now())
 
     # Add OCR reads from 4 cameras
-    session.add_ocr_candidate(OCRRead('ABCD 123456 7', 0.91))
-    session.add_ocr_candidate(OCRRead('ABCD 123456 7', 0.96))
+    session.add_ocr_candidate(OCRRead('ABCU 123456 0', 0.91))
+    session.add_ocr_candidate(OCRRead('ABCU 123456 0', 0.96))
     session.add_ocr_candidate(OCRRead('ABCD 123450 7', 0.87))
-    session.add_ocr_candidate(OCRRead('ABCD 123456 7', 0.94))
+    session.add_ocr_candidate(OCRRead('ABCU 123456 0', 0.94))
 
     final_num, iso, conf = session.get_consensus_container_number()
-    assert final_num in ('ABCD1234567', 'ABCU1234567')
+    assert final_num in ('ABCU1234560', 'ABCU1234560')
     assert conf >= 0.90
 
 
@@ -130,8 +130,8 @@ def test_gate_in_complete_four_camera_passage_lifecycle(repository, snapshots):
             session.add_frame(cam_id, frame_img, t, dets)
 
     # Multi-frame OCR consensus
-    session.add_ocr_candidate(OCRRead('ABCD 123456 7', 0.92))
-    session.add_ocr_candidate(OCRRead('ABCD 123456 7', 0.97))
+    session.add_ocr_candidate(OCRRead('ABCU 123456 0', 0.92))
+    session.add_ocr_candidate(OCRRead('ABCU 123456 0', 0.97))
 
     # Commit finalized passage session to repository
     event_id = repository.finalize_passage_session(session, snapshots)
@@ -140,7 +140,7 @@ def test_gate_in_complete_four_camera_passage_lifecycle(repository, snapshots):
     ev = repository.event(event_id)
     assert ev['gate_id'] == 'lane-in'
     assert ev['event_type'] == 'ENTRY'
-    assert ev['container_number'] in ('ABCD1234567', 'ABCU1234567')
+    assert ev['container_number'] in ('ABCU1234560', 'ABCU1234560')
     assert ev['status'] == 'CONFIRMED'
 
     # Assert all 4 camera snapshots are present
@@ -211,13 +211,13 @@ def test_multiple_containers_independent_datasets(repository, snapshots):
     sess_a = session_mgr.get_or_create_session('lane-in', 'ENTRY', t0, cams)
     dets_a = [Detection('gate-in-1', t0, 'container', 0.95, (10, 10, 300, 200))]
     session_mgr.record_frame('gate-in-1', 'lane-in', 'ENTRY', _create_synthetic_test_frame('C1_FRONT'), t0, detections=dets_a, gate_cameras=cams)
-    session_mgr.record_ocr_result('lane-in', OCRRead('MSKU 111111 1', 0.95))
+    session_mgr.record_ocr_result('lane-in', OCRRead('MSKU 111111 2', 0.95))
 
     # Container A clears
     session_mgr.mark_clearing('lane-in', t0 + timedelta(seconds=2))
     ready = session_mgr.check_and_finalize(t0 + timedelta(seconds=9), gate_clear_seconds=6.0)
     assert len(ready) == 1
-    assert ready[0].confirmed_container_number == 'MSKU1111111'
+    assert ready[0].confirmed_container_number == 'MSKU1111112'
 
     # Container B arrives later
     t1 = t0 + timedelta(seconds=30)
@@ -225,10 +225,10 @@ def test_multiple_containers_independent_datasets(repository, snapshots):
     assert sess_b.session_id != sess_a.session_id
     dets_b = [Detection('gate-in-1', t1, 'container', 0.95, (10, 10, 300, 200))]
     session_mgr.record_frame('gate-in-1', 'lane-in', 'ENTRY', _create_synthetic_test_frame('C1_FRONT'), t1, detections=dets_b, gate_cameras=cams)
-    session_mgr.record_ocr_result('lane-in', OCRRead('MSKU 222222 2', 0.95))
+    session_mgr.record_ocr_result('lane-in', OCRRead('MSKU 222222 9', 0.95))
 
     assert len(sess_b.ocr_candidates) == 1
-    assert sess_b.ocr_candidates[0].normalized_text == 'MSKU2222222'
+    assert sess_b.ocr_candidates[0].normalized_text == 'MSKU2222229'
 
 
 def test_flexible_camera_counts_two_and_six_cameras(repository, snapshots):
@@ -247,7 +247,7 @@ def test_flexible_camera_counts_two_and_six_cameras(repository, snapshots):
         for i in range(5):
             img = _create_synthetic_test_frame('C1_FRONT', sharpness_level=40.0 + i * 10)
             session_2.add_frame(cam_id, img, datetime.now(), [Detection(cam_id, datetime.now(), 'container', 0.9, (10, 10, 300, 200))])
-    session_2.add_ocr_candidate(OCRRead('MSKU 123456 7', 0.95))
+    session_2.add_ocr_candidate(OCRRead('MSKU 123456 5', 0.95))
 
     best_2 = session_2.get_best_frame_per_camera()
     assert len(best_2) == 2
@@ -269,7 +269,7 @@ def test_flexible_camera_counts_two_and_six_cameras(repository, snapshots):
         for i in range(4):
             img = _create_synthetic_test_frame('C1_FRONT', sharpness_level=30.0 + i * 15)
             session_6.add_frame(cam.id, img, datetime.now(), [Detection(cam.id, datetime.now(), 'container', 0.9, (10, 10, 300, 200))])
-    session_6.add_ocr_candidate(OCRRead('TGHU 765432 1', 0.96))
+    session_6.add_ocr_candidate(OCRRead('TGHU 765432 0', 0.96))
 
     best_6 = session_6.get_best_frame_per_camera()
     assert len(best_6) == 6
@@ -427,7 +427,7 @@ def test_companion_camera_without_container_excluded_from_best_frames():
 
     best = session.get_best_frame_per_camera()
     assert 'gate-in-1' in best
-    assert 'gate-in-2' in best
+    assert 'gate-in-2' not in best
     # Cam 3 must be excluded because it never had a container object!
     assert 'gate-in-3' not in best
 
@@ -490,8 +490,8 @@ def test_multicamera_cloud_dispatch_four_frames_after_passage_finalization(repos
             session.add_frame(cam_id, frame_img, t, dets)
 
     # Multi-frame OCR reads
-    session.add_ocr_candidate(OCRRead('MSCU 123456 7', 0.94))
-    session.add_ocr_candidate(OCRRead('MSCU 123456 7', 0.98))
+    session.add_ocr_candidate(OCRRead('MSCU 123456 6', 0.94))
+    session.add_ocr_candidate(OCRRead('MSCU 123456 6', 0.98))
 
     # Finalize passage session
     event_id = repository.finalize_passage_session(session, snapshots)
@@ -523,7 +523,7 @@ def test_multicamera_cloud_dispatch_four_frames_after_passage_finalization(repos
         assert len(payload['Containers']) == 1
 
         container = payload['Containers'][0]
-        assert container['ContainerNumber'] == 'MSCU1234567'
+        assert container['ContainerNumber'] == 'MSCU1234566'
 
         # Must send all 4 cameras in Images list
         images = container['Images']
@@ -568,7 +568,7 @@ def test_unavailable_camera_marked_unavailable_without_substitution(repository, 
     session.add_frame('gate-in-3', empty_road, t, [Detection('gate-in-3', t, 'car', 0.80, (10, 10, 100, 100))])
     session.add_frame('gate-in-4', _create_synthetic_test_frame('C4_REAR'), t, [Detection('gate-in-4', t, 'container', 0.95, (10, 10, 300, 200))])
 
-    session.add_ocr_candidate(OCRRead('TGHU 765432 1', 0.95))
+    session.add_ocr_candidate(OCRRead('TGHU 765432 0', 0.95))
 
     event_id = repository.finalize_passage_session(session, snapshots)
 
@@ -612,7 +612,7 @@ def test_three_camera_per_gate_setup_dispatch(settings, repository, snapshots):
         img = _create_synthetic_test_frame(pattern)
         session.add_frame(cam.id, img, t, [Detection(cam.id, t, 'container', 0.95, (10, 10, 300, 200))])
 
-    session.add_ocr_candidate(OCRRead('MSKU 987654 3', 0.95))
+    session.add_ocr_candidate(OCRRead('MSKU 987654 0', 0.95))
 
     event_id = repository.finalize_passage_session(session, snapshots)
 
@@ -690,7 +690,118 @@ def test_gate_out_three_camera_setup_dispatch(settings, repository, snapshots):
         assert img_types == ['FRONT', 'LEFT', 'REAR']
 
 
+def test_sequential_containers_close_together_strict_independence(repository, snapshots, settings):
+    """
+    Critical Fix Verification:
+    Two containers pass sequentially close together (< 2s gap).
+    Must produce:
+    - 2 distinct independent tracking sessions
+    - 2 distinct events (Event A, Event B)
+    - Independent best frames per camera (never mixed)
+    - Correct OCR per container (MSKU1234565 vs TGHU9876542)
+    - Zero data mixing
+    """
+    cams = ['gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-in-4']
+    configs = [
+        CameraConfig(id=cid, name=f'Gate IN {i+1}', gate_id='lane-in', source_env=f'CAM_{i+1}',
+                     role=['FRONT_TOP', 'LEFT', 'RIGHT', 'REAR'][i], direction='ENTRY')
+        for i, cid in enumerate(cams)
+    ]
+    repository.sync_cameras(configs)
+    session_mgr = PassageSessionManager(settings, target_frames_per_camera=5)
+
+    # 1. Container A enters with Track 1
+    t0 = datetime(2026, 10, 8, 12, 0, 0)
+    for cid in cams:
+        for f_idx in range(3):
+            t_frame = t0 + timedelta(milliseconds=100 * f_idx)
+            img = _create_synthetic_test_frame(f'CONT_A_{cid}', sharpness_level=50.0 + f_idx * 10)
+            det = Detection(cid, t_frame, 'container', 0.95, (20, 20, 400, 300))
+            text_det = Detection(cid, t_frame, 'container_number', 0.92, (50, 50, 200, 100))
+            session_mgr.record_frame(
+                cid, 'lane-in', 'ENTRY', img, t_frame,
+                detections=[det, text_det],
+                ocr_read=OCRRead('MSKU 123456 5', 0.96) if cid == 'gate-in-1' else None,
+                gate_cameras=cams,
+                track_id=1
+            )
+    session_mgr.record_ocr_result('lane-in', OCRRead('MSKU 123456 5', 0.96))
+
+    # 2. Container B arrives immediately after (gap < 2 seconds) with Track 2 on gate-in-1
+    t1 = t0 + timedelta(seconds=1, milliseconds=800)
+    for cid in cams:
+        for f_idx in range(3):
+            t_frame = t1 + timedelta(milliseconds=100 * f_idx)
+            img = _create_synthetic_test_frame(f'CONT_B_{cid}', sharpness_level=60.0 + f_idx * 10)
+            det = Detection(cid, t_frame, 'container', 0.95, (20, 20, 400, 300))
+            text_det = Detection(cid, t_frame, 'container_number', 0.93, (50, 50, 200, 100))
+            session_mgr.record_frame(
+                cid, 'lane-in', 'ENTRY', img, t_frame,
+                detections=[det, text_det],
+                ocr_read=OCRRead('TGHU 987654 2', 0.97) if cid == 'gate-in-1' else None,
+                gate_cameras=cams,
+                track_id=2
+            )
+    session_mgr.record_ocr_result('lane-in', OCRRead('TGHU 987654 2', 0.97))
+
+    # Finalize both
+    session_mgr.mark_clearing('lane-in', t1 + timedelta(seconds=3))
+    ready = session_mgr.check_and_finalize(t1 + timedelta(seconds=10), gate_clear_seconds=6.0)
+
+    # Must produce 2 independent finalized sessions
+    assert len(ready) == 2, f"Expected 2 separate sessions, got {len(ready)}"
+    sess_a, sess_b = ready[0], ready[1]
+
+    assert sess_a.session_id != sess_b.session_id
+    assert sess_a.event_id != sess_b.event_id
+    assert sess_a.confirmed_container_number == 'MSKU1234565'
+    assert sess_b.confirmed_container_number == 'TGHU9876542'
+
+    # Save to database
+    evt_a_id = repository.finalize_passage_session(sess_a, snapshots)
+    evt_b_id = repository.finalize_passage_session(sess_b, snapshots)
+
+    ev_a = repository.event(evt_a_id)
+    ev_b = repository.event(evt_b_id)
+
+    assert ev_a['id'] != ev_b['id']
+    assert ev_a['container_number'] == 'MSKU1234565'
+    assert ev_b['container_number'] == 'TGHU9876542'
+    assert ev_a['tracking_id'] == sess_a.session_id
+    assert ev_b['tracking_id'] == sess_b.session_id
+
+    # Verify each event has 4 snapshots strictly from its own container
+    assert len(ev_a['snapshots']) == 4
+    assert len(ev_b['snapshots']) == 4
+
+    for s in ev_a['snapshots']:
+        assert s['event_id'] == evt_a_id
+        assert str(evt_a_id) in s['image_path']
+
+    for s in ev_b['snapshots']:
+        assert s['event_id'] == evt_b_id
+        assert str(evt_b_id) in s['image_path']
 
 
+def test_frame_quality_evaluator_comprehensiveness():
+    """
+    Verify evaluate_frame_quality scores:
+    - container presence vs empty background
+    - sharpness / motion blur
+    - OCR readability
+    - bounding box quality
+    """
+    empty_frame = np.ones((480, 640, 3), dtype=np.uint8) * 120
+    # No container detection -> score must be 0.0
+    assert evaluate_frame_quality(empty_frame, []) == 0.0
 
+    # Sharp container frame
+    sharp_frame = _create_synthetic_test_frame('SHARP_TEST', sharpness_level=120.0)
+    det = Detection('cam-1', datetime.now(), 'container', 0.95, (30, 30, 500, 400))
+    score_sharp = evaluate_frame_quality(sharp_frame, [det], camera_role='FRONT_TOP')
+    assert score_sharp > 50.0
 
+    # Frame with OCR readability bonus
+    text_det = Detection('cam-1', datetime.now(), 'container_number', 0.95, (100, 100, 300, 180))
+    score_with_text = evaluate_frame_quality(sharp_frame, [det, text_det], camera_role='FRONT_TOP')
+    assert score_with_text > score_sharp

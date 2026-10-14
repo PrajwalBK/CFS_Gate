@@ -106,6 +106,8 @@ class OCRJobStore:
         try:
             with temporary.open('wb') as file:
                 file.write(data)
+                file.flush()
+                os.fsync(file.fileno())
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -152,7 +154,7 @@ class OCRJobStore:
     def connection(self):
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
-        db.execute('PRAGMA synchronous=NORMAL')
+        db.execute('PRAGMA synchronous=FULL')
         db.execute('''CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY, origin TEXT NOT NULL, sequence INTEGER NOT NULL,
             metadata TEXT NOT NULL, crop TEXT NOT NULL, image TEXT NOT NULL,
@@ -298,7 +300,12 @@ class OCRJobStore:
         with self.connection() as db:
             db.execute('UPDATE jobs SET validation=? WHERE id=?', (json.dumps(asdict(validation)), job_id))
 
-    def best_proof(self, origin, through_id):
+    def event_pending(self, event_id):
+        with self.connection() as db:
+            return db.execute("SELECT COUNT(*) FROM jobs WHERE state='PENDING' AND json_extract(metadata,'$.event_id')=?",
+                              (event_id,)).fetchone()[0]
+
+    def best_proof(self, origin, through_id, container_number=None):
         with self.connection() as db:
             rows = db.execute('SELECT id, metadata, validation FROM jobs WHERE origin=? AND id<=? ORDER BY id',
                               (origin, through_id)).fetchall()
@@ -312,6 +319,10 @@ class OCRJobStore:
 
         rows.sort(key=score, reverse=True)
         for row in rows:
+            if container_number:
+                value = json.loads(row['validation']) if row['validation'] else {}
+                if not value.get('valid_check_digit') or value.get('normalized_text') != container_number:
+                    continue
             try:
                 return self.load(row['id'])[0]
             except (OSError, ValueError):
@@ -478,5 +489,5 @@ class OCRJobStore:
 
     def status(self):
         with self.connection() as db:
-            row = db.execute("SELECT COUNT(*) total, SUM(state='PENDING') pending, SUM(error_type IS NOT NULL) failed FROM jobs").fetchone()
+            row = db.execute("SELECT COUNT(*) total, SUM(state='PENDING') pending, SUM(state!='DONE' AND error_type IS NOT NULL) failed FROM jobs").fetchone()
         return {key: row[key] or 0 for key in ('total', 'pending', 'failed')}

@@ -101,7 +101,7 @@ def test_twin_atomic_publishing(tmp_path):
 
     # Now second container observation arrives - processed independently
     rear_det = Detection('cam1', datetime.now(timezone.utc), 'container', 0.9, (600, 100, 1000, 500))
-    rear_ocr = Validation('WHSU 216671 2', 'WHSU2166712', 0.95, True, True, 'VALID', '22G1')
+    rear_ocr = Validation('WHSU 216671 7', 'WHSU2166717', 0.95, True, True, 'VALID', '22G1')
     rear_obs = Observation(
         origin_key='cam1:rear',
         gate_id='LANE_1',
@@ -122,6 +122,6 @@ def test_twin_atomic_publishing(tmp_path):
     # Each container has its own confirmed event record
     ev2 = repo.event(event_id_2)
     assert ev2['is_twin'] is False
-    assert ev2['container_number'] == 'WHSU2166712'
+    assert ev2['container_number'] == 'WHSU2166717'
     assert ev2['container_number_2'] is None
     assert ev2['status'] == 'CONFIRMED'

@@ -1,0 +1,33 @@
+[
+  {
+    "fixture": "independent photographs tiled; not a real simultaneous trailer scene",
+    "containers": 1,
+    "correctly_localized": 1,
+    "predicted_bodies": 1,
+    "ious": [
+      0.993218237225681
+    ]
+  },
+  {
+    "fixture": "independent photographs tiled; not a real simultaneous trailer scene",
+    "containers": 2,
+    "correctly_localized": 2,
+    "predicted_bodies": 2,
+    "ious": [
+      0.9939194242397323,
+      0.8989248889415882
+    ]
+  },
+  {
+    "fixture": "independent photographs tiled; not a real simultaneous trailer scene",
+    "containers": 4,
+    "correctly_localized": 2,
+    "predicted_bodies": 3,
+    "ious": [
+      0.4129723981622175,
+      0.46762008697729496,
+      0.8925822352266622,
+      0.9466726626399935
+    ]
+  }
+]

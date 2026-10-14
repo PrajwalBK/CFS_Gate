@@ -31,19 +31,23 @@
       <span>admin</span>
     </div>
     <div class="cloud-sync-status-badge"
-         [class.online]="cloudSync()?.enabled && cloudSync()?.is_online && (cloudSync()?.pending_count || 0) === 0"
-         [class.syncing]="cloudSync()?.enabled && cloudSync()?.is_online && (cloudSync()?.pending_count || 0) > 0"
-         [class.offline]="cloudSync()?.enabled && !cloudSync()?.is_online"
+         [class.online]="cloudSync()?.enabled && cloudSync()?.is_online && (cloudSync()?.pending_count || 0) === 0 && cloudFailureCount() === 0"
+         [class.syncing]="cloudSync()?.enabled && cloudSync()?.is_online && (cloudSync()?.pending_count || 0) > 0 && cloudFailureCount() === 0"
+         [class.offline]="cloudSync()?.enabled && (!cloudSync()?.is_online || cloudFailureCount() > 0)"
          [class.disabled]="!cloudSync()?.enabled"
          [title]="cloudSync()?.last_error || (cloudSync()?.last_sync_time ? 'Last synced: ' + cloudSync()?.last_sync_time : 'Cloud Sync Status')">
       @if (cloudSync()?.enabled) {
-        @if (cloudSync()?.is_online) {
+        @if (cloudFailureCount() > 0) {
+          <span class="sync-dot offline"></span>
+          <span>Cloud: {{ cloudFailureCount() }} delivery issue(s)</span>
+          <button type="button" class="btn-mini-retry" [disabled]="syncBusy()" (click)="retrySync()" title="Retry failed cloud deliveries">↻</button>
+        } @else if (cloudSync()?.is_online) {
           @if ((cloudSync()?.pending_count || 0) > 0) {
             <span class="sync-dot pulsing"></span>
             <span>Cloud: Syncing ({{ cloudSync()?.pending_count }} pending)</span>
           } @else {
             <span class="sync-dot online"></span>
-            <span>Cloud: 🟢 Online (All synced)</span>
+            <span>Cloud: 🟢 Online (No pending deliveries)</span>
           }
         } @else {
           <span class="sync-dot offline"></span>
@@ -68,6 +72,15 @@
 
 <main>
   @if (cloudSync(); as cs) {
+    @if (cs.enabled && cloudFailureCount() > 0) {
+      <div class="offline-recovery-banner" role="alert">
+        <div class="offline-info">
+          <strong class="offline-title">CLOUD DELIVERY NEEDS ATTENTION</strong>
+          <span class="offline-msg">Rejected: {{ cs.delivery_counts?.['REJECTED'] || 0 }} · Blocked: {{ cs.delivery_counts?.['BLOCKED'] || 0 }} · Conflicts awaiting retry: {{ cs.delivery_counts?.['CONFLICT'] || 0 }}. These events have not been delivered.</span>
+        </div>
+        <button type="button" class="btn-retry-cloud-sync" [disabled]="syncBusy()" (click)="retrySync()">Retry Cloud Sync</button>
+      </div>
+    }
     @if (cs.enabled && !cs.is_online && cs.pending_count > 0) {
       <div class="offline-recovery-banner" role="alert">
         <div class="offline-banner-left">

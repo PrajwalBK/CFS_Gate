@@ -153,3 +153,11 @@ docs/chat.md
 *.7z
 *.rar
 ReachStacker*
+
+# Local acceptance-run media and isolated runtime evidence
+docs/local-media-validation/
+!docs/local-media-validation/README.md
+docs/snapshot-archive-validation/
+!docs/snapshot-archive-validation/README.md
+backend/models/acceptance-candidate.pt
+rollback-backups/

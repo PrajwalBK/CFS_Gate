@@ -33,6 +33,7 @@ def health(request: Request):
                          'enabled_cameras': len(enabled), 'models': runtime.model_status,
                          'processing_error': runtime.last_processing_error,
                          'ocr_spool': spool, 'ocr_spool_error': runtime.ocr_spool_error,
+                         'passage_finalizations_pending': runtime.passage_outbox.pending(),
                          'cloud_sync': cloud_sync,
                          'startup_error': request.app.state.startup_error}, status_code=200 if server_alive else 503)
 

@@ -59,11 +59,18 @@ class Database:
                     conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_synced_at DATETIME')
                 if 'cloud_event_id' not in cols:
                     conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_event_id VARCHAR(64)')
+                if 'cloud_delivery_state' not in cols:
+                    conn.exec_driver_sql("ALTER TABLE gate_events ADD COLUMN cloud_delivery_state VARCHAR(20) DEFAULT 'PENDING'")
+                    # Legacy acknowledgements cannot be distinguished from old
+                    # rejected/skipped rows; do not assert successful delivery.
+                    conn.exec_driver_sql("UPDATE gate_events SET cloud_delivery_state='LEGACY' WHERE cloud_synced=1")
+                if 'cloud_delivery_error' not in cols:
+                    conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_delivery_error VARCHAR(256)')
 
     def initialize(self):
         existing = set(inspect(self.engine).get_table_names())
         if SchemaVersion.__tablename__ in existing:
-            self.check()
+            self.check(require_delivery_state=False)
         elif existing.intersection(Base.metadata.tables):
             raise RuntimeError('Unversioned Gate tables exist; review schema before initializing')
         Base.metadata.create_all(self.engine)
@@ -75,11 +82,15 @@ class Database:
             elif version.version != SCHEMA_VERSION:
                 raise RuntimeError('Database schema version mismatch; explicit migration required')
 
-    def check(self):
+    def check(self, require_delivery_state=True):
         with self.sessions() as session:
             version = session.scalar(select(SchemaVersion.version).where(SchemaVersion.id == 1))
             if version != SCHEMA_VERSION:
                 raise RuntimeError('Initialize the database schema before starting processing')
+        if require_delivery_state:
+            columns = {c['name'] for c in inspect(self.engine).get_columns('gate_events')}
+            if not {'cloud_delivery_state', 'cloud_delivery_error'}.issubset(columns):
+                raise RuntimeError('Run app.database.initialize to add cloud delivery state columns')
 
     def close(self):
         self.engine.dispose()

@@ -23,9 +23,9 @@ def test_single_container_lifecycle(settings, camera):
     assert 'FRONT' in view.current.slots
 
     # Confirm event
-    view.confirm(view.current.origin, 'evt-single', 'MSCU1234567')
+    view.confirm(view.current.origin, 'evt-single', 'MSCU1234566')
     assert view.current.closed is True
-    assert view.current.container_number == 'MSCU1234567'
+    assert view.current.container_number == 'MSCU1234566'
 
 
 def test_containers_independent_no_twin_merging(settings, camera):
@@ -51,7 +51,7 @@ def test_independent_containers_saved_under_distinct_event_ids(repository, snaps
     repo = repository
 
     frame1, (det1,) = make_frame_detections(0, [(55, 20, 90, 80)], camera_id=camera.id)
-    val1 = Validation('MSCU1234567', 'MSCU1234567', 0.99, True, True, 'VALID', size_type='22G1')
+    val1 = Validation('MSCU1234566', 'MSCU1234566', 0.99, True, True, 'VALID', size_type='22G1')
     obs1 = Observation(f'container:{camera.id}:1', camera.gate_id, 1, det1, val1, 'IN',
                        frame1.image, frame1.timestamp, True, slot_position='SINGLE', is_twin=False)
 
@@ -62,7 +62,7 @@ def test_independent_containers_saved_under_distinct_event_ids(repository, snaps
 
     # 2. Container 2 on same trailer is processed independently as its own container / tracker ID
     frame2, (det2,) = make_frame_detections(1, [(10, 20, 45, 80)], camera_id=camera.id)
-    val2 = Validation('TGHU7654321', 'TGHU7654321', 0.98, True, True, 'VALID', size_type='22G1')
+    val2 = Validation('TGHU7654320', 'TGHU7654320', 0.98, True, True, 'VALID', size_type='22G1')
     obs2 = Observation(f'container:{camera.id}:2', camera.gate_id, 2, det2, val2, 'IN',
                        frame2.image, frame2.timestamp, True, slot_position='SINGLE', is_twin=False)
 
@@ -76,8 +76,8 @@ def test_independent_containers_saved_under_distinct_event_ids(repository, snaps
     assert ev1 is not None and ev2 is not None
     assert ev1['is_twin'] is False
     assert ev2['is_twin'] is False
-    assert ev1['container_number'] == 'MSCU1234567'
-    assert ev2['container_number'] == 'TGHU7654321'
+    assert ev1['container_number'] == 'MSCU1234566'
+    assert ev2['container_number'] == 'TGHU7654320'
     assert ev1['container_number_2'] is None
     assert ev2['container_number_2'] is None
     assert ev1['status'] == 'CONFIRMED'
@@ -88,7 +88,7 @@ def test_trailer_with_two_20ft_containers_independent_passage_sessions(repositor
     """
     Mandatory Rule:
     2 physical containers = 2 independent detections = 2 unique track IDs = 2 container records = 2 event/visit IDs.
-    Trailer with Container 1 (ABCU1234567, 22G1, track 101) and Container 2 (XYZU7654321, 22G1, track 102).
+    Trailer with Container 1 (ABCU1234560, 22G1, track 101) and Container 2 (XYZU7654323, 22G1, track 102).
     Both must be tracked and recorded independently.
     """
     from app.events.passage_session import PassageSessionManager
@@ -116,10 +116,10 @@ def test_trailer_with_two_20ft_containers_independent_passage_sessions(repositor
     assert cand_c2 is not None
 
     # 3. OCR results arrive independently
-    mgr.record_ocr_result(camera.gate_id, OCRRead(raw_text='ABCU1234567', confidence=0.98), container_slot='CONTAINER_1')
+    mgr.record_ocr_result(camera.gate_id, OCRRead(raw_text='ABCU1234560', confidence=0.98), container_slot='CONTAINER_1')
     mgr.record_ocr_result(camera.gate_id, OCRRead(raw_text='22G1', confidence=0.95), container_slot='CONTAINER_1')
 
-    mgr.record_ocr_result(camera.gate_id, OCRRead(raw_text='XYZU7654321', confidence=0.97), container_slot='CONTAINER_2')
+    mgr.record_ocr_result(camera.gate_id, OCRRead(raw_text='XYZU7654323', confidence=0.97), container_slot='CONTAINER_2')
     mgr.record_ocr_result(camera.gate_id, OCRRead(raw_text='22G1', confidence=0.94), container_slot='CONTAINER_2')
 
     # 4. Trailer clears the gate
@@ -134,8 +134,8 @@ def test_trailer_with_two_20ft_containers_independent_passage_sessions(repositor
 
     assert s1.track_id == 101
     assert s2.track_id == 102
-    assert s1.confirmed_container_number == 'ABCU1234567'
-    assert s2.confirmed_container_number == 'XYZU7654321'
+    assert s1.confirmed_container_number == 'ABCU1234560'
+    assert s2.confirmed_container_number == 'XYZU7654323'
     assert s1.confirmed_iso_code == '22G1'
     assert s2.confirmed_iso_code == '22G1'
     assert s1.event_id != s2.event_id
@@ -148,8 +148,8 @@ def test_trailer_with_two_20ft_containers_independent_passage_sessions(repositor
     ev1 = repository.event(ev1_id)
     ev2 = repository.event(ev2_id)
     assert ev1 is not None and ev2 is not None
-    assert ev1['container_number'] == 'ABCU1234567'
-    assert ev2['container_number'] == 'XYZU7654321'
+    assert ev1['container_number'] == 'ABCU1234560'
+    assert ev2['container_number'] == 'XYZU7654323'
     assert ev1['status'] == 'CONFIRMED'
     assert ev2['status'] == 'CONFIRMED'
     assert ev1['is_twin'] is False

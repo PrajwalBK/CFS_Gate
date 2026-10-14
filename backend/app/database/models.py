@@ -42,6 +42,8 @@ class GateEvent(Base):
     cloud_synced: Mapped[bool] = mapped_column(Boolean, default=False)
     cloud_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cloud_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cloud_delivery_state: Mapped[str | None] = mapped_column(String(20), default='PENDING', nullable=True)
+    cloud_delivery_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     __table_args__ = (Index('ix_gate_identity_time', 'gate_id', 'container_number', 'event_type', 'timestamp'),)
 

@@ -86,7 +86,7 @@ def test_save_observation_deduplicates_by_image_and_timestamp(tmp_path):
     assert event_id2 == event_id1
 
 
-def test_canonical_event_id_resolves_duplicate_by_image(tmp_path):
+def test_canonical_event_id_does_not_merge_distinct_valid_numbers_by_image(tmp_path):
     from app.config.settings import CameraConfig
     db = Database("sqlite:///:memory:")
     db.initialize()
@@ -122,6 +122,6 @@ def test_canonical_event_id_resolves_duplicate_by_image(tmp_path):
     snapshots.save_side_snapshot("ev-1-primary", "gate-in-1", truck_scene)
     snapshots.save_side_snapshot("ev-2-duplicate", "gate-in-1", truck_scene)
 
-    # canonical_event_id should resolve ev-2-duplicate to ev-1-primary
+    # Similar pixels cannot override two different checksum-valid identities.
     canonical = repo.canonical_event_id("ev-2-duplicate", max_gap_seconds=300, snapshots=snapshots)
-    assert canonical == "ev-1-primary"
+    assert canonical == "ev-2-duplicate"

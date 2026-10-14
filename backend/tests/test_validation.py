@@ -11,10 +11,10 @@ def test_valid_container(text):
     assert value.valid_format and value.valid_check_digit
 
 
-def test_six_digit_prefix_derives_check_digit():
+def test_missing_check_digit_cannot_be_confirmed():
     val = ContainerValidator().validate(OCRRead('GXYU 509070', .95))
-    assert val.normalized_text == 'GXYU5090704'
-    assert val.valid_format and val.valid_check_digit and val.validation_status == 'VALID'
+    assert val.normalized_text == 'GXYU509070'
+    assert not val.valid_check_digit
 
 
 @pytest.mark.parametrize('text,status', [('CSQU3054384', 'INVALID_CHECK_DIGIT'), ('CSQA3054383', 'INVALID_FORMAT'),
@@ -68,18 +68,28 @@ def test_delimiter_tolerant_container_read():
         '67.200 LBS'
     )
     val = ContainerValidator().validate(OCRRead(raw_trhu, .95))
-    assert val.normalized_text == 'TRHU1545895'
-    assert val.valid_format and val.valid_check_digit
-    assert val.validation_status == 'VALID'
+    assert not val.valid_check_digit
+    assert val.validation_status == 'INVALID_FORMAT'
     assert val.size_type == '22G1'
 
 
 def test_prefix_digit_repair_caiu():
     # CA1U2528405 has digit 1 instead of letter I; should repair to CAIU2528405 with matching check digit 5
     val = ContainerValidator().validate(OCRRead('CA1U2528405', 0.98))
-    assert val.normalized_text == 'CAIU2528405'
-    assert val.valid_format and val.valid_check_digit
-    assert val.validation_status == 'VALID'
+    assert val.normalized_text == 'CA1U2528405'
+    assert not val.valid_check_digit
+    assert val.validation_status == 'INVALID_FORMAT'
 
 
 
+
+
+@pytest.mark.parametrize('raw', ['TIIU 507766 45G1', 'MAERSK 123456', 'CA1U2528405', 'TRHU1 1545895'])
+def test_checksum_cannot_supply_missing_or_changed_characters(raw):
+    assert not ContainerValidator().validate(OCRRead(raw, .99)).valid_check_digit
+
+
+def test_real_visible_container_is_not_blacklisted():
+    result = ContainerValidator().validate(OCRRead('TIIU 507766 9 45G1', .99))
+    assert result.normalized_text == 'TIIU5077669'
+    assert result.valid_check_digit

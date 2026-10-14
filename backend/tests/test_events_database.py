@@ -218,7 +218,7 @@ def test_gate_in_and_gate_out_multicamera_trigger_and_companion_snapshots(reposi
     # ------------------ TEST GATE IN (ENTRY) ------------------
     # gate-in-1 triggers detection and captures companion frames from gate-in-2 and gate-in-3
     job_in = make_job(camera_id='gate-in-1', gate_id='lane-in', origin='dwell:gate-in-1:trk1', direction='ENTRY')
-    val_in = ContainerValidator().validate(OCRRead('MSKU 123456 7', 0.98))
+    val_in = ContainerValidator().validate(OCRRead('MSKU 123456 5', 0.98))
     extra_in = {
         'gate-in-2': np.full((100, 100, 3), 120, dtype=np.uint8),
         'gate-in-3': np.full((100, 100, 3), 180, dtype=np.uint8),
@@ -230,7 +230,7 @@ def test_gate_in_and_gate_out_multicamera_trigger_and_companion_snapshots(reposi
     ev_in = repository.event(eid_in)
     assert ev_in['gate_id'] == 'lane-in'
     assert ev_in['event_type'] == 'ENTRY'
-    assert ev_in['container_number'] == 'MSKU1234567'
+    assert ev_in['container_number'] == 'MSKU1234565'
     assert len(ev_in['snapshots']) == 3
     in_cam_ids = {s['camera_id'] for s in ev_in['snapshots']}
     assert in_cam_ids == {'gate-in-1', 'gate-in-2', 'gate-in-3'}

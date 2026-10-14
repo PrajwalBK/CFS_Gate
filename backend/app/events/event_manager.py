@@ -4,6 +4,7 @@ from datetime import datetime
 import logging
 import time
 from app.domain import Observation
+from app.ocr.validator import is_valid_iso_6346
 
 log = logging.getLogger('gate')
 
@@ -43,7 +44,8 @@ class EventManager:
             evidence.last_sequence = job.frame.sequence
         evidence.reads = evidence.reads[-self.settings.ocr_max_attempts:]
 
-        good = [r for r in evidence.reads if r and r.valid_check_digit and getattr(r, 'confidence', 1.0) >= self.settings.ocr_min_confidence]
+        good = [r for r in evidence.reads if r and r.valid_check_digit and is_valid_iso_6346(r.normalized_text)
+                and getattr(r, 'confidence', 1.0) >= self.settings.ocr_min_confidence]
         votes = Counter(r.normalized_text for r in good)
         best, count = votes.most_common(1)[0] if votes else (None, 0)
         tied = sum(v == count for v in votes.values()) > 1
@@ -107,7 +109,8 @@ class EventManager:
                           all_detections=list(getattr(proof, 'all_detections', [])),
                           slot_position='SINGLE',
                           event_id=getattr(job, 'event_id', None),
-                          is_twin=False)
+                          is_twin=False, source_id=proof.frame.source_id, frame_sequence=proof.frame.sequence,
+                          proof_container_number=validation.normalized_text if validation and validation.valid_check_digit else '')
 
         target_event_id = ongoing_event_id or evidence.event_id or getattr(job, 'event_id', None)
         options = {'ongoing_event_id': target_event_id} if target_event_id else {}
@@ -135,7 +138,8 @@ class EventManager:
         is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
         has_active_passage = bool(
             self.runtime and getattr(self.runtime, 'passage_sessions', None)
-            and self.runtime.passage_sessions.get_active_session(obs.gate_id)
+            and (any(s.event_id == event_id for s in self.runtime.passage_sessions.get_all_active_sessions(obs.gate_id))
+                 or self.runtime.passage_outbox.get(event_id))
         )
         should_dispatch = obs.confirmed and is_ocr_valid and (event_id not in self._dispatched_events) and not has_active_passage
         if self.dispatcher and should_dispatch:

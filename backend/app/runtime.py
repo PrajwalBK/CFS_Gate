@@ -36,6 +36,7 @@ from app.ocr.job_store import OCRJobStore
 from app.ocr.fast_selector import FastFrameSelector
 from app.events.pipeline_profiler import PipelineProfiler, LatencyRecord
 from app.events.passage_session import PassageSessionManager
+from app.events.passage_outbox import PassageOutbox
 
 log = logging.getLogger('gate')
 
@@ -97,7 +98,6 @@ class GateRuntime:
         self.validator = ContainerValidator()
         self.tracker = {c.id: TemporalTracker(settings.track_ttl_seconds) for c in cameras}
         self.queue = Queue(maxsize=settings.ocr_queue_size)
-        self.fast_ocr_queue = Queue(maxsize=settings.ocr_queue_size)
         self.profiler = PipelineProfiler(self.metrics)
         self.ocr_store = OCRJobStore(settings.upload_directory / 'ocr-spool', settings.ocr_spool_max_mb,
                                      image_root=snapshots.root)
@@ -107,8 +107,11 @@ class GateRuntime:
         self._state_lock = threading.Lock()
         self.occupancy = {c.id: ViewOccupancy(settings) for c in cameras}
         self.passages = PassageCollector(settings)
+        self.passage_outbox = PassageOutbox(settings.upload_directory / 'ocr-spool')
+        self._passage_commit_lock = threading.Lock()
         self.passage_sessions = PassageSessionManager(
-            settings, target_frames_per_camera=getattr(settings, 'passage_target_frames_per_camera', 10)
+            settings, target_frames_per_camera=getattr(settings, 'passage_target_frames_per_camera', 10),
+            outbox=self.passage_outbox
         )
         self._gate_cameras = {gate_id: [c.id for c in cameras if c.gate_id == gate_id]
                               for gate_id in {c.gate_id for c in cameras}}
@@ -120,6 +123,7 @@ class GateRuntime:
         self._recent = deque(maxlen=300)
         self._preview_detections = {}
         self._tracks = {}
+        self._pending_event_saves = {}
         self._confirmed_origins: set[str] = set()
         self._active_lane_events: dict[str, dict] = {}
         self._run_id = str(uuid4())
@@ -133,6 +137,9 @@ class GateRuntime:
         writer = threading.Thread(target=self._save_ocr_loop, name='gate-ocr-save', daemon=True)
         self._threads.append(writer)
         writer.start()
+        retry_thread = threading.Thread(target=self._passage_retry_loop, name='gate-passage-retry', daemon=True)
+        self._threads.append(retry_thread)
+        retry_thread.start()
         for camera in self.cameras:
             saved = self.videos.info(camera.id)
             if saved and saved.get('active') and self.videos.path(saved['stored_name']).is_file():
@@ -539,7 +546,9 @@ class GateRuntime:
                 infer_thread = threading.Thread(target=self._inference_loop, name='gate-inference', daemon=True)
                 self._threads.append(infer_thread)
                 infer_thread.start()
-                for idx in range(1, 4):
+                # One consumer owns event evidence and durable job completion.
+                # Multiple next_id readers can otherwise process the same job.
+                for idx in range(1, 2):
                     ocr_thread = threading.Thread(target=self._ocr_loop, name=f'gate-ocr-{idx}', daemon=True)
                     self._threads.append(ocr_thread)
                     ocr_thread.start()
@@ -642,8 +651,9 @@ class GateRuntime:
             d for d in detections
             if getattr(d, 'class_name', '') == 'container'
             and len(getattr(d, 'bbox', [])) == 4
-            and (d.bbox[2] - d.bbox[0]) >= 30.0
-            and (d.bbox[3] - d.bbox[1]) >= 20.0
+            and (d.bbox[2] - d.bbox[0]) >= 40.0
+            and (d.bbox[3] - d.bbox[1]) >= 30.0
+            and ((d.bbox[2] - d.bbox[0]) / max(d.bbox[3] - d.bbox[1], 1.0)) >= 0.50
         ]
         # Sort primary containers along camera direction/axis so CONTAINER_1 and CONTAINER_2 are consistent
         if len(primary_containers) >= 2:
@@ -687,23 +697,28 @@ class GateRuntime:
                     frame.image, frame.timestamp, c_dets,
                     gate_cameras=gate_cams, camera_role=camera.role,
                     container_slot=slot_key,
-                    track_id=c_track_id
+                    track_id=c_track_id, source_id=frame.source_id, frame_sequence=frame.sequence
                 )
         else:
+            # If no primary container is visible on this camera, check if there is an active session
+            # on this gate (e.g. established by a companion front/rear camera).
+            # Secondary text detections are only attached to an existing active container passage.
+            # They must NEVER invent a phantom container passage when a pedestrian or non-container passes!
+            active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_1')
             container_dets = [
                 d for d in detections
                 if d.class_name in ('container', 'container_number', 'iso_code')
                 and len(getattr(d, 'bbox', [])) == 4
-                and (d.bbox[2] - d.bbox[0]) >= 20.0
+                and (d.bbox[2] - d.bbox[0]) >= 25.0
                 and (d.bbox[3] - d.bbox[1]) >= 12.0
             ]
-            if container_dets:
+            if container_dets and active_slot_session and not active_slot_session.finalized:
                 self.passage_sessions.record_frame(
                     camera.id, camera.gate_id, camera.direction,
                     frame.image, frame.timestamp, detections,
                     gate_cameras=gate_cams, camera_role=camera.role,
                     container_slot='CONTAINER_1',
-                    track_id=tracks[0].id if tracks else 1
+                    track_id=tracks[0].id if tracks else 1, source_id=frame.source_id, frame_sequence=frame.sequence
                 )
             else:
                 lane_occupied = any(
@@ -865,34 +880,8 @@ class GateRuntime:
                     self.metrics.increment('frames_blur_skipped')
                     continue
 
-                # Parallel multi-camera instant frame collection across this gate's cameras
-                # Strictly require that other camera ALSO has an active container object in its view!
+                # Other cameras create their own exact-frame evidence.
                 companion_frames = {}
-                for other_cam in self.cameras:
-                    if other_cam.gate_id == camera.gate_id and other_cam.id != camera.id:
-                        prev_rec = self._preview_detections.get(other_cam.id)
-                        if not prev_rec:
-                            continue
-                        _src, prev_ts, prev_dets = prev_rec
-                        latest_gap = abs((frame.timestamp - prev_ts).total_seconds())
-                        if latest_gap > self.settings.cross_camera_view_window_seconds:
-                            continue
-                        has_other_container = any(
-                            getattr(d, 'class_name', '') in ('container', 'container_number', 'iso_code')
-                            for d in prev_dets
-                        )
-                        if not has_other_container:
-                            continue
-
-                        other_worker = self.manager.workers.get(other_cam.id)
-                        if other_worker:
-                            other_latest = other_worker.latest()
-                            if other_latest and other_latest.image is not None:
-                                if (getattr(camera, 'source_type', 'live') == 'file' and
-                                        getattr(other_cam, 'source_type', 'live') == 'file' and
-                                        not getattr(self.settings, 'allow_file_cross_camera_fusion', False)):
-                                    continue
-                                companion_frames[other_cam.id] = other_latest.image.copy()
 
                 is_stat = bool((active_slot_obj and active_slot_obj.stationary) or getattr(occupancy, 'stationary', False))
                 ent_done = bool(getattr(occupancy, 'entrance_complete', False) or is_stat)
@@ -909,8 +898,8 @@ class GateRuntime:
                 profiler_rec.filtering_ms = filt_ms
 
                 try:
-                    self.fast_ocr_queue.put_nowait((job, profiler_rec))
                     self.queue.put_nowait(job)
+                    self._pending_event_saves[event_id] = self._pending_event_saves.get(event_id, 0) + 1
                     state['pending'] = True
                     state['samples'] = state.get('samples', 0) + 1
                     if active_slot_obj and active_slot_obj.stationary:
@@ -932,6 +921,9 @@ class GateRuntime:
                 while not self._stop.is_set():
                     try:
                         self.ocr_store.save(job, crop)
+                        with self._state_lock:
+                            if job.event_id in self._pending_event_saves:
+                                self._pending_event_saves[job.event_id] = max(0, self._pending_event_saves[job.event_id] - 1)
                         self.ocr_spool_error = None
                         self.metrics.increment('ocr_jobs_saved')
                         with self._state_lock:
@@ -1022,49 +1014,6 @@ class GateRuntime:
                     self.passages.passages.pop(p.id, None)
                     self.ocr_store.link_passage(p.id, passage.id)
 
-    def _process_saved_ocr(self, job_id):
-        try:
-            job, crop, validation = self.ocr_store.load(job_id)
-        except (FileNotFoundError, OSError) as exc:
-            # Spool image files missing — likely orphaned DB rows from a previous
-            # crash or cross-device rehome failure.  Skip and discard gracefully.
-            log.warning('ocr_spool_image_missing', extra={'job_id': job_id,
-                         'error_type': type(exc).__name__}, exc_info=False)
-            self.ocr_store.complete(job_id)
-            return
-        if job.passage_id and job.passage_id not in self.passages.passages:
-            # A replay after restart must preserve its historical lane/event.
-            # Interrupted passages require review; no guessed completion.
-            from app.events.passages import Passage, Region
-            with self._state_lock:
-                passage = Passage(job.passage_id, job.detection.camera_id, job.frame.source_id,
-                    job.gate_id, job.passage_metadata['lane_id'], job.direction, job.started_at,
-                    job.frame.timestamp, job.track_id, tuple(job.passage_metadata['bbox']),
-                    closed=True, ambiguous=True, source_type=job.passage_metadata.get('source_type','file'),
-                    visit_id=getattr(job, 'event_id', None) or job.passage_id)
-                self.passages.passages[job.passage_id] = passage
-        if job.passage_id:
-            from app.events.passages import Region
-            with self._state_lock:
-                passage = self.passages.passages[job.passage_id]
-                if not any(r.id == job.region_id for r in passage.regions):
-                    passage.regions.append(Region(id=job.region_id, pending=1))
-        with self._state_lock:
-            track_state = self._tracks.get(job.origin_key)
-            if (track_state and track_state.get('done')) or job.origin_key in self._confirmed_origins:
-                prior = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
-                self.ocr_store.complete(job_id, prior.event_id or getattr(job, 'event_id', None))
-                return
-        prior = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
-        if prior.event_id:
-            prior_ev = self.repository.event(prior.event_id)
-            if prior_ev and prior_ev.get('status') == 'CONFIRMED':
-                if not prior_ev.get('iso_code_1') and not prior_ev.get('container_size'):
-                    pass  # Keep processing to extract ISO size/type code from feet markings
-                elif prior_ev.get('container_number'):
-                    self.ocr_store.complete(job_id, prior.event_id)
-                    self._confirm_occupancy(job, prior.event_id)
-                    return  # Already committed occupancy: no repeat OCR, event write or log.
     def _execute_ocr(self, job, crop=None, profiler_record=None):
         started = time.monotonic()
         read = None
@@ -1082,12 +1031,14 @@ class GateRuntime:
             c_box = job.detection.bbox
             c_w = max(1.0, c_box[2] - c_box[0])
             c_h = max(1.0, c_box[3] - c_box[1])
-            margin = 80
+            margin = 0 if job.detection.class_name in ("container", "container_object") else 80
 
             cointainer_candidates = []
             feet_candidates = []
 
             for d in job.all_detections:
+                if d.camera_id != job.frame.camera_id or d.frame_timestamp != job.frame.timestamp:
+                    continue
                 cls_name = d.class_name.lower()
                 fc_x = (d.bbox[0] + d.bbox[2]) / 2
                 fc_y = (d.bbox[1] + d.bbox[3]) / 2
@@ -1175,7 +1126,7 @@ class GateRuntime:
                                 validation = Validation(
                                     raw_text=f"{validation.raw_text} {f_r.raw_text}",
                                     normalized_text=validation.normalized_text,
-                                    confidence=max(validation.confidence, f_r.confidence),
+                                    confidence=validation.confidence,
                                     valid_format=validation.valid_format,
                                     valid_check_digit=validation.valid_check_digit,
                                     validation_status=validation.validation_status,
@@ -1219,7 +1170,7 @@ class GateRuntime:
                     main_val = Validation(
                         raw_text=f"{main_val.raw_text} {validation.raw_text}",
                         normalized_text=main_val.normalized_text,
-                        confidence=max(main_val.confidence, validation.confidence),
+                        confidence=main_val.confidence,
                         valid_format=main_val.valid_format,
                         valid_check_digit=main_val.valid_check_digit,
                         validation_status=main_val.validation_status,
@@ -1228,22 +1179,6 @@ class GateRuntime:
                 read = main_read
                 validation = main_val
 
-        # 3. FALLBACK TO COMPANION CAMERA FRAMES
-        if (validation is None or not validation.valid_check_digit) and not targeted_text_seen:
-            companion_dict = dict(getattr(job, 'companion_frames', {}) or {})
-            fast_ocr = getattr(self.ocr, 'primary', self.ocr)
-            for other_cam_id, comp_img in companion_dict.items():
-                if comp_img is not None and getattr(comp_img, 'size', 0) > 0:
-                    comp_read = fast_ocr.read(comp_img)
-                    t_val0 = time.perf_counter()
-                    comp_val = self.validator.validate(comp_read)
-                    t_iso_total += (time.perf_counter() - t_val0) * 1000.0
-                    if comp_val.valid_check_digit or (validation is None or comp_val.confidence > validation.confidence):
-                        read = comp_read
-                        validation = comp_val
-                        if validation.valid_check_digit:
-                            break
-
         ocr_duration = time.monotonic() - started
         self.metrics.latency('ocr', ocr_duration)
         if profiler_record:
@@ -1251,77 +1186,6 @@ class GateRuntime:
             profiler_record.iso_validation_ms = t_iso_total
 
         return read, validation
-
-    def _process_fast_ocr(self, job, profiler_record=None):
-        with self._state_lock:
-            track_state = self._tracks.get(job.origin_key)
-            if (track_state and track_state.get('done')) or job.origin_key in self._confirmed_origins:
-                return
-
-        read, validation = self._execute_ocr(job, profiler_record=profiler_record)
-        if validation is None:
-            validation = Validation(
-                raw_text='', normalized_text='', confidence=0.0,
-                valid_format=False, valid_check_digit=False, validation_status='NO_TEXT'
-            )
-
-        if job.passage_id:
-            with self._state_lock:
-                self.passages.result(job.passage_id, job.region_id, validation, job)
-            return
-
-        self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
-        try:
-            additional = dict(getattr(job, 'companion_frames', {}) or {})
-            ongoing = getattr(job, 'event_id', None)
-            slot_pos = getattr(job, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
-            active_session = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
-            if active_session:
-                ongoing = ongoing or active_session.event_id
-                self.passage_sessions.record_ocr_result(job.gate_id, validation, container_slot=slot_pos)
-            with self._state_lock:
-                lane_key = f"{job.gate_id}:{slot_pos}"
-                active_lane = self._active_lane_events.get(lane_key) or self._active_lane_events.get(job.gate_id)
-                if active_lane and active_lane.get('event_id'):
-                    ongoing = ongoing or active_lane['event_id']
-                for view in self.cameras:
-                    state = self.occupancy[view.id].current
-                    if (view.gate_id == job.gate_id and state and state.event_id):
-                        if not ongoing or state.container_number == validation.normalized_text:
-                            ongoing = state.event_id
-                            break
-            result = self.events.observe(job, validation, additional_frames=additional,
-                                         proof_job=job, ongoing_event_id=ongoing,
-                                         profiler_record=profiler_record)
-        finally:
-            self.events.evidence.pop(job.origin_key, None)
-
-        with self._state_lock:
-            state = self._tracks.get(job.origin_key)
-            if state:
-                state['pending'] = False
-                ev = self.repository.event(result[0]) if result else None
-                if ev:
-                    state['done'] = bool(ev.get('container_number'))
-                else:
-                    state['done'] = False
-
-        if result:
-            self._confirm_occupancy(job, result[0])
-            ev = self.repository.event(result[0])
-            if ev and ev.get('status') == 'CONFIRMED':
-                is_done = bool(ev.get('container_number'))
-                if is_done:
-                    with self._state_lock:
-                        self._confirmed_origins.add(job.origin_key)
-                    self.ocr_store.cancel_pending(job.origin_key, result[0])
-            self.metrics.increment('events_created' if result[1] else 'evidence_associated')
-            self.metrics.latency('event', (utcnow() - job.started_at).total_seconds())
-
-            if profiler_record:
-                cntr = validation.normalized_text if validation else ''
-                self.profiler.record_and_log(profiler_record, container_number=cntr)
-                log.info(profiler_record.summary())
 
     def _process_saved_ocr(self, job_id):
         try:
@@ -1373,25 +1237,18 @@ class GateRuntime:
 
         self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
         try:
-            additional = dict(getattr(job, 'companion_frames', {}) or {})
-            proof = self.ocr_store.best_proof(job.origin_key, job_id) or job
-            ongoing = getattr(job, 'event_id', None)
-            slot_pos = getattr(job, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+            additional = {}
+            expected = validation.normalized_text if validation and validation.valid_check_digit else None
+            proof = self.ocr_store.best_proof(job.origin_key, job_id, expected) or job
+            ongoing = job.event_id
+            slot_pos = job.slot_position or 'CONTAINER_1'
             active_session = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
-            if active_session:
-                ongoing = ongoing or active_session.event_id
-                self.passage_sessions.record_ocr_result(job.gate_id, validation, container_slot=slot_pos)
-            with self._state_lock:
-                lane_key = f"{job.gate_id}:{slot_pos}"
-                active_lane = self._active_lane_events.get(lane_key) or self._active_lane_events.get(job.gate_id)
-                if active_lane and active_lane.get('event_id'):
-                    ongoing = ongoing or active_lane['event_id']
-                for view in self.cameras:
-                    state = self.occupancy[view.id].current
-                    if (view.gate_id == job.gate_id and state and state.event_id):
-                        if not ongoing or state.container_number == validation.normalized_text:
-                            ongoing = state.event_id
-                            break
+            # A delayed job owns its original event. Never bind it to the current
+            # lane occupant or a different container slot.
+            self.passage_sessions.record_ocr_result(job.gate_id, validation,
+                container_slot=slot_pos, event_id=job.event_id, proof_job=job)
+            if not ongoing and active_session:
+                ongoing = active_session.event_id
             result = self.events.observe(job, validation, additional_frames=additional,
                                          proof_job=proof, ongoing_event_id=ongoing)
             self.ocr_store.complete(job_id, result[0] if result else None)
@@ -1436,11 +1293,36 @@ class GateRuntime:
                 self._active_lane_events[job.gate_id] = self._active_lane_events[f"{job.gate_id}:{slot_pos}"]
 
     def _finalize_passage_session(self, session):
+        # Stage before touching event DB. A crash/failure leaves the entire
+        # session available to the restart-safe worker, including best images.
+        self.passage_outbox.save(session)
+        self._retry_passage_finalizations()
+
+    def _retry_passage_finalizations(self):
+        with self._passage_commit_lock:
+            for session in self.passage_outbox.ready():
+                with self._state_lock:
+                    saving = self._pending_event_saves.get(session.event_id, 0)
+                if saving or self.ocr_store.event_pending(session.event_id):
+                    continue
+                self._commit_passage_session(session)
+
+    def _passage_retry_loop(self):
+        while not self._stop.is_set():
+            try:
+                self._retry_passage_finalizations()
+            except Exception as exc:
+                log.warning('passage_retry_store_error', extra={'error_type': type(exc).__name__})
+            self._stop.wait(1)
+
+    def _commit_passage_session(self, session):
         try:
             event_id = self.repository.finalize_passage_session(session, self.snapshots)
+            self.passage_outbox.complete(session.event_id)
+            self.passage_sessions.acknowledge(session.event_id)
             event = self.repository.event(event_id)
             if event and event.get('status') == 'CONFIRMED' and event.get('container_number'):
-                self.dispatcher.enqueue(None, event_id, force=True)
+                self.dispatcher.enqueue(None, event_id)
                 self.metrics.increment('passage_sessions_finalized')
                 if session.direction in ('EXIT', 'OUT', 'GATE_OUT'):
                     try:
@@ -1463,27 +1345,13 @@ class GateRuntime:
                     'snapshot_count': len(event.get('snapshots') or [])
                 })
         except Exception as exc:
+            self.passage_outbox.retry(session.event_id, type(exc).__name__)
             log.warning('passage_session_finalization_error', extra={'error': str(exc)})
 
     def _ocr_loop(self):
         while not self._stop.is_set():
             job_id = None
             try:
-                # 1. High-Speed In-Memory OCR Queue (Millisecond Real-Time Processing)
-                try:
-                    fast_item = self.fast_ocr_queue.get_nowait()
-                except Empty:
-                    fast_item = None
-
-                if fast_item is not None:
-                    job, profiler_rec = fast_item if isinstance(fast_item, tuple) else (fast_item, None)
-                    try:
-                        self._process_fast_ocr(job, profiler_rec)
-                    finally:
-                        self.fast_ocr_queue.task_done()
-                    continue
-
-                # 2. Spool Storage Recovery / Backlog
                 job_id = self.ocr_store.next_id()
                 self._finalize_passages()
                 if job_id is None:
