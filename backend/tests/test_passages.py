@@ -114,7 +114,7 @@ def test_runtime_keeps_passage_open_until_clear_and_confirms_two_slots(settings,
         empty=False
         def detect(self,frame):
             if self.empty: return []
-            return [Detection('camera-1',frame.timestamp,'truck',.95,(5,5,195,99)),
+            return [Detection('camera-1',frame.timestamp,'container',.95,(5,5,195,99)),
                 Detection('camera-1',frame.timestamp,'container_number',.9,(20,30,65,45)),
                 Detection('camera-1',frame.timestamp,'container_number',.9,(120,30,165,45))]
     runtime.detector=Detector()

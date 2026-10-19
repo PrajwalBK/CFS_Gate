@@ -149,8 +149,9 @@ class Settings(BaseSettings):
     reconnect_max_seconds: float = Field(default=30, gt=0)
     max_frame_width: int = Field(default=1920, ge=320, le=4096)
     prosper_enabled: bool = False
-    prosper_api_base_url: str = 'https://syapi.prosperassettracking.com'
-    prosper_auth_url: str = 'https://cfsapi.prosperassettracking.com/api/auth/login'
+    prosper_api_base_url: str = 'https://api.smartyard.prosperinfotech.com/gate'
+    prosper_events_url: str | None = None
+    prosper_auth_url: str = 'https://api.smartyard.prosperinfotech.com/admin/api/auth/login'
     prosper_site_id: str = ''
     prosper_client_id: str = ''
     prosper_api_key: SecretStr | None = None

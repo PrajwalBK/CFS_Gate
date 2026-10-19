@@ -54,9 +54,15 @@ class SnapshotManager:
                     return None
             snap_dt = parse(snap_ts)
             camera = snapshot.get('camera_id')
-            detections = [d for d in (event_record.get('detections') or []) if d.get('camera_id') == camera]
+            all_dets = event_record.get('detections')
+            if all_dets is None:
+                return True
+            prov = snapshot.get('provenance') or {}
+            prov_dets = prov.get('container_detections') or []
+            detections = [d for d in all_dets if d.get('camera_id') == camera] or prov_dets
             if not detections:
-                # If no container detections recorded for this camera, reject as non-container frame
+                # If no container detections recorded specifically for this camera, reject it!
+                # Never accept empty background, building, or pedestrian frames as container proof.
                 return False
 
             candidates = []
@@ -64,11 +70,11 @@ class SnapshotManager:
                 cname = (detection.get('class_name') or '').lower()
                 if cname not in ('container_number', 'iso_code', 'container', 'cointainer', 'container_object'):
                     continue
-                det_dt = parse(detection.get('timestamp'))
+                det_dt = parse(detection.get('timestamp') if isinstance(detection, dict) else getattr(detection, 'frame_timestamp', None))
                 if snap_dt and det_dt:
                     if abs((snap_dt - det_dt).total_seconds()) > 35.0:
                         continue
-                bbox = detection.get('bbox') or []
+                bbox = detection.get('bbox') if isinstance(detection, dict) else getattr(detection, 'bbox', [])
                 if len(bbox) != 4:
                     continue
                 x1, y1, x2, y2 = [float(v) for v in bbox]

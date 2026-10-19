@@ -67,8 +67,17 @@ class ProsperSession:
 
     def __init__(self, settings):
         self.settings = settings
-        self.base_url = settings.prosper_api_base_url.rstrip('/')
-        self.auth_url = getattr(settings, 'prosper_auth_url', None) or 'https://cfsapi.prosperassettracking.com/api/auth/login'
+        self.base_url = (settings.prosper_api_base_url or '').strip().rstrip('/')
+        self.auth_url = (getattr(settings, 'prosper_auth_url', None) or 'https://api.smartyard.prosperinfotech.com/admin/api/auth/login').strip()
+        configured_events = getattr(settings, 'prosper_events_url', None)
+        if configured_events:
+            self.events_url = configured_events.strip()
+        elif self.base_url.endswith('/gate'):
+            self.events_url = f'{self.base_url}/api/v1/gate/events'
+        elif 'smartyard.prosperinfotech.com' in self.base_url:
+            self.events_url = f'{self.base_url}/gate/api/v1/gate/events'
+        else:
+            self.events_url = f'{self.base_url}/api/v1/gate/events'
         self.site_id = (settings.prosper_site_id or '').strip()
         self.client_id = (getattr(settings, 'prosper_client_id', None) or '').strip()
         self.session = requests.Session()
@@ -236,7 +245,7 @@ class ProsperSession:
 
         # Check whether this is the new /api/v1/gate/events schema or legacy /api/sites/{site_id}/gate-events
         if 'VisitId' in payload or 'Containers' in payload:
-            url = f'{self.base_url}/api/v1/gate/events'
+            url = self.events_url
         else:
             if not self.site_id:
                 log.warning('prosper_sync_skipped_missing_site_id')
@@ -411,6 +420,9 @@ class CloudOutboxDispatcher:
                     # container is represented by the original visit.
                     if hasattr(self.repository, 'mark_duplicate_event'):
                         self.repository.mark_duplicate_event(event_id, canonical)
+                        primary_ev = self.repository.event(canonical)
+                        if primary_ev and not primary_ev.get('cloud_synced') and primary_ev.get('status') == 'CONFIRMED':
+                            self.enqueue(None, canonical, force=True)
                     else:
                         self.repository.mark_cloud_synced(event_id)
                     log.info('prosper_duplicate_event_suppressed', extra={
@@ -537,6 +549,9 @@ class CloudOutboxDispatcher:
                     if canonical and canonical != event_id:
                         if hasattr(self.repository, 'mark_duplicate_event'):
                             self.repository.mark_duplicate_event(event_id, canonical)
+                            primary_ev = self.repository.event(canonical)
+                            if primary_ev and not primary_ev.get('cloud_synced') and primary_ev.get('status') == 'CONFIRMED':
+                                self.enqueue(None, canonical, force=True)
                         else:
                             self.repository.mark_cloud_synced(event_id)
                         log.info('prosper_duplicate_backlog_suppressed', extra={
@@ -576,6 +591,22 @@ class CloudOutboxDispatcher:
                     containers_list = []
                     if cntr1:
                         c1_images = []
+                        gate_id_for_event = (event_record.get('gate_id') if event_record else None) or (obs.gate_id if obs else None)
+                        expected_gate_cams = set()
+                        if self.runtime and getattr(self.runtime, 'cameras', None):
+                            expected_gate_cams = {
+                                c.id for c in self.runtime.cameras
+                                if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
+                            }
+                        elif self.settings and hasattr(self.settings, 'cameras'):
+                            try:
+                                expected_gate_cams = {
+                                    c.id for c in self.settings.cameras()
+                                    if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
+                                }
+                            except Exception:
+                                pass
+
                         primary_snap_id = event_record.get('primary_snapshot_id') if event_record else None
                         if event_record and event_record.get('snapshots') and self.snapshots:
                             # Group snapshots by physical camera_id.
@@ -588,6 +619,26 @@ class CloudOutboxDispatcher:
                                     continue
                                 cam_snapshots.setdefault(cam_id, []).append(snap)
 
+                            # Fallback: check filesystem event directory for any configured camera
+                            # snapshots that might have been written to disk
+                            event_id_str = str(event_record.get('id') if event_record else '')
+                            event_dir = self.snapshots.root / event_id_str if (self.snapshots and event_id_str) else None
+                            if event_dir and event_dir.is_dir():
+                                for missing_cam in (expected_gate_cams - set(cam_snapshots.keys())):
+                                    disk_cands = [
+                                        event_dir / f"{missing_cam}.jpg",
+                                        event_dir / f"{missing_cam}.png",
+                                    ] + list(event_dir.glob(f"*{missing_cam}*.jpg")) + list(event_dir.glob(f"*{missing_cam}*.png"))
+                                    for cand in disk_cands:
+                                        if cand.is_file() and not cand.name.endswith('.quality'):
+                                            cam_snapshots.setdefault(missing_cam, []).append({
+                                                'id': f'disk_{missing_cam}',
+                                                'camera_id': missing_cam,
+                                                'image_path': f'{event_id_str}/{cand.name}',
+                                                'timestamp': event_record.get('timestamp')
+                                            })
+                                            break
+
                             best_by_camera = {}
                             for cam_id, snaps in cam_snapshots.items():
                                 best_snap = None
@@ -595,6 +646,29 @@ class CloudOutboxDispatcher:
                                 best_score = -1.0
                                 for snap in snaps:
                                     try:
+                                        # Guard: if this snapshot belongs to a distinct container's OCR detection, skip it
+                                        snap_cam = snap.get('camera_id')
+                                        snap_ts = snap.get('timestamp')
+                                        from app.database.repositories.gate import is_distinct_container, datetime_diff_seconds
+                                        is_mismatched = False
+                                        for det in event_record.get('detections', []):
+                                            if det.get('camera_id') == snap_cam:
+                                                det_ts = det.get('timestamp')
+                                                if det_ts and snap_ts and datetime_diff_seconds(det_ts, snap_ts) <= 2.5:
+                                                    for ocr in event_record.get('ocr_results', []):
+                                                        if ocr.get('detection_id') == det.get('id'):
+                                                            ocr_text = ocr.get('normalized_text')
+                                                            if ocr_text and ocr.get('valid_check_digit') and is_distinct_container(cntr1, ocr_text):
+                                                                is_mismatched = True
+                                                                break
+                                            if is_mismatched:
+                                                break
+                                        if is_mismatched:
+                                            log.warning('prosper_snapshot_skipped_conflicting_container', extra={
+                                                'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1
+                                            })
+                                            continue
+
                                         snap_p = self.snapshots.path(snap['image_path'])
                                         if not snap_p.is_file():
                                             event_id_str = str(event_record.get('id') if event_record else '')
@@ -627,6 +701,13 @@ class CloudOutboxDispatcher:
                                         if not self._proof_is_usable(decoded, quality):
                                             continue
                                         score = quality
+                                        # Strictly require that the snapshot contains a verified container or container number
+                                        from app.snapshots.snapshot_manager import SnapshotManager
+                                        has_container = SnapshotManager._capture_has_visible_container(snap, event_record, decoded)
+                                        if not has_container:
+                                            # Skip frames without container present! Never send building/person/empty frames to API.
+                                            continue
+                                        score += 10000.0
                                         if primary_snap_id and snap.get('id') == primary_snap_id:
                                             score += 1000.0
                                         if score > best_score:
@@ -645,6 +726,12 @@ class CloudOutboxDispatcher:
                             elif self.repository and hasattr(self.repository, 'cameras'):
                                 try:
                                     for c in self.repository.cameras():
+                                        cam_roles[c.id.lower()] = getattr(c, 'role', '')
+                                except Exception:
+                                    pass
+                            if not cam_roles and self.settings and hasattr(self.settings, 'cameras'):
+                                try:
+                                    for c in self.settings.cameras():
                                         cam_roles[c.id.lower()] = getattr(c, 'role', '')
                                 except Exception:
                                     pass
@@ -701,6 +788,56 @@ class CloudOutboxDispatcher:
                                     })
                             except Exception:
                                 pass
+
+                        # Multi-camera completeness check:
+                        # Ensure every enabled camera configured for this gate has its best proof frame
+                        # included before finalizing and uploading the event to the cloud.
+                        gate_id_for_event = (event_record.get('gate_id') if event_record else None) or (obs.gate_id if obs else None)
+                        expected_gate_cams = set()
+                        if self.runtime and getattr(self.runtime, 'cameras', None):
+                            expected_gate_cams = {
+                                c.id for c in self.runtime.cameras
+                                if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
+                            }
+                        elif self.settings and hasattr(self.settings, 'cameras'):
+                            try:
+                                expected_gate_cams = {
+                                    c.id for c in self.settings.cameras()
+                                    if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
+                                }
+                            except Exception:
+                                pass
+
+                        captured_cams = {img['CameraId'] for img in c1_images}
+                        missing_cams = expected_gate_cams - captured_cams
+
+                        if missing_cams and not item.get('force'):
+                            enqueued_at = float(item.get('enqueued_at') or time.monotonic())
+                            ev_age = time.monotonic() - enqueued_at
+                            cam_waits = int(item.get('camera_wait_count', 0))
+                            if ev_age < 25.0 and cam_waits < 25:
+                                log.info('prosper_dispatch_waiting_for_all_cameras', extra={
+                                    'event_id': event_id,
+                                    'container_number': cntr1,
+                                    'missing_cameras': sorted(list(missing_cams)),
+                                    'captured_cameras': sorted(list(captured_cams)),
+                                    'ev_age': round(ev_age, 2),
+                                    'wait_count': cam_waits
+                                })
+                                item['camera_wait_count'] = cam_waits + 1
+                                item['not_before'] = time.monotonic() + 1.0
+                                self.queue.put(item)
+                                self.queue.task_done()
+                                continue
+                            else:
+                                log.warning('prosper_dispatch_proceeding_with_partial_cameras', extra={
+                                    'event_id': event_id,
+                                    'container_number': cntr1,
+                                    'missing_cameras': sorted(list(missing_cams)),
+                                    'captured_cameras': sorted(list(captured_cams)),
+                                    'ev_age': round(ev_age, 2),
+                                    'wait_count': cam_waits
+                                })
 
                         if len(c1_images) < 1:
                             log.warning('prosper_dispatch_skipped_no_proof_image', extra={'event_id': event_id, 'container_number': cntr1})

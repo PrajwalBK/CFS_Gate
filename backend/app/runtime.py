@@ -113,7 +113,7 @@ class GateRuntime:
             settings, target_frames_per_camera=getattr(settings, 'passage_target_frames_per_camera', 10),
             outbox=self.passage_outbox
         )
-        self._gate_cameras = {gate_id: [c.id for c in cameras if c.gate_id == gate_id]
+        self._gate_cameras = {gate_id: [c.id for c in cameras if c.gate_id == gate_id and getattr(c, 'enabled', True)]
                               for gate_id in {c.gate_id for c in cameras}}
         self._calibration_path = Path(settings.snapshot_directory).parent / 'lane_calibration.json'
         self._calibrations = self._load_calibrations()
@@ -126,6 +126,7 @@ class GateRuntime:
         self._pending_event_saves = {}
         self._confirmed_origins: set[str] = set()
         self._active_lane_events: dict[str, dict] = {}
+        self._full_frame_scans: set[str] = set()
         self._run_id = str(uuid4())
         self.detector = None
         self.ocr = None
@@ -611,14 +612,25 @@ class GateRuntime:
             # if camera.lanes and hasattr(self.detector, 'detect_vehicles'):
             #     detections += self.detector.detect_vehicles(frame)
             # Enforce container-only processing: do not detect, classify, track, OCR, or process
-            # trucks, vehicles, people, trailers, or any other non-container objects.
-            allowed_classes = {'container', 'container_object', 'container_number', 'iso_code'}
-            if camera.lanes:
-                allowed_classes |= {'truck', 'trailer'}
-            detections = [
-                d for d in detections
-                if d.class_name in allowed_classes
-            ]
+            # trucks, vehicles, people, trailers, cars, or any other non-container objects.
+            # The system detects and focuses exclusively on container objects, container numbers, and ISO codes.
+            from dataclasses import replace
+            filtered_detections = []
+            for d in detections:
+                cname = (getattr(d, 'class_name', '') or '').lower()
+                if cname in ('truck', 'trailer', 'person', 'car', 'vehicle', 'pedestrian', 'bus', 'bicycle'):
+                    continue
+                if cname == 'container_object':
+                    cname = 'container'
+                elif cname == 'cointainer':
+                    cname = 'container_number'
+                elif cname == 'feet':
+                    cname = 'iso_code'
+                if cname in ('container', 'container_number', 'iso_code'):
+                    if d.class_name != cname:
+                        d = replace(d, class_name=cname)
+                    filtered_detections.append(d)
+            detections = filtered_detections
             self.metrics.latency('inference', time.monotonic() - started)
         self.metrics.inference(camera.id)
         self.metrics.increment('inferences')
@@ -647,13 +659,19 @@ class GateRuntime:
         # Multi-camera multi-frame passage session recording:
         # Detect and track EVERY physical container independently (1 container, or 2 x 20ft containers on trailer).
         # A camera ONLY captures frames when a container is physically present in THAT camera's view!
+        # Strictly reject pedestrians, cars, and non-container objects.
+        h_frame, w_frame = frame.image.shape[:2]
         primary_containers = [
             d for d in detections
-            if getattr(d, 'class_name', '') == 'container'
+            if getattr(d, 'class_name', '') in ('container', 'container_object')
             and len(getattr(d, 'bbox', [])) == 4
             and (d.bbox[2] - d.bbox[0]) >= 40.0
             and (d.bbox[3] - d.bbox[1]) >= 30.0
-            and ((d.bbox[2] - d.bbox[0]) / max(d.bbox[3] - d.bbox[1], 1.0)) >= 0.50
+            and ((d.bbox[2] - d.bbox[0]) * (d.bbox[3] - d.bbox[1])) >= 1500.0
+            and (
+                (d.bbox[0] <= 5.0 or d.bbox[1] <= 5.0 or d.bbox[2] >= (w_frame - 5.0) or d.bbox[3] >= (h_frame - 5.0))
+                or ((d.bbox[2] - d.bbox[0]) / max(d.bbox[3] - d.bbox[1], 1.0)) >= 0.45
+            )
         ]
         # Sort primary containers along camera direction/axis so CONTAINER_1 and CONTAINER_2 are consistent
         if len(primary_containers) >= 2:
@@ -700,19 +718,19 @@ class GateRuntime:
                     track_id=c_track_id, source_id=frame.source_id, frame_sequence=frame.sequence
                 )
         else:
-            # If no primary container is visible on this camera, check if there is an active session
-            # on this gate (e.g. established by a companion front/rear camera).
-            # Secondary text detections are only attached to an existing active container passage.
-            # They must NEVER invent a phantom container passage when a pedestrian or non-container passes!
-            active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_1')
+            # If no primary container box was isolated, but container detections exist (e.g. container_number, iso_code, or boundary container):
             container_dets = [
                 d for d in detections
                 if d.class_name in ('container', 'container_number', 'iso_code')
                 and len(getattr(d, 'bbox', [])) == 4
-                and (d.bbox[2] - d.bbox[0]) >= 25.0
-                and (d.bbox[3] - d.bbox[1]) >= 12.0
+                and (d.bbox[2] - d.bbox[0]) >= 20.0
+                and (d.bbox[3] - d.bbox[1]) >= 10.0
             ]
-            if container_dets and active_slot_session and not active_slot_session.finalized:
+            has_cntr_number = any(d.class_name == 'container_number' for d in container_dets)
+            active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_1')
+
+            # Record if there is an active session, OR if container_number is directly visible
+            if container_dets and (active_slot_session or has_cntr_number):
                 self.passage_sessions.record_frame(
                     camera.id, camera.gate_id, camera.direction,
                     frame.image, frame.timestamp, detections,
@@ -801,16 +819,26 @@ class GateRuntime:
                 origin = f"{occupancy.origin}:track_{track.id}"
 
                 active_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot=slot_pos)
-                active_lane = self._active_lane_events.get(f"{camera.gate_id}:{slot_pos}") or self._active_lane_events.get(camera.gate_id)
+                if slot_pos == 'CONTAINER_1':
+                    active_lane = self._active_lane_events.get(f"{camera.gate_id}:{slot_pos}") or self._active_lane_events.get(camera.gate_id)
+                else:
+                    active_lane = self._active_lane_events.get(f"{camera.gate_id}:{slot_pos}")
                 active_event_id = None
                 if active_session:
                     active_event_id = active_session.event_id
-                elif active_lane:
+                elif active_lane and not active_lane.get('finalized_at'):
                     time_since_seen = abs((frame.timestamp - active_lane['last_seen']).total_seconds())
                     if time_since_seen <= max(self.settings.cross_camera_view_window_seconds, 35.0):
                         active_event_id = active_lane.get('event_id')
 
-                gate_event_id = active_event_id or getattr(occupancy, 'event_id', None)
+                if getattr(occupancy, 'closed', False):
+                    gate_event_id = active_event_id
+                else:
+                    if slot_pos == 'CONTAINER_1':
+                        gate_event_id = active_event_id or getattr(occupancy, 'event_id', None)
+                    else:
+                        slot_obj = getattr(occupancy, 'slots', {}).get(slot_pos)
+                        gate_event_id = active_event_id or (getattr(slot_obj, 'event_id', None) if slot_obj else None)
 
                 if not gate_event_id:
                     for other_cam in self.cameras:
@@ -823,18 +851,32 @@ class GateRuntime:
                             if other_occ:
                                 time_gap = abs((frame.timestamp - other_occ.first_seen).total_seconds()) if other_occ.first_seen else 999.0
                                 if time_gap <= max(self.settings.cross_camera_view_window_seconds, 35.0) and other_occ.clear_since is None:
-                                    cand = getattr(other_occ, 'event_id', None) or getattr(other_occ, 'provisional_event_id', None)
+                                    other_prov_ids = getattr(other_occ, 'provisional_event_ids', {}) or {}
+                                    cand = other_prov_ids.get(slot_pos)
+                                    if not cand and slot_pos == 'CONTAINER_1':
+                                        cand = getattr(other_occ, 'event_id', None) or getattr(other_occ, 'provisional_event_id', None)
                                     if cand:
                                         gate_event_id = cand
                                         break
-                event_id = gate_event_id or getattr(occupancy, 'provisional_event_id', None) or str(uuid4())
-                occupancy.provisional_event_id = event_id
+                prov_ids = getattr(occupancy, 'provisional_event_ids', None)
+                if prov_ids is None:
+                    prov_ids = occupancy.provisional_event_ids = {}
+                event_id = gate_event_id or prov_ids.get(slot_pos)
+                if not event_id and slot_pos == 'CONTAINER_1':
+                    event_id = getattr(occupancy, 'provisional_event_id', None)
+                if not event_id:
+                    event_id = str(uuid4())
+                prov_ids[slot_pos] = event_id
+                if slot_pos == 'CONTAINER_1':
+                    occupancy.provisional_event_id = event_id
+
                 self._active_lane_events[f"{camera.gate_id}:{slot_pos}"] = {
                     'event_id': event_id,
                     'last_seen': frame.timestamp,
                     'camera_id': camera.id
                 }
-                self._active_lane_events[camera.gate_id] = self._active_lane_events[f"{camera.gate_id}:{slot_pos}"]
+                if slot_pos == 'CONTAINER_1':
+                    self._active_lane_events[camera.gate_id] = self._active_lane_events[f"{camera.gate_id}:{slot_pos}"]
 
                 state = self._tracks.setdefault(origin, {'pending': False, 'done': False, 'last_ocr': 0., 'seen': frame.timestamp, 'samples': 0, 'last_ocr_ts': None})
                 state['seen'] = frame.timestamp
@@ -1179,6 +1221,35 @@ class GateRuntime:
                 read = main_read
                 validation = main_val
 
+        # 3. FULL FRAME SCAN FALLBACK:
+        # Prioritize targeted number crops over full-frame scans.
+        # Only run full-frame scan AT MOST ONCE per vehicle passage if targeted crops found no number.
+        passage_key = str(getattr(job, 'event_id', None) or getattr(job, 'passage_id', None) or job.origin_key)
+        already_full_scanned = passage_key in self._full_frame_scans
+
+        # Also skip if container number is already confirmed for this passage
+        is_already_confirmed = False
+        if getattr(job, 'event_id', None) and self.repository:
+            try:
+                ev_check = self.repository.event(job.event_id)
+                if ev_check and ev_check.get('status') == 'CONFIRMED' and ev_check.get('container_number'):
+                    is_already_confirmed = True
+            except Exception:
+                pass
+
+        if (validation is None or not validation.valid_check_digit) and not already_full_scanned and not is_already_confirmed and getattr(job, 'frame', None) and getattr(job.frame, 'image', None) is not None:
+            self._full_frame_scans.add(passage_key)
+            if len(self._full_frame_scans) > 2000:
+                self._full_frame_scans.clear()
+            full_img = job.frame.image
+            full_read = self.ocr.read(full_img)
+            t_val0 = time.perf_counter()
+            full_val = self.validator.validate(full_read)
+            t_iso_total += (time.perf_counter() - t_val0) * 1000.0
+            if full_val.valid_check_digit:
+                read = full_read
+                validation = full_val
+
         ocr_duration = time.monotonic() - started
         self.metrics.latency('ocr', ocr_duration)
         if profiler_record:
@@ -1238,17 +1309,50 @@ class GateRuntime:
         self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
         try:
             additional = {}
+            slot_pos = job.slot_position or 'CONTAINER_1'
+            active_session = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
+            if hasattr(self, 'manager') and hasattr(self.manager, 'workers'):
+                for c in self.cameras:
+                    if c.gate_id == job.gate_id and c.id != job.frame.camera_id and getattr(c, 'enabled', True):
+                        w = self.manager.workers.get(c.id)
+                        if w:
+                            latest_f = w.latest()
+                            if latest_f and getattr(latest_f, 'image', None) is not None:
+                                prev = self._preview_detections.get(c.id)
+                                prev_dets = prev[2] if prev and len(prev) >= 3 else ()
+                                has_cntr = any(
+                                    getattr(d, 'class_name', '') in ('container', 'container_object')
+                                    for d in prev_dets
+                                )
+                                if has_cntr:
+                                    additional[c.id] = latest_f.image
+                                elif active_session and active_session.captured_frames.get(c.id):
+                                    best_c = max(active_session.captured_frames[c.id], key=lambda f: f.quality_score, default=None)
+                                    if best_c and any(getattr(d, 'class_name', '') in ('container', 'container_object') for d in (best_c.detections or [])):
+                                        additional[c.id] = best_c.image
             expected = validation.normalized_text if validation and validation.valid_check_digit else None
             proof = self.ocr_store.best_proof(job.origin_key, job_id, expected) or job
             ongoing = job.event_id
-            slot_pos = job.slot_position or 'CONTAINER_1'
-            active_session = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
             # A delayed job owns its original event. Never bind it to the current
             # lane occupant or a different container slot.
             self.passage_sessions.record_ocr_result(job.gate_id, validation,
                 container_slot=slot_pos, event_id=job.event_id, proof_job=job)
             if not ongoing and active_session:
                 ongoing = active_session.event_id
+            if not ongoing:
+                with self._state_lock:
+                    if slot_pos == 'CONTAINER_1':
+                        active_lane = self._active_lane_events.get(f"{job.gate_id}:{slot_pos}") or self._active_lane_events.get(job.gate_id)
+                    else:
+                        active_lane = self._active_lane_events.get(f"{job.gate_id}:{slot_pos}")
+                    if active_lane and active_lane.get('event_id') and not active_lane.get('finalized_at'):
+                        lane_num = active_lane.get('container_number')
+                        val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
+                        from app.database.repositories.gate import is_distinct_container
+                        if lane_num and val_num and is_distinct_container(lane_num, val_num):
+                            ongoing = None
+                        else:
+                            ongoing = active_lane.get('event_id')
             result = self.events.observe(job, validation, additional_frames=additional,
                                          proof_job=proof, ongoing_event_id=ongoing)
             self.ocr_store.complete(job_id, result[0] if result else None)
@@ -1290,13 +1394,33 @@ class GateRuntime:
                     'last_seen': job.frame.timestamp,
                     'camera_id': job.detection.camera_id
                 }
-                self._active_lane_events[job.gate_id] = self._active_lane_events[f"{job.gate_id}:{slot_pos}"]
+                if slot_pos == 'CONTAINER_1':
+                    self._active_lane_events[job.gate_id] = self._active_lane_events[f"{job.gate_id}:{slot_pos}"]
 
     def _finalize_passage_session(self, session):
         # Stage before touching event DB. A crash/failure leaves the entire
         # session available to the restart-safe worker, including best images.
         self.passage_outbox.save(session)
         self._retry_passage_finalizations()
+        with self._state_lock:
+            # Retain finalized event info for the dedup window so trailing OCR jobs in flight bind to it
+            self._active_lane_events[f"{session.gate_id}:{session.container_slot}"] = {
+                'event_id': session.event_id,
+                'container_number': session.confirmed_container_number,
+                'last_seen': session.last_seen,
+                'finalized_at': time.monotonic(),
+                'camera_id': session.cameras[0] if session.cameras else None
+            }
+            if session.container_slot == 'CONTAINER_1':
+                self._active_lane_events[session.gate_id] = self._active_lane_events[f"{session.gate_id}:{session.container_slot}"]
+            for view in self.cameras:
+                if view.gate_id == session.gate_id and view.id in self.occupancy:
+                    occ = self.occupancy[view.id].current
+                    if occ and (getattr(occ, 'event_id', None) == session.event_id or getattr(occ, 'provisional_event_id', None) == session.event_id):
+                        other_active = self.passage_sessions.get_active_session(session.gate_id,
+                            container_slot='CONTAINER_2' if session.container_slot == 'CONTAINER_1' else 'CONTAINER_1')
+                        if not other_active:
+                            self.occupancy[view.id].current = None
 
     def _retry_passage_finalizations(self):
         with self._passage_commit_lock:
@@ -1322,6 +1446,7 @@ class GateRuntime:
             self.passage_sessions.acknowledge(session.event_id)
             event = self.repository.event(event_id)
             if event and event.get('status') == 'CONFIRMED' and event.get('container_number'):
+                self.ocr_store.cancel_event_pending(event_id)
                 self.dispatcher.enqueue(None, event_id)
                 self.metrics.increment('passage_sessions_finalized')
                 if session.direction in ('EXIT', 'OUT', 'GATE_OUT'):

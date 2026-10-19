@@ -110,17 +110,17 @@ def evaluate_frame_quality(image: np.ndarray, detections: list[Any] = (), camera
             is_clipped = (bbox[0] < 5 or bbox[1] < 5 or bbox[2] > (w - 5) or bbox[3] > (h - 5))
 
             if cname == 'container':
-                # Well-framed container occupying >= 5% of frame area
-                if area_ratio >= 0.05 and bw >= 60.0 and bh >= 40.0:
+                # Well-framed container occupying >= 2% of frame area (captures approaching and distant containers)
+                if area_ratio >= 0.02 and bw >= 45.0 and bh >= 30.0:
                     c_val = 120.0 * conf * min(1.0, area_ratio * 3.0)
-                    if is_clipped and area_ratio < 0.20:
+                    if is_clipped and area_ratio < 0.15:
                         c_val *= 0.70  # Edge-clipped sliver penalty
                         has_occlusion_penalty = True
                     container_score = max(container_score, c_val)
 
-                    # Bounding box aspect ratio quality (containers typically 1.2 to 3.5 aspect ratio)
+                    # Bounding box aspect ratio quality (containers typically 0.8 to 4.5 aspect ratio)
                     aspect = bw / max(1.0, bh)
-                    if 0.8 <= aspect <= 4.5:
+                    if 0.7 <= aspect <= 4.5:
                         bbox_quality_score = max(bbox_quality_score, 25.0 * conf)
             elif cname == 'container_number':
                 if bw >= 35.0 and bh >= 10.0:
@@ -186,8 +186,10 @@ class ContainerPassageSession:
                  cameras: list[str], created_at: datetime,
                  target_frames_per_camera: int = 10,
                  container_slot: str = 'CONTAINER_1',
-                 track_id: Optional[int] = None, min_ocr_confidence: float = 0.6):
+                 track_id: Optional[int] = None, min_ocr_confidence: float = 0.6,
+                 cross_camera_window: float = 25.0):
         self.min_ocr_confidence = min_ocr_confidence
+        self.cross_camera_window = cross_camera_window
         self.session_id = session_id
         self.gate_id = gate_id
         self.direction = direction
@@ -405,26 +407,33 @@ class ContainerPassageSession:
     def is_ready_to_finalize(self, now: datetime, gate_clear_seconds: float = 6.0) -> bool:
         """
         Determine if the session has collected its target evidence and the container has cleared the gate.
+        Accuracy is prioritized over speed: ensure all enabled cameras on the gate have an opportunity
+        to capture the passing container before finalizing and sending data to the cloud API.
         """
         with self._lock:
             if self.finalized:
                 return False
 
-            # Zone clearance: container is no longer visible on any camera for >= gate_clear_seconds
+            all_cams_captured = (
+                bool(self.cameras) and
+                all(bool(self.captured_frames.get(c)) for c in self.cameras)
+            )
+
+            # Zone clearance: all cameras on lane confirmed vehicle cleared
             if self.clear_since is not None:
                 clear_duration = abs((now - self.clear_since).total_seconds())
                 if clear_duration >= gate_clear_seconds:
                     return True
 
-            # If the session has a confirmed container number and evidence captured across cameras,
-            # and no new frames have arrived for at least 2.5 seconds, it is ready to finalize.
-            if self.confirmed_container_number and len(self.captured_frames) >= 1:
-                idle_seconds = abs((now - self.last_seen).total_seconds())
-                if idle_seconds >= 2.5:
+            idle_seconds = abs((now - self.last_seen).total_seconds())
+            if all_cams_captured:
+                if idle_seconds >= max(4.0, gate_clear_seconds):
                     return True
+                return False
 
-            # Safety timeout: if session has been seen and idle for >= (gate_clear_seconds + 2.0)
-            if abs((now - self.last_seen).total_seconds()) >= (gate_clear_seconds + 2.0):
+            # If not all cameras have captured frames yet, wait for cross-camera window
+            cross_window = max(getattr(self, 'cross_camera_window', 25.0), 20.0)
+            if idle_seconds >= cross_window:
                 return True
 
             return False
@@ -472,8 +481,10 @@ class PassageSessionManager:
                     seen_tracks = session.tracks_by_camera.get(camera_id, set())
                     if seen_tracks and track_id not in seen_tracks:
                         duration = abs((timestamp - session.created_at).total_seconds())
-                        if duration >= 1.5 or session.confirmed_container_number:
+                        if session.clear_since is not None or duration >= 1.5:
                             new_track_on_camera = True
+                        else:
+                            session.record_camera_track(camera_id, track_id)
 
                 # 2. Track ID change on session
                 new_session_track = False
@@ -527,7 +538,8 @@ class PassageSessionManager:
                     target_frames_per_camera=self.target_frames_per_camera,
                     container_slot=container_slot,
                     track_id=track_id,
-                    min_ocr_confidence=getattr(self.settings, "ocr_min_confidence", 0.6)
+                    min_ocr_confidence=getattr(self.settings, "ocr_min_confidence", 0.6),
+                    cross_camera_window=float(getattr(self.settings, 'cross_camera_view_window_seconds', 25.0) if self.settings else 25.0)
                 )
                 if camera_id and track_id is not None:
                     session.record_camera_track(camera_id, track_id)

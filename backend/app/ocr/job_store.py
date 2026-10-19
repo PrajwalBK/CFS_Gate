@@ -444,8 +444,21 @@ class OCRJobStore:
             db.execute("UPDATE jobs SET state='DONE', event_id=?, error_type=NULL, retry_at=? WHERE origin=? AND state='PENDING'",
                        (event_id, time.time(), origin))
 
+    def cancel_event_pending(self, event_id):
+        if not event_id:
+            return
+        with self.connection() as db:
+            db.execute("UPDATE jobs SET state='DONE', error_type=NULL, retry_at=? WHERE (event_id=? OR metadata LIKE ?) AND state='PENDING'",
+                       (time.time(), str(event_id), f'%"{event_id}"%'))
+
     def clean_completed(self, max_age_seconds=10, protected_origins=()):
         self._prune_completed(0, protected_origins)
+        try:
+            with self.connection() as db:
+                cutoff = time.time() - 3600
+                db.execute("DELETE FROM jobs WHERE state='DONE' AND retry_at < ?", (cutoff,))
+        except Exception:
+            pass
 
     def _prune_completed(self, incoming_bytes, protected_origins=()):
         """Remove oldest completed spool copies only when the size/free-space limit requires it."""

@@ -81,12 +81,32 @@ class EventManager:
         if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and (count >= 1 or (consensus_val and consensus_val.valid_check_digit)) and not tied:
             confirmed = True
         if not confirmed:
-            # Let the truck complete its entrance before publishing an unconfirmed / NEEDS_REVIEW event!
-            is_entrance_done = getattr(job, 'entrance_complete', True) or getattr(job, 'is_stationary', True)
+            # While attempts remain, do not prematurely publish an unconfirmed / NEEDS_REVIEW row.
+            # Give the system time to read more frames of the passing container.
             if len(evidence.reads) < self.settings.ocr_max_attempts:
-                # If we have a valid check-digit candidate, wait for confirmation votes
-                if count >= 1 or not is_entrance_done:
-                    return None
+                return None
+
+            # Even when attempts are exhausted for this camera/track:
+            # If an event is already ongoing or confirmed on this lane, bind evidence to it.
+            if not ongoing_event_id and self.runtime:
+                slot_pos = getattr(job, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+                active_sess = self.runtime.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
+                if active_sess:
+                    ongoing_event_id = active_sess.event_id
+                if not ongoing_event_id:
+                    if slot_pos == 'CONTAINER_1':
+                        active_lane = self.runtime._active_lane_events.get(f"{job.gate_id}:{slot_pos}") or self.runtime._active_lane_events.get(job.gate_id)
+                    else:
+                        active_lane = self.runtime._active_lane_events.get(f"{job.gate_id}:{slot_pos}")
+                    if active_lane and active_lane.get('event_id') and not active_lane.get('finalized_at'):
+                        lane_num = active_lane.get('container_number')
+                        val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
+                        from app.database.repositories.gate import is_distinct_container
+                        if lane_num and val_num and is_distinct_container(lane_num, val_num):
+                            ongoing_event_id = None
+                        else:
+                            ongoing_event_id = active_lane.get('event_id')
+
             # If all attempts yielded no readable text, flag for review with an alert rather than silently dropping
             if not any(getattr(r, 'raw_text', None) for r in evidence.reads if r):
                 from app.domain import Validation
@@ -104,10 +124,11 @@ class EventManager:
         else:
             selected = consensus_val or validation
         proof = proof_job or job
+        slot_pos = getattr(job, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
         obs = Observation(job.origin_key, job.gate_id, job.track_id, proof.detection, selected,
                           job.direction, proof.frame.image, job.started_at, confirmed,
                           all_detections=list(getattr(proof, 'all_detections', [])),
-                          slot_position='SINGLE',
+                          slot_position=slot_pos,
                           event_id=getattr(job, 'event_id', None),
                           is_twin=False, source_id=proof.frame.source_id, frame_sequence=proof.frame.sequence,
                           proof_container_number=validation.normalized_text if validation and validation.valid_check_digit else '')
@@ -138,7 +159,7 @@ class EventManager:
         is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
         has_active_passage = bool(
             self.runtime and getattr(self.runtime, 'passage_sessions', None)
-            and (any(s.event_id == event_id for s in self.runtime.passage_sessions.get_all_active_sessions(obs.gate_id))
+            and (bool(self.runtime.passage_sessions.get_all_active_sessions(obs.gate_id))
                  or self.runtime.passage_outbox.get(event_id))
         )
         should_dispatch = obs.confirmed and is_ocr_valid and (event_id not in self._dispatched_events) and not has_active_passage

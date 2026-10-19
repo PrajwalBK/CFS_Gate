@@ -64,6 +64,7 @@ class Occupancy:
     slots: dict = field(default_factory=dict)
     active_slot: str = 'SINGLE'
     provisional_event_id: str | None = None
+    provisional_event_ids: dict = field(default_factory=dict)
     entrance_complete: bool = False
 
 
@@ -87,8 +88,6 @@ class ViewOccupancy:
         else:
             slot.stationary = (now - slot.stationary_since).total_seconds() >= self.settings.stationary_seconds
         slot.bbox = b
-        slot.last_measured = now
-
     def update(self, camera, frame, detections):
         now = frame.timestamp
         dwell_classes = getattr(self.settings, 'dwell_container_classes', None) or ['container', 'container_number', 'iso_code']
@@ -181,7 +180,7 @@ class ViewOccupancy:
         }
         self.current = Occupancy(frame.source_id, base_origin, best_b, center(best_b),
                                  now, now, now, event_id=None, is_twin=False, slots=slots, active_slot='SINGLE',
-                                 provisional_event_id=prov_id)
+                                 provisional_event_id=prov_id, provisional_event_ids={'CONTAINER_1': prov_id})
         return best_det
 
     def confirm(self, origin, event_id, container_number=None):

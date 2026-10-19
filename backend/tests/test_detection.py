@@ -139,3 +139,67 @@ def test_runtime_processes_only_containers(settings, camera, repository, snapsho
     recorded_dets = active_sess.captured_frames[camera.id][0].detections
     assert all(d.class_name in ('container', 'container_number', 'iso_code') for d in recorded_dets)
 
+
+def test_yolo_detector_rejects_person_vertical_geometry(settings, make_job):
+    class Box:
+        def __init__(self, cls_id, xyxy, conf=0.95):
+            self.cls = np.array(cls_id)
+            self.conf = np.array(conf)
+            self.xyxy = np.array([xyxy])
+
+    class GeometryModel:
+        def predict(self, **kwargs):
+            names = {
+                0: 'person',
+                1: 'truck',
+                2: 'container',
+            }
+            boxes = [
+                # Person detection (should be rejected by class filter)
+                Box(0, [10, 10, 40, 90]),
+                # Truck detection (should be rejected by class filter)
+                Box(1, [10, 10, 120, 90]),
+                # Container with vertical aspect ratio (e.g. person or pole falsely classified as container: w=30, h=80, aspect=0.375)
+                Box(2, [10, 10, 40, 90]),
+                # Legitimate container box (horizontal box: w=100, h=70, aspect=1.42)
+                Box(2, [10, 10, 110, 80]),
+            ]
+            return [SimpleNamespace(names=names, boxes=boxes)]
+
+    frame = make_job().frame
+    detector = YoloDetector(settings, GeometryModel())
+    dets = detector.detect(frame)
+
+    assert len(dets) == 1
+    assert dets[0].class_name == 'container'
+    assert dets[0].bbox == (10.0, 10.0, 110.0, 80.0)
+
+
+def test_runtime_rejects_truck_and_person_even_with_lanes(settings, camera, repository, snapshots, make_job):
+    from app.config.settings import LaneRegion
+    from app.runtime import GateRuntime
+
+    # Configure camera with lanes
+    camera.lanes = [LaneRegion(id='lane-1', polygon=[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])]
+    runtime = GateRuntime(settings, [camera], repository, snapshots)
+
+    class MixDetector:
+        def detect(self, frame):
+            return [
+                Detection(camera.id, frame.timestamp, 'truck', 0.99, (10, 10, 120, 80)),
+                Detection(camera.id, frame.timestamp, 'trailer', 0.95, (10, 10, 120, 80)),
+                Detection(camera.id, frame.timestamp, 'person', 0.98, (5, 5, 30, 70)),
+                Detection(camera.id, frame.timestamp, 'container', 0.91, (20, 20, 140, 90)),
+            ]
+
+    runtime.detector = MixDetector()
+    frame = make_job().frame
+    runtime.process_frame(camera, frame)
+
+    _src, _ts, preview = runtime._preview_detections[camera.id]
+    preview_classes = {d.class_name for d in preview}
+    assert preview_classes == {'container'}
+    assert 'truck' not in preview_classes
+    assert 'trailer' not in preview_classes
+    assert 'person' not in preview_classes
+

@@ -194,3 +194,38 @@ def test_container_number_alone_triggers_occupancy(settings, camera):
     assert view.current is not None
     assert view.status()['state'] in ('TRACKING', 'OCCUPIED')
 
+
+def test_trailing_and_intermediate_unconfirmed_reads_do_not_duplicate_confirmed_event(settings, repository, snapshots, camera, make_job):
+    """
+    Ensure intermediate and trailing frames on different tracks/cameras with unconfirmed
+    or missing container numbers do NOT create separate NEEDS_REVIEW rows when a confirmed
+    container event exists on the lane. Exactly 1 CONFIRMED row should exist.
+    """
+    from tests.test_events_database import observation
+    camera_2 = camera.model_copy(update={'id': 'camera-2'})
+    repository.sync_cameras([camera, camera_2])
+
+    # 1. First frame on camera-1 confirms the container
+    job1 = make_job(1, origin='dwell:camera-1:passage_1:track_1')
+    obs1 = observation(job1, text='PCIU2870680')
+    ev_id1, created1 = repository.save_observation(obs1, snapshots, 35.0)
+    assert created1 is True
+
+    # 2. Subsequent intermediate frames on camera-2 (e.g. ISO code only or unconfirmed text)
+    # on different tracks within 2 seconds of the confirmed event
+    for i in range(2, 6):
+        job_trail = make_job(i, camera_id='camera-2', origin=f'dwell:camera-2:passage_1:track_{i}',
+                             timestamp=job1.frame.timestamp + timedelta(seconds=0.5 * (i - 1)))
+        obs_trail = observation(job_trail, text='UNREADABLE')
+        ev_id_trail, created_trail = repository.save_observation(obs_trail, snapshots, 35.0)
+        assert created_trail is False
+        assert ev_id_trail == ev_id1
+
+    # Verify database has exactly 1 event total, which is CONFIRMED with the container number
+    events = repository.events()['items']
+    assert len(events) == 1
+    assert events[0]['id'] == ev_id1
+    assert events[0]['container_number'] == 'PCIU2870680'
+    assert events[0]['status'] == 'CONFIRMED'
+
+
