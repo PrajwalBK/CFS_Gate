@@ -82,3 +82,16 @@ def test_conflicting_observed_valid_ids_are_ambiguous():
         Validation('MSKU1234565', 'MSKU1234565', .99, True, True, 'VALID')])
     assert result.validation_status == 'AMBIGUOUS'
     assert not result.valid_check_digit
+
+
+def test_consensus_majority_and_confidence_overcomes_single_noisy_checksum_match():
+    # Coincidental valid check digit on a blurry frame (e.g. ADMU6211047 conf 0.679)
+    # followed by sharp reads of the true container (ADMU2111477 conf 0.985)
+    noisy = Validation('ADMU6211047', 'ADMU6211047', 0.679, True, True, 'VALID')
+    sharp1 = Validation('ADMU2111477', 'ADMU2111477', 0.985, True, True, 'VALID')
+    sharp2 = Validation('ADMU2111477', 'ADMU2111477', 0.989, True, True, 'VALID')
+    result = CharacterConsensus.resolve([noisy, sharp1, sharp2])
+    assert result.normalized_text == 'ADMU2111477'
+    assert result.valid_check_digit is True
+    assert result.validation_status == 'VALID'
+

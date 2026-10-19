@@ -15,7 +15,7 @@ from unittest.mock import Mock
 import cv2
 import numpy as np
 
-from app.domain import Detection, OCRRead
+from app.domain import Detection, OCRRead, Validation
 from app.config.settings import CameraConfig
 from app.events.passage_session import ContainerPassageSession, PassageSessionManager
 from app.events.passage_outbox import PassageOutbox
@@ -206,3 +206,18 @@ def test_real_http_payload_preserves_event_camera_and_image_bytes(settings, repo
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_passage_session_resolves_noisy_early_read_with_later_sharp_reads(make_job):
+    job = make_job()
+    session = ContainerPassageSession('test-admu', job.gate_id, 'ENTRY', [], job.frame.timestamp)
+    # Early distant/blurry frame with coincidental valid check digit (e.g. ADMU6211047 conf 0.679)
+    session.add_ocr_candidate(Validation('ADMU6211047', 'ADMU6211047', 0.679, True, True, 'VALID'))
+    # Later clear frames of true physical container (ADMU2111477 conf 0.985, 0.989)
+    session.add_ocr_candidate(Validation('ADMU2111477', 'ADMU2111477', 0.985, True, True, 'VALID'))
+    session.add_ocr_candidate(Validation('ADMU2111477', 'ADMU2111477', 0.989, True, True, 'VALID'))
+    assert not session.identity_conflict
+    num, iso, conf = session.get_consensus_container_number()
+    assert num == 'ADMU2111477'
+    assert conf >= 0.98
+

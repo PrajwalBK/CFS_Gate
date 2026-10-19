@@ -247,9 +247,14 @@ class ContainerPassageSession:
                 import re
                 if val_text and len(val_text) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', val_text):
                     if val_text != self.confirmed_container_number:
-                        if is_valid_iso_6346(val_text):
+                        val_conf = getattr(val, 'confidence', 0.0)
+                        same_prefix = (val_text[:4] == self.confirmed_container_number[:4])
+                        if val_conf > self.confirmed_confidence:
+                            self.confirmed_container_number = val_text
+                            self.confirmed_confidence = val_conf
+                            self.identity_conflict = False
+                        elif not same_prefix and is_valid_iso_6346(val_text) and abs(self.confirmed_confidence - val_conf) < 0.15:
                             self.identity_conflict = True
-                            # Contradicts confirmed container! Belongs to another physical container.
                             return None
 
             self.last_seen = max(self.last_seen, timestamp)
@@ -326,18 +331,30 @@ class ContainerPassageSession:
                 self.confirmed_iso_code = val.size_type
             return
 
-        # 3. Isolation protection: If confirmed container number is already established,
-        # reject reads from a completely distinct container (prevents Container B contamination)
-        if self.confirmed_container_number and norm != self.confirmed_container_number:
-            if is_valid_iso_6346(norm):
-                self.identity_conflict = True
-                return
-
+        # Always record candidate for character/identity consensus
         self.ocr_candidates.append(val)
-        if val.valid_check_digit and is_valid_iso_6346(norm) and (val.confidence > self.confirmed_confidence or not self.confirmed_container_number):
-            self.confirmed_container_number = norm
-            self.confirmed_confidence = val.confidence
-            if val.size_type:
+
+        is_valid_iso = bool(val.valid_check_digit and is_valid_iso_6346(norm))
+        if is_valid_iso:
+            if not self.confirmed_container_number:
+                self.confirmed_container_number = norm
+                self.confirmed_confidence = val.confidence
+            elif norm == self.confirmed_container_number:
+                if val.confidence > self.confirmed_confidence:
+                    self.confirmed_confidence = val.confidence
+            else:
+                # Different container number observed
+                same_prefix = (norm[:4] == self.confirmed_container_number[:4])
+                if val.confidence > self.confirmed_confidence:
+                    # New read is higher confidence: update confirmed container
+                    self.confirmed_container_number = norm
+                    self.confirmed_confidence = val.confidence
+                    self.identity_conflict = False
+                elif not same_prefix and abs(self.confirmed_confidence - val.confidence) < 0.15:
+                    # Distinct owner codes with comparable confidence -> real conflict
+                    self.identity_conflict = True
+
+            if val.size_type and not self.confirmed_iso_code:
                 self.confirmed_iso_code = val.size_type
 
     def get_best_frame_per_camera(self) -> Dict[str, CapturedFrameCandidate]:
@@ -382,10 +399,8 @@ class ContainerPassageSession:
         """
         import re
         with self._lock:
-            if self.identity_conflict:
-                return (None, self.confirmed_iso_code, 0.0)
             if self.ocr_candidates:
-                # Character-level consensus across all reads
+                # Character-level / identity consensus across all reads
                 consensus_engine = CharacterConsensus()
                 best_read = consensus_engine.resolve(self.ocr_candidates)
                 if best_read and best_read.normalized_text:
@@ -395,6 +410,9 @@ class ContainerPassageSession:
                         iso = (val.size_type if val else None) or self.confirmed_iso_code
                         conf = max(getattr(best_read, 'confidence', 0.8), self.confirmed_confidence)
                         return (norm, iso, conf)
+
+            if self.identity_conflict:
+                return (None, self.confirmed_iso_code, 0.0)
 
             # Fallback to any individual read that had a verified container format
             if self.confirmed_container_number:
@@ -506,6 +524,8 @@ class PassageSessionManager:
                     num, iso, conf = session.get_consensus_container_number()
                     if num:
                         session.confirmed_container_number = num
+                    elif session.identity_conflict:
+                        session.confirmed_container_number = None
                     if iso:
                         session.confirmed_iso_code = iso
                     if conf > session.confirmed_confidence:
@@ -659,6 +679,8 @@ class PassageSessionManager:
                     num, iso, conf = session.get_consensus_container_number()
                     if num:
                         session.confirmed_container_number = num
+                    elif session.identity_conflict:
+                        session.confirmed_container_number = None
                     if iso:
                         session.confirmed_iso_code = iso
                     if conf > session.confirmed_confidence:
