@@ -743,7 +743,9 @@ class GateRuntime:
                     (c.gate_id == camera.gate_id and self.occupancy.get(c.id) and self.occupancy[c.id].current and self.occupancy[c.id].current.clear_since is None)
                     for c in self.cameras
                 )
-                if not lane_occupied:
+                time_since_seen = abs((frame.timestamp - active_slot_session.last_seen).total_seconds()) if active_slot_session else 999.0
+                cross_window = max(float(getattr(self.settings, 'cross_camera_view_window_seconds', 25.0) or 25.0), 20.0)
+                if not lane_occupied and (not active_slot_session or time_since_seen >= cross_window):
                     self.passage_sessions.mark_clearing(camera.gate_id, frame.timestamp)
 
         # Check and finalize ready passage sessions

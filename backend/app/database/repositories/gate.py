@@ -200,6 +200,19 @@ class GateRepository:
                     SystemLog.event_id == session.event_id,
                     SystemLog.event_name == 'multi_camera_passage_finalized'))
                 if committed and existing:
+                    # If already confirmed with container number, nothing to update
+                    if existing.status == 'CONFIRMED' and existing.container_number:
+                        return session.event_id
+                    # If previously NEEDS_REVIEW / unconfirmed, and new consensus container number is now available:
+                    container_num, iso_code, conf = session.get_consensus_container_number()
+                    if container_num:
+                        existing.container_number = container_num
+                        if iso_code:
+                            existing.iso_code_1 = iso_code
+                        if is_valid_iso_6346(container_num):
+                            existing.status = 'CONFIRMED'
+                        db_session.flush()
+                        return session.event_id
                     return session.event_id
 
                 best_frames = session.get_best_frame_per_camera()
@@ -797,8 +810,11 @@ class GateRepository:
                     existing.is_twin = False
                     existing.container_number_2 = None
                     existing.iso_code_2 = None
-                    if not existing.container_number or (obs.confirmed and obs_conf >= prior_best_conf):
+                    is_obs_valid_iso = bool(number and is_valid_iso_6346(number))
+                    if (not existing.container_number and is_obs_valid_iso) or (is_obs_valid_iso and obs_conf >= prior_best_conf) or (obs.confirmed and obs_conf >= prior_best_conf):
                         existing.container_number = number or existing.container_number
+                        if is_obs_valid_iso:
+                            existing.status = 'CONFIRMED'
                     if size_type and not existing.iso_code_1:
                         existing.iso_code_1 = size_type
                     elif size_type and obs_conf >= prior_best_conf:

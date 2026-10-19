@@ -12,36 +12,10 @@ class YoloDetector:
             from ultralytics import YOLO
             model = YOLO(str(settings.model_path), task='detect')
         self.model = model
-        self.vehicle_model = None
-
     def detect_vehicles(self, frame):
-        """Local auxiliary truck model disabled.
-        The system detects and processes ONLY container objects.
+        """Truck and vehicle detection is permanently disabled.
+        The system detects and processes ONLY container objects using models/best.pt.
         """
-        # Non-container detection and processing code disabled:
-        # if self.vehicle_model is None:
-        #     path = self.settings.passage_vehicle_model_path
-        #     if not path.is_file():
-        #         return []  # No implicit model downloads on the edge device.
-        #     from ultralytics import YOLO
-        #     self.vehicle_model = YOLO(str(path), task='detect')
-        # model = self.vehicle_model
-        # classes = [i for i,name in model.names.items() if name in ('truck', 'trailer')]
-        # if not classes:
-        #     return []
-        # results = model.predict(source=frame.image,classes=classes,
-        #     conf=self.settings.confidence_threshold,imgsz=self.settings.model_image_size,
-        #     device=self.settings.model_device,verbose=False)
-        # output=[]
-        # for result in results:
-        #     if result.boxes is None:
-        #         continue
-        #     for box in result.boxes:
-        #         coords = tuple(float(v) for v in box.xyxy[0].tolist())
-        #         if all(math.isfinite(v) for v in coords):
-        #             output.append(Detection(frame.camera_id,frame.timestamp,
-        #                 str(result.names[int(box.cls.item())]),float(box.conf.item()),coords))
-        # return output
         return []
 
     def detect(self, frame: Frame) -> list[Detection]:

@@ -78,7 +78,6 @@ class Settings(BaseSettings):
     pipeline_enabled: bool = True
     model_backend: Literal['pytorch', 'onnx', 'tensorrt'] = 'pytorch'
     model_path: Path = Path('models/best.pt')
-    passage_vehicle_model_path: Path = Path('models/yolov8x.pt')
     model_device: str = 'cpu'
     model_image_size: int = Field(default=640, ge=32)
     class_aliases: dict[str, str] = {}
