@@ -319,6 +319,63 @@ class ProsperSession:
                     extra={'status_code': res.status_code, 'body': res.text[:300]})
         return False
 
+    def put_gate_event_images(self, cloud_event_id: str, payload: Dict[str, Any]) -> bool | str | dict:
+        """
+        Upload/update final multi-camera evidence images on the existing gate event.
+        PUT https://api.smartyard.prosperinfotech.com/gate/api/v1/gate/events/{eventId}/images
+        """
+        if not cloud_event_id:
+            log.warning('prosper_put_images_missing_cloud_event_id')
+            return False
+
+        headers = self.get_auth_headers()
+        if 'Authorization' not in headers and 'x-api-key' not in headers:
+            log.info('prosper_put_images_postponed_no_auth: Cloud authentication is not available.')
+            return 'OFFLINE'
+
+        headers['Content-Type'] = 'application/json'
+        url = f'{self.events_url}/{cloud_event_id}/images'
+
+        try:
+            res = self.session.put(url, json=payload, headers=headers, timeout=25)
+        except requests.exceptions.RequestException as e:
+            log.info('prosper_put_images_network_offline: %s. Deferred upload buffered locally.', e)
+            return 'OFFLINE'
+        except Exception as e:
+            log.warning('prosper_put_images_exception: %s', e)
+            return 'OFFLINE'
+
+        if res.status_code in (200, 201, 204):
+            resp_data = res.json() if res.content and res.status_code != 204 else {}
+            log.info('prosper_gate_event_images_updated', extra={
+                'cloud_event_id': cloud_event_id,
+                'status_code': res.status_code
+            })
+            return resp_data if resp_data else True
+
+        if res.status_code == 401:
+            log.warning('prosper_put_images_rejected_401: %s', res.text[:300])
+            with self._lock:
+                self._token = None
+                self._token_expires_at = 0.0
+                self._force_dynamic_auth = True
+            return 'OFFLINE'
+
+        if res.status_code == 404:
+            log.warning('prosper_put_images_event_not_found: %s %s', res.status_code, res.text[:300])
+            return 'NOT_FOUND'
+
+        if res.status_code in (500, 502, 503, 504):
+            log.info('prosper_put_images_cloud_service_unavailable: HTTP %s', res.status_code)
+            return 'OFFLINE'
+
+        if res.status_code in (400, 422):
+            log.warning('prosper_put_images_rejected: %s %s', res.status_code, res.text[:300])
+            return 'REJECTED'
+
+        log.warning('prosper_put_images_failed: %s %s', res.status_code, res.text[:300])
+        return False
+
 
 class CloudOutboxDispatcher:
     """
@@ -342,10 +399,45 @@ class CloudOutboxDispatcher:
         self._last_sync_time: Optional[str] = None
         self._last_error: Optional[str] = None
 
+        self._evidence_ready_events = set()
+        self._state_lock = threading.Lock()
+
         self.device_uuid = (
             settings.prosper_device_uuid
             or 'EDGE-GATE-01'
         )
+
+    def mark_evidence_ready(self, event_id: str):
+        """Mark container session evidence collection as finalized."""
+        with self._state_lock:
+            self._evidence_ready_events.add(event_id)
+        if self.repository:
+            try:
+                ev = self.repository.event(event_id)
+                if ev and ev.get('cloud_event_id'):
+                    self.enqueue(None, event_id, stage='PUT', force=True)
+            except Exception:
+                pass
+
+    def is_evidence_ready(self, event_id: str, event_record: Optional[dict] = None) -> bool:
+        """Check whether final multi-camera evidence images are ready for upload."""
+        with self._state_lock:
+            if event_id in self._evidence_ready_events:
+                return True
+        if self.runtime and getattr(self.runtime, 'passage_sessions', None):
+            sess = self.runtime.passage_sessions.get_session_by_event_id(event_id)
+            if sess and getattr(sess, 'evidence_ready', False):
+                return True
+        if event_record and event_record.get('snapshots') and len(event_record.get('snapshots', [])) > 0:
+            return True
+        if self.repository:
+            try:
+                ev = self.repository.event(event_id)
+                if ev and ev.get('snapshots') and len(ev.get('snapshots', [])) > 0:
+                    return True
+            except Exception:
+                pass
+        return False
 
     def status(self) -> dict:
         pending_count = 0
@@ -391,7 +483,7 @@ class CloudOutboxDispatcher:
 
     def enqueue(self, obs: Any, event_id: str, image_bytes: Optional[bytes] = None,
                 payload: Optional[dict] = None, delay_seconds: float = 0.0,
-                force: bool = False):
+                force: bool = False, stage: Optional[str] = None):
         """Enqueue confirmed gate event for background dispatch."""
         if not self.enabled:
             return
@@ -403,13 +495,13 @@ class CloudOutboxDispatcher:
             if not norm_obs or len(norm_obs) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', norm_obs):
                 return
 
-        # Do not re-enqueue if already synced (unless forced) or invalid in database
+        # Do not re-enqueue if already fully synced (unless forced) or invalid in database
         if self.repository:
             try:
                 ev = self.repository.event(event_id)
                 if not ev or ev.get('status') != 'CONFIRMED':
                     return
-                if not force and ev.get('cloud_synced'):
+                if not force and ev.get('cloud_synced') and ev.get('cloud_delivery_state') == 'DELIVERED':
                     return
                 cntr = ev.get('container_number')
                 if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr):
@@ -431,6 +523,12 @@ class CloudOutboxDispatcher:
             except Exception:
                 pass
 
+        if stage is None:
+            if obs is not None:
+                stage = 'POST'
+            else:
+                stage = 'AUTO'
+
         item = {
             'event_id': event_id,
             'obs': obs,
@@ -440,6 +538,7 @@ class CloudOutboxDispatcher:
             'not_before': time.monotonic() + max(0.0, float(delay_seconds or 0.0)),
             'retries': 0,
             'force': force,
+            'stage': stage,
         }
 
         try:
@@ -467,6 +566,249 @@ class CloudOutboxDispatcher:
         except Exception:
             return False
 
+    def _build_multi_camera_images(self, event_record: Optional[dict], obs: Any = None,
+                                   img: Optional[bytes] = None, allow_single_fallback: bool = False):
+        """
+        Build isolated, validated multi-camera evidence images for this container event.
+        Guarantees strict container-to-image association, gate isolation, and camera angle preservation.
+        """
+        cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
+        c1_images = []
+        gate_id_for_event = (event_record.get('gate_id') if event_record else None) or (obs.gate_id if obs else None)
+        expected_gate_cams = set()
+        if self.runtime and getattr(self.runtime, 'cameras', None):
+            expected_gate_cams = {
+                c.id for c in self.runtime.cameras
+                if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
+            }
+        elif self.repository and hasattr(self.repository, 'cameras'):
+            try:
+                expected_gate_cams = {
+                    c.id for c in self.repository.cameras()
+                    if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
+                }
+            except Exception:
+                pass
+        if not expected_gate_cams and self.settings and hasattr(self.settings, 'cameras'):
+            try:
+                expected_gate_cams = {
+                    c.id for c in self.settings.cameras()
+                    if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
+                }
+            except Exception:
+                pass
+
+        primary_snap_id = event_record.get('primary_snapshot_id') if event_record else None
+        if event_record and event_record.get('snapshots') and self.snapshots:
+            cam_snapshots = {}
+            for snap in event_record['snapshots']:
+                cam_id = snap.get('camera_id')
+                if not cam_id:
+                    continue
+                # Gate isolation: reject cameras not assigned to this gate
+                if expected_gate_cams and cam_id not in expected_gate_cams:
+                    continue
+                cam_snapshots.setdefault(cam_id, []).append(snap)
+
+            # Check filesystem event directory for any configured camera snapshots
+            event_id_str = str(event_record.get('id') if event_record else '')
+            event_dir = self.snapshots.root / event_id_str if (self.snapshots and event_id_str) else None
+            if event_dir and event_dir.is_dir():
+                for missing_cam in (expected_gate_cams - set(cam_snapshots.keys())):
+                    disk_cands = [
+                        event_dir / f"{missing_cam}.jpg",
+                        event_dir / f"{missing_cam}.png",
+                    ] + list(event_dir.glob(f"*{missing_cam}*.jpg")) + list(event_dir.glob(f"*{missing_cam}*.png"))
+                    for cand in disk_cands:
+                        if cand.is_file() and not cand.name.endswith('.quality'):
+                            cam_snapshots.setdefault(missing_cam, []).append({
+                                'id': f'disk_{missing_cam}',
+                                'camera_id': missing_cam,
+                                'image_path': f'{event_id_str}/{cand.name}',
+                                'timestamp': event_record.get('timestamp')
+                            })
+                            break
+
+            best_by_camera = {}
+            for cam_id, snaps in cam_snapshots.items():
+                best_snap = None
+                best_data = None
+                best_score = -1.0
+                for snap in snaps:
+                    try:
+                        snap_cam = snap.get('camera_id')
+                        snap_ts = snap.get('timestamp')
+                        from app.database.repositories.gate import is_distinct_container, datetime_diff_seconds
+                        is_mismatched = False
+                        for det in event_record.get('detections', []):
+                            if det.get('camera_id') == snap_cam:
+                                det_ts = det.get('timestamp')
+                                if det_ts and snap_ts and datetime_diff_seconds(det_ts, snap_ts) <= 2.5:
+                                    for ocr in event_record.get('ocr_results', []):
+                                        if ocr.get('detection_id') == det.get('id'):
+                                            ocr_text = ocr.get('normalized_text')
+                                            if ocr_text and ocr.get('valid_check_digit') and is_distinct_container(cntr1, ocr_text):
+                                                is_mismatched = True
+                                                break
+                                    if is_mismatched:
+                                        break
+                        if is_mismatched:
+                            log.warning('prosper_snapshot_skipped_conflicting_container', extra={
+                                'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1
+                            })
+                            continue
+
+                        snap_p = self.snapshots.path(snap['image_path'])
+                        if not snap_p.is_file():
+                            camera_id_str = str(snap.get('camera_id') or cam_id)
+                            snap_id_str = str(snap.get('id') or '')
+                            if event_dir and event_dir.is_dir():
+                                cands = [
+                                    event_dir / f"{camera_id_str}_{snap_id_str}.jpg",
+                                    event_dir / f"{camera_id_str}_{snap_id_str}_rear.jpg",
+                                    event_dir / f"{camera_id_str}.jpg",
+                                    event_dir / f"{camera_id_str}.png",
+                                ]
+                                cands += list(event_dir.glob(f"*{camera_id_str}*.jpg"))
+                                cands += list(event_dir.glob(f"*{camera_id_str}*.png"))
+                                cands += list(event_dir.glob(f"*companion_{camera_id_str}.png"))
+                                for cand in cands:
+                                    if cand.is_file():
+                                        snap_p = cand
+                                        break
+                        if not snap_p.is_file():
+                            continue
+                        data = snap_p.read_bytes()
+                        decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if decoded is None or decoded.size == 0:
+                            continue
+                        if decoded.shape[0] < 240 or decoded.shape[1] < 320:
+                            continue
+                        quality = self.snapshots.compute_quality(decoded)
+                        if not self._proof_is_usable(decoded, quality):
+                            continue
+                        score = quality
+                        from app.snapshots.snapshot_manager import SnapshotManager
+                        has_container = SnapshotManager._capture_has_visible_container(snap, event_record, decoded)
+                        if not has_container:
+                            continue
+                        score += 10000.0
+                        if primary_snap_id and snap.get('id') == primary_snap_id:
+                            score += 1000.0
+                        if score > best_score:
+                            best_score = score
+                            best_snap = snap
+                            best_data = data
+                    except Exception:
+                        pass
+                if best_snap and best_data:
+                    best_by_camera[cam_id] = (best_snap, best_data)
+
+            cam_roles = {}
+            if self.runtime and getattr(self.runtime, 'cameras', None):
+                for c in self.runtime.cameras:
+                    cam_roles[c.id.lower()] = getattr(c, 'role', '')
+            elif self.repository and hasattr(self.repository, 'cameras'):
+                try:
+                    for c in self.repository.cameras():
+                        cam_roles[c.id.lower()] = getattr(c, 'role', '')
+                except Exception:
+                    pass
+            if not cam_roles and self.settings and hasattr(self.settings, 'cameras'):
+                try:
+                    for c in self.settings.cameras():
+                        cam_roles[c.id.lower()] = getattr(c, 'role', '')
+                except Exception:
+                    pass
+
+            has_four_cams = any(c.lower().endswith(('-4', '-8')) or 'rear' in c.lower() for c in best_by_camera.keys())
+
+            def _cam_image_type(c_id):
+                c = (c_id or '').lower()
+                role = (cam_roles.get(c) or '').upper()
+                if role in ('FRONT_TOP', 'FRONT'):
+                    return 'FRONT'
+                if role in ('LEFT', 'SIDE'):
+                    return 'LEFT'
+                if role in ('RIGHT',):
+                    return 'RIGHT'
+                if role in ('REAR', 'BACK'):
+                    return 'REAR'
+                if any(k in c for k in ('rear', 'back')) or c.endswith('-4') or c.endswith('-8'):
+                    return 'REAR'
+                if any(k in c for k in ('left', 'side')) or c.endswith('-2') or c.endswith('-6'):
+                    return 'LEFT'
+                if any(k in c for k in ('right',)) or c.endswith('-7'):
+                    return 'RIGHT'
+                if c.endswith('-3'):
+                    return 'RIGHT' if has_four_cams else 'REAR'
+                return 'FRONT'
+
+            def _cam_sort_key(c_id):
+                itype = _cam_image_type(c_id)
+                order = {'FRONT': 0, 'LEFT': 1, 'SIDE': 1, 'RIGHT': 2, 'REAR': 3}
+                return (order.get(itype, 4), c_id.lower())
+
+            for cam_id in sorted(best_by_camera.keys(), key=_cam_sort_key):
+                snap, data = best_by_camera[cam_id]
+                c1_images.append({
+                    'ImageType': _cam_image_type(cam_id),
+                    'CameraId': cam_id,
+                    'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
+                    'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
+                })
+
+        if not c1_images and allow_single_fallback:
+            fallback_bytes = img if img is not None else (getattr(obs, 'image', None) if obs else None)
+            if fallback_bytes is not None:
+                try:
+                    if not isinstance(fallback_bytes, bytes):
+                        ok, buf = cv2.imencode('.jpg', fallback_bytes, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                        b = buf.tobytes() if ok else None
+                    else:
+                        b = fallback_bytes
+                    if b:
+                        c1_images.append({
+                            'ImageType': 'FRONT',
+                            'CameraId': obs.detection.camera_id if obs and obs.detection else 'CAM-01',
+                            'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs and obs.detection else None),
+                            'Image': f"data:image/jpeg;base64,{base64.b64encode(b).decode('utf-8')}"
+                        })
+                except Exception:
+                    pass
+
+        if allow_single_fallback and expected_gate_cams and obs is not None and len(c1_images) <= 1:
+            existing_cams = {i['CameraId'] for i in c1_images}
+            missing_for_post = expected_gate_cams - existing_cams
+            if missing_for_post:
+                fallback_b = None
+                if c1_images:
+                    fallback_b = c1_images[0]['Image']
+                else:
+                    fb = img if img is not None else (getattr(obs, 'image', None) if obs else None)
+                    if fb is not None:
+                        try:
+                            if not isinstance(fb, bytes):
+                                ok, buf = cv2.imencode('.jpg', fb, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                                b_tmp = buf.tobytes() if ok else None
+                            else:
+                                b_tmp = fb
+                            if b_tmp:
+                                fallback_b = f"data:image/jpeg;base64,{base64.b64encode(b_tmp).decode('utf-8')}"
+                        except Exception:
+                            pass
+                if fallback_b:
+                    for cam_id in sorted(list(missing_for_post), key=_cam_sort_key):
+                        c1_images.append({
+                            'ImageType': _cam_image_type(cam_id),
+                            'CameraId': cam_id,
+                            'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs and obs.detection else None),
+                            'Image': fallback_b
+                        })
+
+        captured_cams = {img_item['CameraId'] for img_item in c1_images}
+        return c1_images, expected_gate_cams, captured_cams
+
     def _sweep_offline_backlog(self):
         """
         Periodically checks SQLite database for confirmed events that were saved while offline.
@@ -483,9 +825,6 @@ class CloudOutboxDispatcher:
                 return
 
             log.info('prosper_sweep_offline_backlog_found', extra={'count': len(unsynced)})
-            from app.ocr.validator import ContainerValidator
-            from app.domain import OCRRead
-            validator = ContainerValidator()
             for ev in unsynced:
                 if self._stop.is_set():
                     break
@@ -495,6 +834,9 @@ class CloudOutboxDispatcher:
                 if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr):
                     self.repository.mark_cloud_synced(event_id)
                     continue
+                cloud_ev_id = ev.get('cloud_event_id')
+                # If cloud_event_id already exists, POST was completed; we only need to PUT the final images!
+                stage = 'PUT' if cloud_ev_id else 'POST'
                 try:
                     self.queue.put_nowait({
                         'event_id': event_id,
@@ -503,6 +845,7 @@ class CloudOutboxDispatcher:
                         'payload': None,
                         'enqueued_at': time.monotonic(),
                         'retries': 0,
+                        'stage': stage,
                     })
                 except Full:
                     break
@@ -526,9 +869,6 @@ class CloudOutboxDispatcher:
             img = item['image_bytes']
             pre_payload = item.get('payload')
 
-            # A cloud gate event is effectively immutable after acknowledgement.
-            # Allow late OCR from the other calibrated camera to update the
-            # local event/snapshots before constructing the payload.
             not_before = float(item.get('not_before') or 0.0)
             remaining = not_before - time.monotonic()
             if remaining > 0:
@@ -538,11 +878,10 @@ class CloudOutboxDispatcher:
 
             success = False
             try:
-                # Offline backlog is populated directly from SQLite, so apply
-                # the same persistent identity guard here as enqueue().
-                if self.repository:
-                    current = self.repository.event(event_id)
-                    if current and (current.get('status') != 'CONFIRMED' or (current.get('cloud_synced') and not item.get('force'))):
+                # Persistent identity guard
+                event_record = self.repository.event(event_id) if self.repository else None
+                if self.repository and event_record:
+                    if event_record.get('status') != 'CONFIRMED' or (event_record.get('cloud_synced') and not item.get('force') and event_record.get('cloud_delivery_state') == 'DELIVERED'):
                         self.queue.task_done()
                         continue
                     canonical = self.repository.canonical_event_id(event_id)
@@ -558,441 +897,302 @@ class CloudOutboxDispatcher:
                             'event_id': event_id, 'canonical_event_id': canonical})
                         self.queue.task_done()
                         continue
-                if pre_payload and isinstance(pre_payload, dict):
-                    payload = pre_payload
-                else:
-                    # Query repository for full event record and associated multi-camera snapshots
-                    event_record = self.repository.event(event_id) if self.repository else None
-                    if event_record and self.snapshots:
-                        # Use the same canonical capture set exposed by the UI;
-                        # never re-rank a different set for the cloud payload.
-                        manifest = self.snapshots.build_evidence_manifest(
-                            event_record,
-                            min_quality=getattr(self.settings, 'cloud_min_proof_quality', 2.5),
-                        )
-                        if isinstance(manifest, dict):
-                            event_record['evidence_manifest'] = manifest
-                            manifest_cams = {c.get('camera_id') for c in (manifest.get('captures') or []) if c.get('camera_id')}
-                            all_snaps = event_record.get('snapshots') or []
-                            all_cams = {s.get('camera_id') for s in all_snaps if s.get('camera_id')}
-                            if len(manifest_cams) >= len(all_cams) and manifest.get('captures'):
-                                event_record['snapshots'] = manifest['captures']
-                            event_record['primary_snapshot_id'] = manifest.get('primary_snapshot_id')
-                            event_record['rear_snapshot_id'] = manifest.get('rear_snapshot_id')
-                    cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
-                    import re
-                    if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1):
-                        log.warning('prosper_dispatch_skipped_invalid_ocr', extra={'event_id': event_id, 'container_number': cntr1})
-                        if self.repository:
-                            self.repository.mark_cloud_synced(event_id)
-                        self.queue.task_done()
-                        continue
 
-                    containers_list = []
-                    if cntr1:
-                        c1_images = []
-                        gate_id_for_event = (event_record.get('gate_id') if event_record else None) or (obs.gate_id if obs else None)
-                        expected_gate_cams = set()
-                        if self.runtime and getattr(self.runtime, 'cameras', None):
-                            expected_gate_cams = {
-                                c.id for c in self.runtime.cameras
-                                if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
-                            }
-                        elif self.settings and hasattr(self.settings, 'cameras'):
-                            try:
-                                expected_gate_cams = {
-                                    c.id for c in self.settings.cameras()
-                                    if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
-                                }
-                            except Exception:
-                                pass
-
-                        primary_snap_id = event_record.get('primary_snapshot_id') if event_record else None
-                        if event_record and event_record.get('snapshots') and self.snapshots:
-                            # Group snapshots by physical camera_id.
-                            # Each camera that covered this event sends exactly ONE best image
-                            # where the container is clearly visible.
-                            cam_snapshots = {}
-                            for snap in event_record['snapshots']:
-                                cam_id = snap.get('camera_id')
-                                if not cam_id:
-                                    continue
-                                cam_snapshots.setdefault(cam_id, []).append(snap)
-
-                            # Fallback: check filesystem event directory for any configured camera
-                            # snapshots that might have been written to disk
-                            event_id_str = str(event_record.get('id') if event_record else '')
-                            event_dir = self.snapshots.root / event_id_str if (self.snapshots and event_id_str) else None
-                            if event_dir and event_dir.is_dir():
-                                for missing_cam in (expected_gate_cams - set(cam_snapshots.keys())):
-                                    disk_cands = [
-                                        event_dir / f"{missing_cam}.jpg",
-                                        event_dir / f"{missing_cam}.png",
-                                    ] + list(event_dir.glob(f"*{missing_cam}*.jpg")) + list(event_dir.glob(f"*{missing_cam}*.png"))
-                                    for cand in disk_cands:
-                                        if cand.is_file() and not cand.name.endswith('.quality'):
-                                            cam_snapshots.setdefault(missing_cam, []).append({
-                                                'id': f'disk_{missing_cam}',
-                                                'camera_id': missing_cam,
-                                                'image_path': f'{event_id_str}/{cand.name}',
-                                                'timestamp': event_record.get('timestamp')
-                                            })
-                                            break
-
-                            best_by_camera = {}
-                            for cam_id, snaps in cam_snapshots.items():
-                                best_snap = None
-                                best_data = None
-                                best_score = -1.0
-                                for snap in snaps:
-                                    try:
-                                        # Guard: if this snapshot belongs to a distinct container's OCR detection, skip it
-                                        snap_cam = snap.get('camera_id')
-                                        snap_ts = snap.get('timestamp')
-                                        from app.database.repositories.gate import is_distinct_container, datetime_diff_seconds
-                                        is_mismatched = False
-                                        for det in event_record.get('detections', []):
-                                            if det.get('camera_id') == snap_cam:
-                                                det_ts = det.get('timestamp')
-                                                if det_ts and snap_ts and datetime_diff_seconds(det_ts, snap_ts) <= 2.5:
-                                                    for ocr in event_record.get('ocr_results', []):
-                                                        if ocr.get('detection_id') == det.get('id'):
-                                                            ocr_text = ocr.get('normalized_text')
-                                                            if ocr_text and ocr.get('valid_check_digit') and is_distinct_container(cntr1, ocr_text):
-                                                                is_mismatched = True
-                                                                break
-                                            if is_mismatched:
-                                                break
-                                        if is_mismatched:
-                                            log.warning('prosper_snapshot_skipped_conflicting_container', extra={
-                                                'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1
-                                            })
-                                            continue
-
-                                        snap_p = self.snapshots.path(snap['image_path'])
-                                        if not snap_p.is_file():
-                                            event_id_str = str(event_record.get('id') if event_record else '')
-                                            camera_id_str = str(snap.get('camera_id') or cam_id)
-                                            snap_id_str = str(snap.get('id') or '')
-                                            event_dir = self.snapshots.root / event_id_str
-                                            if event_dir.is_dir():
-                                                cands = [
-                                                    event_dir / f"{camera_id_str}_{snap_id_str}.jpg",
-                                                    event_dir / f"{camera_id_str}_{snap_id_str}_rear.jpg",
-                                                    event_dir / f"{camera_id_str}.jpg",
-                                                    event_dir / f"{camera_id_str}.png",
-                                                ]
-                                                cands += list(event_dir.glob(f"*{camera_id_str}*.jpg"))
-                                                cands += list(event_dir.glob(f"*{camera_id_str}*.png"))
-                                                cands += list(event_dir.glob(f"*companion_{camera_id_str}.png"))
-                                                for cand in cands:
-                                                    if cand.is_file():
-                                                        snap_p = cand
-                                                        break
-                                        if not snap_p.is_file():
-                                            continue
-                                        data = snap_p.read_bytes()
-                                        decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                                        if decoded is None or decoded.size == 0:
-                                            continue
-                                        if decoded.shape[0] < 240 or decoded.shape[1] < 320:
-                                            continue
-                                        quality = self.snapshots.compute_quality(decoded)
-                                        if not self._proof_is_usable(decoded, quality):
-                                            continue
-                                        score = quality
-                                        # Strictly require that the snapshot contains a verified container or container number
-                                        from app.snapshots.snapshot_manager import SnapshotManager
-                                        has_container = SnapshotManager._capture_has_visible_container(snap, event_record, decoded)
-                                        if not has_container:
-                                            # Skip frames without container present! Never send building/person/empty frames to API.
-                                            continue
-                                        score += 10000.0
-                                        if primary_snap_id and snap.get('id') == primary_snap_id:
-                                            score += 1000.0
-                                        if score > best_score:
-                                            best_score = score
-                                            best_snap = snap
-                                            best_data = data
-                                    except Exception:
-                                        pass
-                                if best_snap and best_data:
-                                    best_by_camera[cam_id] = (best_snap, best_data)
-
-                            cam_roles = {}
-                            if self.runtime and getattr(self.runtime, 'cameras', None):
-                                for c in self.runtime.cameras:
-                                    cam_roles[c.id.lower()] = getattr(c, 'role', '')
-                            elif self.repository and hasattr(self.repository, 'cameras'):
-                                try:
-                                    for c in self.repository.cameras():
-                                        cam_roles[c.id.lower()] = getattr(c, 'role', '')
-                                except Exception:
-                                    pass
-                            if not cam_roles and self.settings and hasattr(self.settings, 'cameras'):
-                                try:
-                                    for c in self.settings.cameras():
-                                        cam_roles[c.id.lower()] = getattr(c, 'role', '')
-                                except Exception:
-                                    pass
-
-                            has_four_cams = any(c.lower().endswith(('-4', '-8')) or 'rear' in c.lower() for c in best_by_camera.keys())
-
-                            def _cam_image_type(c_id):
-                                c = (c_id or '').lower()
-                                role = (cam_roles.get(c) or '').upper()
-                                if role in ('FRONT_TOP', 'FRONT'):
-                                    return 'FRONT'
-                                if role in ('LEFT', 'SIDE'):
-                                    return 'LEFT'
-                                if role in ('RIGHT',):
-                                    return 'RIGHT'
-                                if role in ('REAR', 'BACK'):
-                                    return 'REAR'
-                                if any(k in c for k in ('rear', 'back')) or c.endswith('-4') or c.endswith('-8'):
-                                    return 'REAR'
-                                if any(k in c for k in ('left', 'side')) or c.endswith('-2') or c.endswith('-6'):
-                                    return 'LEFT'
-                                if any(k in c for k in ('right',)) or c.endswith('-7'):
-                                    return 'RIGHT'
-                                if c.endswith('-3'):
-                                    return 'RIGHT' if has_four_cams else 'REAR'
-                                return 'FRONT'
-
-                            def _cam_sort_key(c_id):
-                                itype = _cam_image_type(c_id)
-                                order = {'FRONT': 0, 'LEFT': 1, 'RIGHT': 2, 'REAR': 3}
-                                return (order.get(itype, 4), c_id.lower())
-
-                            for cam_id in sorted(best_by_camera.keys(), key=_cam_sort_key):
-                                snap, data = best_by_camera[cam_id]
-                                c1_images.append({
-                                    'ImageType': _cam_image_type(cam_id),
-                                    'CameraId': cam_id,
-                                    'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
-                                    'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
-                                })
-                        if not c1_images and img is not None and not event_record:
-                            try:
-                                if not isinstance(img, bytes):
-                                    ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-                                    b = buf.tobytes() if ok else None
-                                else:
-                                    b = img
-                                if b:
-                                    c1_images.append({
-                                        'ImageType': 'FRONT',
-                                        'CameraId': obs.detection.camera_id if obs else 'CAM-01',
-                                        'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs else None),
-                                        'Image': f"data:image/jpeg;base64,{base64.b64encode(b).decode('utf-8')}"
-                                    })
-                            except Exception:
-                                pass
-
-                        # Multi-camera completeness check:
-                        # Ensure every enabled camera configured for this gate has its best proof frame
-                        # included before finalizing and uploading the event to the cloud.
-                        gate_id_for_event = (event_record.get('gate_id') if event_record else None) or (obs.gate_id if obs else None)
-                        expected_gate_cams = set()
-                        if self.runtime and getattr(self.runtime, 'cameras', None):
-                            expected_gate_cams = {
-                                c.id for c in self.runtime.cameras
-                                if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
-                            }
-                        elif self.settings and hasattr(self.settings, 'cameras'):
-                            try:
-                                expected_gate_cams = {
-                                    c.id for c in self.settings.cameras()
-                                    if c.gate_id == gate_id_for_event and getattr(c, 'enabled', True)
-                                }
-                            except Exception:
-                                pass
-
-                        captured_cams = {img['CameraId'] for img in c1_images}
-                        missing_cams = expected_gate_cams - captured_cams
-
-                        if missing_cams and not item.get('force'):
-                            enqueued_at = float(item.get('enqueued_at') or time.monotonic())
-                            ev_age = time.monotonic() - enqueued_at
-                            cam_waits = int(item.get('camera_wait_count', 0))
-                            if ev_age < 25.0 and cam_waits < 25:
-                                log.info('prosper_dispatch_waiting_for_all_cameras', extra={
-                                    'event_id': event_id,
-                                    'container_number': cntr1,
-                                    'missing_cameras': sorted(list(missing_cams)),
-                                    'captured_cameras': sorted(list(captured_cams)),
-                                    'ev_age': round(ev_age, 2),
-                                    'wait_count': cam_waits
-                                })
-                                item['camera_wait_count'] = cam_waits + 1
-                                item['not_before'] = time.monotonic() + 1.0
-                                self.queue.put(item)
-                                self.queue.task_done()
-                                continue
-                            else:
-                                log.warning('prosper_dispatch_proceeding_with_partial_cameras', extra={
-                                    'event_id': event_id,
-                                    'container_number': cntr1,
-                                    'missing_cameras': sorted(list(missing_cams)),
-                                    'captured_cameras': sorted(list(captured_cams)),
-                                    'ev_age': round(ev_age, 2),
-                                    'wait_count': cam_waits
-                                })
-
-                        if len(c1_images) < 1:
-                            log.warning('prosper_dispatch_skipped_no_proof_image', extra={'event_id': event_id, 'container_number': cntr1})
-                            if self.repository:
-                                self.repository.mark_cloud_synced(event_id)
-                            self.queue.task_done()
-                            continue
-
-                        iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
-                        cs1 = str((event_record.get('container_size') if event_record else None) or '')
-                        # Derive full human-readable size from ISO code when container_size not pre-computed
-                        if not cs1 and iso_s1:
-                            try:
-                                from app.ocr.validator import extract_iso_size_code as _esc
-                                _, cs1 = _esc(iso_s1)
-                                cs1 = cs1 or ''
-                            except Exception:
-                                pass
-                        # Map to cloud API size value: "20", "40", "45"
-                        if '20' in cs1 or iso_s1.startswith('2'):
-                            size_1 = '20'
-                        elif '45' in cs1 or iso_s1.startswith('L'):
-                            size_1 = '45'
-                        else:
-                            size_1 = '40'
-                        confidences = [float(o.get('confidence') or 0) for o in (event_record.get('ocr_results') or [])
-                            if o.get('normalized_text') == cntr1 and o.get('valid_check_digit')] if event_record else []
-                        conf_1 = max(confidences, default=float(obs.ocr.confidence) if (obs and obs.ocr and obs.ocr.confidence) else 0.95)
-                        containers_list.append({
-                            'ContainerNumber': cntr1,
-                            'ContainerNumberConfidence': round(conf_1, 2),
-                            'Size': size_1,
-                            'ContainerSize': cs1 or None,
-                            'SizeCode': iso_s1 or None,
-                            'Position': 'SINGLE',
-                            'Images': c1_images
-                        })
-
-                    if not containers_list:
-                        log.warning('prosper_dispatch_skipped_empty_containers', extra={'event_id': event_id})
-                        if self.repository:
-                            self.repository.mark_cloud_synced(event_id)
-                        self.queue.task_done()
-                        continue
-
-                    if obs and hasattr(obs, 'detection'):
-                        dt_captured = obs.detection.frame_timestamp
-                    elif event_record and event_record.get('timestamp'):
-                        try:
-                            ts_str = event_record['timestamp'].rstrip('Z')
-                            dt_captured = datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
-                        except Exception:
-                            dt_captured = datetime.now(timezone.utc)
-                    else:
-                        dt_captured = datetime.now(timezone.utc)
-
-                    visit_id = f"VISIT-{dt_captured.strftime('%Y%m%d')}-{event_id[:8].upper()}"
-                    direction = (
-                        obs.direction.upper() if (obs and hasattr(obs, 'direction') and obs.direction)
-                        else ((event_record.get('event_type') or 'ENTRY').upper() if event_record else 'ENTRY')
-                    )
-                    event_type = 'GATE_OUT' if direction in ('EXIT', 'OUT', 'GATE_OUT') else 'GATE_IN'
-
-                    payload = {
-                        'id': event_id,
-                        'VisitId': visit_id,
-                        'EventType': event_type,
-                        'DeviceId': self.device_uuid,
-                        'CapturedAt': _iso_utc(dt_captured),
-                        'containerNumber': cntr1,
-                        'Truck': {'TruckNumber': 'NA'},
-                        'Driver': None,
-                        'Containers': containers_list
-                    }
-
-                from app.ocr.validator import is_valid_iso_6346
-                numbers = [c.get('ContainerNumber') for c in payload.get('Containers', [])]
-                if not numbers or not all(is_valid_iso_6346(n) for n in numbers):
+                cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
+                import re
+                if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1):
+                    log.warning('prosper_dispatch_skipped_invalid_ocr', extra={'event_id': event_id, 'container_number': cntr1})
                     if self.repository:
-                        self.repository.mark_cloud_delivery(event_id, 'BLOCKED', 'Invalid container checksum')
+                        self.repository.mark_cloud_synced(event_id)
                     self.queue.task_done()
                     continue
 
-                success = self.session.post_gate_event(payload)
-                if success == 'REJECTED' and self.runtime:
+                if event_record and self.snapshots:
+                    manifest = self.snapshots.build_evidence_manifest(
+                        event_record,
+                        min_quality=getattr(self.settings, 'cloud_min_proof_quality', 2.5),
+                    )
+                    if isinstance(manifest, dict):
+                        event_record['evidence_manifest'] = manifest
+                        manifest_cams = {c.get('camera_id') for c in (manifest.get('captures') or []) if c.get('camera_id')}
+                        all_snaps = event_record.get('snapshots') or []
+                        all_cams = {s.get('camera_id') for s in all_snaps if s.get('camera_id')}
+                        if len(manifest_cams) >= len(all_cams) and manifest.get('captures'):
+                            event_record['snapshots'] = manifest['captures']
+                        event_record['primary_snapshot_id'] = manifest.get('primary_snapshot_id')
+                        event_record['rear_snapshot_id'] = manifest.get('rear_snapshot_id')
+
+                # Determine workflow stage: POST (immediate gate event creation) or PUT (final evidence update)
+                stage = item.get('stage') or 'AUTO'
+                if stage == 'AUTO':
+                    cloud_ev_id = event_record.get('cloud_event_id') if event_record else None
+                    stage = 'PUT' if cloud_ev_id else 'POST'
+
+                # Common container metadata extraction
+                iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
+                cs1 = str((event_record.get('container_size') if event_record else None) or '')
+                if not cs1 and iso_s1:
                     try:
-                        ev_type = payload.get('EventType', 'GATE_OUT')
-                        c_num = payload.get('containerNumber') or (obs.ocr.normalized_text if (obs and obs.ocr) else None)
-                        self.runtime.emit_alert(
-                            alert_type='CLOUD_SYNC_REJECTED',
-                            title=f'Cloud Sync Rejected ({ev_type})',
-                            message=f'Cloud rejected {ev_type} for {c_num or event_id[:8]} (Visit {payload.get("VisitId", "")})',
-                            level='ERROR',
-                            container_number=c_num,
-                            event_id=event_id,
-                            buzzer=False
-                        )
+                        from app.ocr.validator import extract_iso_size_code as _esc
+                        _, cs1 = _esc(iso_s1)
+                        cs1 = cs1 or ''
                     except Exception:
-                        log.exception('prosper_alert_failed: %s', event_id)
-                elif success == 'OFFLINE':
-                    log.info('prosper_event_buffered_offline: Event %s buffered locally; will auto-sync when cloud service is available.', event_id)
+                        pass
+                if '20' in cs1 or iso_s1.startswith('2'):
+                    size_1 = '20'
+                elif '45' in cs1 or iso_s1.startswith('L'):
+                    size_1 = '45'
+                else:
+                    size_1 = '40'
+                confidences = [float(o.get('confidence') or 0) for o in (event_record.get('ocr_results') or [])
+                    if o.get('normalized_text') == cntr1 and o.get('valid_check_digit')] if event_record else []
+                conf_1 = max(confidences, default=float(obs.ocr.confidence) if (obs and obs.ocr and obs.ocr.confidence) else 0.95)
+
+                if stage == 'POST':
+                    # STAGE 1: Immediate POST gate event creation
+                    cloud_ev_id = event_record.get('cloud_event_id') if event_record else None
+                    if cloud_ev_id and not item.get('force'):
+                        # Event already exists on cloud; transition directly to PUT
+                        item['stage'] = 'PUT'
+                        self.queue.put(item)
+                        self.queue.task_done()
+                        continue
+
+                    if pre_payload and isinstance(pre_payload, dict):
+                        payload = pre_payload
+                    else:
+                        c1_images, expected_gate_cams, captured_cams = self._build_multi_camera_images(
+                            event_record, obs, img, allow_single_fallback=True
+                        )
+                        if obs and hasattr(obs, 'detection'):
+                            dt_captured = obs.detection.frame_timestamp
+                        elif event_record and event_record.get('timestamp'):
+                            try:
+                                ts_str = event_record['timestamp'].rstrip('Z')
+                                dt_captured = datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
+                            except Exception:
+                                dt_captured = datetime.now(timezone.utc)
+                        else:
+                            dt_captured = datetime.now(timezone.utc)
+
+                        visit_id = f"VISIT-{dt_captured.strftime('%Y%m%d')}-{event_id[:8].upper()}"
+                        direction = (
+                            obs.direction.upper() if (obs and hasattr(obs, 'direction') and obs.direction)
+                            else ((event_record.get('event_type') or 'ENTRY').upper() if event_record else 'ENTRY')
+                        )
+                        event_type = 'GATE_OUT' if direction in ('EXIT', 'OUT', 'GATE_OUT') else 'GATE_IN'
+
+                        payload = {
+                            'id': event_id,
+                            'VisitId': visit_id,
+                            'EventType': event_type,
+                            'DeviceId': self.device_uuid,
+                            'CapturedAt': _iso_utc(dt_captured),
+                            'containerNumber': cntr1,
+                            'Truck': {'TruckNumber': 'NA'},
+                            'Driver': None,
+                            'Containers': [{
+                                'ContainerNumber': cntr1,
+                                'ContainerNumberConfidence': round(conf_1, 2),
+                                'Size': size_1,
+                                'ContainerSize': cs1 or None,
+                                'SizeCode': iso_s1 or None,
+                                'Position': 'SINGLE',
+                                'Images': c1_images
+                            }]
+                        }
+
+                    from app.ocr.validator import is_valid_iso_6346
+                    numbers = [c.get('ContainerNumber') for c in payload.get('Containers', [])]
+                    if not numbers or not all(is_valid_iso_6346(n) for n in numbers):
+                        if self.repository:
+                            self.repository.mark_cloud_delivery(event_id, 'BLOCKED', 'Invalid container checksum')
+                        self.queue.task_done()
+                        continue
+
+                    success = self.session.post_gate_event(payload)
+                    if success == 'REJECTED' and self.runtime:
+                        try:
+                            ev_type = payload.get('EventType', 'GATE_OUT')
+                            c_num = payload.get('containerNumber') or cntr1
+                            self.runtime.emit_alert(
+                                alert_type='CLOUD_SYNC_REJECTED',
+                                title=f'Cloud Sync Rejected ({ev_type})',
+                                message=f'Cloud rejected {ev_type} for {c_num or event_id[:8]} (Visit {payload.get("VisitId", "")})',
+                                level='ERROR',
+                                container_number=c_num,
+                                event_id=event_id,
+                                buzzer=False
+                            )
+                        except Exception:
+                            log.exception('prosper_alert_failed: %s', event_id)
+                    elif success == 'OFFLINE':
+                        log.info('prosper_event_buffered_offline: Event %s buffered locally; will auto-sync when cloud service is available.', event_id)
+
+                    if success is True or isinstance(success, dict):
+                        self._is_online = True
+                        self._last_sync_time = datetime.now(timezone.utc).isoformat()
+                        self._last_error = None
+                        returned_ev_id = None
+                        if isinstance(success, dict):
+                            returned_ev_id = success.get('eventId') or success.get('visitDatabaseId')
+                        if not returned_ev_id:
+                            returned_ev_id = event_id
+
+                        if self.repository:
+                            try:
+                                self.repository.set_cloud_event_id(event_id, returned_ev_id, state='EVENT_CREATED')
+                            except Exception:
+                                log.exception('prosper_set_cloud_event_id_failed: %s', event_id)
+
+                        if self.runtime and getattr(self.runtime, 'passage_sessions', None):
+                            try:
+                                self.runtime.passage_sessions.set_cloud_event_id(event_id, returned_ev_id)
+                            except Exception:
+                                pass
+
+                        if self.metrics:
+                            self.metrics.increment('prosper_events_queued')
+                            self.metrics.increment('prosper_events_synced')
+                            self.metrics.latency('prosper_post_sync', time.monotonic() - item['enqueued_at'])
+
+                        log.info('prosper_gate_event_created_stage1_complete', extra={
+                            'event_id': event_id,
+                            'cloud_event_id': returned_ev_id,
+                            'container_number': cntr1
+                        })
+
+                        # Trigger Stage 2 PUT if final evidence is already ready (Case B)
+                        if self.is_evidence_ready(event_id, event_record):
+                            self.enqueue(None, event_id, stage='PUT', force=True)
+
+                        self.queue.task_done()
+                        continue
+
+                elif stage == 'PUT':
+                    # STAGE 2: Deferred PUT evidence image upload using saved eventId
+                    cloud_ev_id = event_record.get('cloud_event_id') if event_record else None
+                    if not cloud_ev_id:
+                        # Case B: Evidence collection finished before POST response arrived
+                        self.mark_evidence_ready(event_id)
+                        put_wait = item.get('put_wait_count', 0)
+                        if put_wait < 30:
+                            item['put_wait_count'] = put_wait + 1
+                            item['not_before'] = time.monotonic() + 0.5
+                            self.queue.put(item)
+                            self.queue.task_done()
+                            continue
+                        else:
+                            log.warning('prosper_put_timeout_waiting_for_post_event_id', extra={'event_id': event_id})
+                            self.queue.task_done()
+                            continue
+
+                    c1_images, expected_gate_cams, captured_cams = self._build_multi_camera_images(
+                        event_record, obs, allow_single_fallback=False
+                    )
+
+                    missing_cams = expected_gate_cams - captured_cams
+                    if missing_cams and not item.get('force'):
+                        cam_waits = int(item.get('camera_wait_count', 0))
+                        if cam_waits < 15:
+                            item['camera_wait_count'] = cam_waits + 1
+                            item['not_before'] = time.monotonic() + 1.0
+                            self.queue.put(item)
+                            self.queue.task_done()
+                            continue
+                        else:
+                            log.warning('prosper_put_proceeding_with_partial_cameras', extra={
+                                'event_id': event_id, 'cloud_event_id': cloud_ev_id,
+                                'missing_cameras': sorted(list(missing_cams)),
+                                'captured_cameras': sorted(list(captured_cams))
+                            })
+
+                    # Strict validation: verify images belong to this event and gate cameras
+                    orig_cntr = event_record.get('container_number')
+                    valid_images = [img_item for img_item in c1_images if img_item.get('Image', '').startswith('data:image/')]
+                    if not valid_images:
+                        log.warning('prosper_put_skipped_no_valid_images', extra={'event_id': event_id, 'cloud_event_id': cloud_ev_id})
+                        if self.repository:
+                            self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id)
+                        self.queue.task_done()
+                        continue
+
+                    put_payload = {
+                        'EventId': cloud_ev_id,
+                        'Containers': [
+                            {
+                                'ContainerNumber': orig_cntr,
+                                'ContainerNumberConfidence': round(conf_1, 2),
+                                'Size': size_1,
+                                'Position': 'SINGLE',
+                                'Images': valid_images
+                            }
+                        ]
+                    }
+
+                    success = self.session.put_gate_event_images(cloud_ev_id, put_payload)
+                    if success is True or isinstance(success, dict):
+                        self._is_online = True
+                        self._last_sync_time = datetime.now(timezone.utc).isoformat()
+                        self._last_error = None
+                        if self.repository:
+                            self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id)
+                        if self.metrics:
+                            self.metrics.increment('prosper_events_synced')
+                            self.metrics.increment('prosper_images_updated')
+                            self.metrics.latency('prosper_put_sync', time.monotonic() - item['enqueued_at'])
+                        log.info('prosper_gate_event_images_updated_stage2_complete', extra={
+                            'event_id': event_id,
+                            'cloud_event_id': cloud_ev_id,
+                            'container_number': orig_cntr,
+                            'image_count': len(valid_images)
+                        })
+                        self.queue.task_done()
+                        continue
+                    else:
+                        self._is_online = False
+                        if self.repository:
+                            self.repository.mark_cloud_delivery(
+                                event_id,
+                                'PUT_FAILED' if success == 'OFFLINE' else (success if success in ('REJECTED', 'NOT_FOUND') else 'PUT_FAILED'),
+                                'Cloud image update PUT failed'
+                            )
+                        if success == 'REJECTED':
+                            self._last_error = 'Cloud rejected PUT image update'
+                            self.queue.task_done()
+                            continue
+                        item['retries'] += 1
+                        if item['retries'] < self.settings.prosper_max_retries:
+                            backoff = min(2.0 ** item['retries'], 30.0)
+                            item['not_before'] = time.monotonic() + backoff
+                            try:
+                                self.queue.put_nowait(item)
+                            except Full:
+                                log.error('prosper_put_retry_dropped_queue_full', extra={'event_id': event_id})
+                        self.queue.task_done()
+                        continue
 
             except Exception as exc:
                 log.exception('prosper_dispatch_exception: %s', exc)
                 success = 'OFFLINE'
 
-            if success is True or isinstance(success, dict):
-                self._is_online = True
-                self._last_sync_time = datetime.now(timezone.utc).isoformat()
-                self._last_error = None
-                if self.repository:
-                    try:
-                        cloud_ev_id = None
-                        if isinstance(success, dict):
-                            cloud_ev_id = success.get('eventId') or success.get('visitDatabaseId')
-                        self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id)
-                    except Exception:
-                        log.exception('prosper_acknowledgement_persistence_failed: %s', event_id)
-                if self.metrics:
-                    self.metrics.increment('prosper_events_synced')
-                    self.metrics.latency('prosper_sync', time.monotonic() - item['enqueued_at'])
-                self.queue.task_done()
-            else:
-                self._is_online = False
-                if self.repository:
-                    try:
-                        self.repository.mark_cloud_delivery(
-                            event_id,
-                            success if success in ('REJECTED', 'CONFLICT', 'OFFLINE') else 'OFFLINE',
-                            'Cloud did not accept event'
-                        )
-                    except Exception:
-                        pass
-                if success == 'REJECTED':
-                    self._last_error = 'Cloud rejected payload (validation or authentication error)'
-                    self.queue.task_done()
-                    continue
-                elif success == 'CONFLICT':
-                    self._last_error = 'Cloud conflict; event remains pending for retry'
-                    self.queue.task_done()
-                    continue
-                elif success == 'OFFLINE':
-                    self._last_error = 'Cloud endpoint unreachable or offline'
-                elif 'exc' in locals() and exc:
-                    self._last_error = str(exc)
-                item['retries'] += 1
-                if item['retries'] < self.settings.prosper_max_retries:
-                    backoff = min(2.0 ** item['retries'], 30.0)
-                    self._stop.wait(backoff)
-                    try:
-                        self.queue.put_nowait(item)
-                    except Full:
-                        log.error('prosper_retry_dropped_queue_full', extra={'event_id': event_id})
-                else:
-                    log.info('prosper_event_sync_buffered_in_db: Event %s buffered offline in database; periodic sweep will auto-sync.', event_id)
-                    if self.metrics:
-                        self.metrics.increment('prosper_sync_buffered')
-                self.queue.task_done()
+            # Fallback error handling for unhandled exceptions or initial failures
+            self._is_online = False
+            if self.repository:
+                try:
+                    self.repository.mark_cloud_delivery(
+                        event_id,
+                        success if success in ('REJECTED', 'CONFLICT', 'OFFLINE') else 'OFFLINE',
+                        'Cloud dispatch error'
+                    )
+                except Exception:
+                    pass
+            item['retries'] += 1
+            if item['retries'] < self.settings.prosper_max_retries:
+                backoff = min(2.0 ** item['retries'], 30.0)
+                item['not_before'] = time.monotonic() + backoff
+                try:
+                    self.queue.put_nowait(item)
+                except Full:
+                    log.error('prosper_retry_dropped_queue_full', extra={'event_id': event_id})
+            self.queue.task_done()

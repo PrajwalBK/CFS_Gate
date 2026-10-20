@@ -153,27 +153,23 @@ class EventManager:
         evidence.event_id = event_id
         evidence.confirmed = confirmed
 
-        # Only dispatch to cloud for events confirmed with valid ISO 6346 container number and valid check digit.
-        # CRITICAL: If a multi-camera container passage session is active, do NOT dispatch prematurely!
-        # Finalization and cloud dispatch must happen only after all cameras capture frames and the passage clears.
+        # Two-stage cloud integration:
+        # Step 1: Immediately POST gate event with initial confirmed OCR and any immediately available image.
+        # Step 2: Background multi-camera passage session continues and later triggers PUT with final evidence.
         is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
-        has_active_passage = bool(
-            self.runtime and getattr(self.runtime, 'passage_sessions', None)
-            and (bool(self.runtime.passage_sessions.get_all_active_sessions(obs.gate_id))
-                 or self.runtime.passage_outbox.get(event_id))
-        )
-        should_dispatch = obs.confirmed and is_ocr_valid and (event_id not in self._dispatched_events) and not has_active_passage
-        if self.dispatcher and should_dispatch:
+        should_dispatch_post = obs.confirmed and is_ocr_valid and (event_id not in self._dispatched_events)
+        if self.dispatcher and should_dispatch_post:
             t_api0 = time.perf_counter()
             self._dispatched_events.add(event_id)
             self.dispatcher.enqueue(
                 obs,
                 event_id,
+                stage='POST',
                 delay_seconds=getattr(self.settings, 'cloud_dispatch_grace_seconds', 0.0),
             )
             if profiler_record:
                 profiler_record.api_queue_ms = (time.perf_counter() - t_api0) * 1000.0
-        if self.runtime and obs.direction in ('EXIT', 'OUT', 'GATE_OUT') and should_dispatch:
+        if self.runtime and obs.direction in ('EXIT', 'OUT', 'GATE_OUT') and should_dispatch_post:
             try:
                 cntr = obs.ocr.normalized_text if (obs and obs.ocr and obs.confirmed) else 'Unconfirmed'
                 self.runtime.emit_alert(

@@ -1450,7 +1450,9 @@ class GateRuntime:
             event = self.repository.event(event_id)
             if event and event.get('status') == 'CONFIRMED' and event.get('container_number'):
                 self.ocr_store.cancel_event_pending(event_id)
-                self.dispatcher.enqueue(None, event_id)
+                if hasattr(self.dispatcher, 'mark_evidence_ready'):
+                    self.dispatcher.mark_evidence_ready(event_id)
+                self.dispatcher.enqueue(None, event_id, stage='PUT')
                 self.metrics.increment('passage_sessions_finalized')
                 if session.direction in ('EXIT', 'OUT', 'GATE_OUT'):
                     try:

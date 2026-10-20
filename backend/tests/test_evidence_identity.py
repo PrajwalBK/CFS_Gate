@@ -5,6 +5,7 @@ import hashlib
 import base64
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pydantic import SecretStr
 from app.events.cloud_dispatcher import CloudOutboxDispatcher
@@ -170,6 +171,12 @@ def test_real_http_payload_preserves_event_camera_and_image_bytes(settings, repo
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'{"eventId":"accepted-local"}')
+        def do_PUT(self):
+            _ = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"success":true}')
         def log_message(self, *args):
             pass
     server = ThreadingHTTPServer(('127.0.0.1', 0), Receiver)
@@ -189,7 +196,11 @@ def test_real_http_payload_preserves_event_camera_and_image_bytes(settings, repo
     try:
         dispatcher.start()
         dispatcher.enqueue(None, session.event_id)
-        dispatcher.queue.join()
+        for _ in range(50):
+            ev = repository.event(session.event_id)
+            if ev and ev.get('cloud_delivery_state') == 'DELIVERED':
+                break
+            time.sleep(0.05)
         assert len(received) == 1
         container = received[0]['Containers'][0]
         assert container['ContainerNumber'] == 'MSKU1234565'

@@ -302,6 +302,7 @@ class GateRepository:
                 elif snapshots and hasattr(snapshots, 'evidence_manager') and container_num:
                     snapshots.evidence_manager.update_container_number(target_event_id, container_num)
 
+                sess_cloud_ev_id = getattr(session, 'cloud_event_id', None)
                 if not existing:
                     event = GateEvent(
                         id=session.event_id,
@@ -313,11 +314,17 @@ class GateRepository:
                         iso_code_1=iso_code,
                         iso_code_2=None,
                         is_twin=False,
-                        status=status
+                        status=status,
+                        cloud_event_id=sess_cloud_ev_id,
+                        cloud_delivery_state='EVENT_CREATED' if sess_cloud_ev_id else 'PENDING'
                     )
                     db_session.add(event)
                     db_session.flush()
                 else:
+                    if sess_cloud_ev_id and not existing.cloud_event_id:
+                        existing.cloud_event_id = sess_cloud_ev_id
+                    elif existing.cloud_event_id and not sess_cloud_ev_id:
+                        session.cloud_event_id = existing.cloud_event_id
                     if container_num:
                         existing.container_number = container_num
                     if iso_code:
@@ -1178,18 +1185,35 @@ class GateRepository:
                     ev.cloud_event_id = str(cloud_event_id)
 
     def mark_cloud_delivery(self, event_id: str, state: str, error: str | None = None):
-        if state not in ('PENDING', 'OFFLINE', 'REJECTED', 'CONFLICT', 'BLOCKED', 'DUPLICATE'):
-            raise ValueError('Invalid cloud delivery state')
+        valid_states = (
+            'PENDING', 'OFFLINE', 'REJECTED', 'CONFLICT', 'BLOCKED', 'DUPLICATE',
+            'EVENT_CREATED', 'POST_PENDING', 'PUT_PENDING', 'PUT_FAILED', 'DELIVERED', 'NOT_FOUND'
+        )
+        if state not in valid_states:
+            raise ValueError(f'Invalid cloud delivery state: {state}')
         with self.db.sessions.begin() as session:
             ev = session.get(GateEvent, event_id)
             if ev:
-                if ev.cloud_synced and ev.cloud_delivery_state == 'DELIVERED':
+                if ev.cloud_synced and ev.cloud_delivery_state == 'DELIVERED' and state != 'DELIVERED':
                     return
                 ev.cloud_delivery_state = state
                 ev.cloud_delivery_error = error[:256] if error else None
-                ev.cloud_synced = False
-                ev.cloud_synced_at = None
-                ev.cloud_event_id = None
+                if state == 'DELIVERED':
+                    ev.cloud_synced = True
+                    ev.cloud_synced_at = utcnow()
+                else:
+                    ev.cloud_synced = False
+                    ev.cloud_synced_at = None
+                    if state in ('REJECTED', 'BLOCKED', 'DUPLICATE'):
+                        ev.cloud_event_id = None
+
+    def set_cloud_event_id(self, event_id: str, cloud_event_id: str, state: str = 'EVENT_CREATED'):
+        with self.db.sessions.begin() as session:
+            ev = session.get(GateEvent, event_id)
+            if ev:
+                ev.cloud_event_id = str(cloud_event_id)
+                ev.cloud_delivery_state = state
+                ev.cloud_delivery_error = None
 
     def mark_duplicate_event(self, duplicate_id: str, primary_id: str):
         """Retain an audit row but remove a duplicate from active visits/outbox."""
@@ -1227,7 +1251,9 @@ class GateRepository:
                 select(GateEvent)
                 .where(
                     GateEvent.status == 'CONFIRMED',
-                    func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_(['PENDING', 'OFFLINE', 'CONFLICT']),
+                    func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_([
+                        'PENDING', 'OFFLINE', 'CONFLICT', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
+                    ]),
                     (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
                     (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
                 )

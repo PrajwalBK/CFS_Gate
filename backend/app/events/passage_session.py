@@ -228,6 +228,8 @@ class ContainerPassageSession:
         self.confirmed_confidence: float = 0.0
         self.identity_conflict = False
         self.sources_by_camera: Dict[str, str] = {}
+        self.cloud_event_id: Optional[str] = None
+        self.evidence_ready: bool = False
 
         self._lock = threading.Lock()
 
@@ -639,6 +641,30 @@ class PassageSessionManager:
     def acknowledge(self, event_id):
         with self._lock:
             self.completed_sessions.pop(event_id, None)
+
+    def get_session_by_event_id(self, event_id: str) -> Optional[ContainerPassageSession]:
+        with self._lock:
+            for s in self.active_sessions.values():
+                if s.event_id == event_id:
+                    return s
+            if event_id in self.completed_sessions:
+                return self.completed_sessions[event_id]
+            for s in self.pending_finalizations:
+                if s.event_id == event_id:
+                    return s
+            return None
+
+    def set_cloud_event_id(self, event_id: str, cloud_event_id: str):
+        session = self.get_session_by_event_id(event_id)
+        if session:
+            with session._lock:
+                session.cloud_event_id = cloud_event_id
+
+    def mark_evidence_ready(self, event_id: str):
+        session = self.get_session_by_event_id(event_id)
+        if session:
+            with session._lock:
+                session.evidence_ready = True
 
     def get_all_active_sessions(self, gate_id: Optional[str] = None) -> list[ContainerPassageSession]:
         with self._lock:
