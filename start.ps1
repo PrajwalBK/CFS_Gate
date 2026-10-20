@@ -14,12 +14,23 @@ $frontendRoot = Join-Path $launcherRoot 'frontend'
 $backendPython = Join-Path $backendRoot '.venv\Scripts\python.exe'
 $frontendIndex = Join-Path $frontendRoot 'dist\gate\browser\index.html'
 
-# Ensure root snapshots junction points to backend snapshots
+# Ensure root snapshots and evidence junctions point to backend folders
 $snapshotsRoot = Join-Path $launcherRoot 'snapshots'
 $backendSnapshots = Join-Path $backendRoot 'snapshots'
 if (-not (Test-Path -LiteralPath $snapshotsRoot)) {
     try {
         New-Item -ItemType Junction -Path $snapshotsRoot -Target $backendSnapshots -ErrorAction SilentlyContinue | Out-Null
+    } catch {}
+}
+
+$evidenceRoot = Join-Path $launcherRoot 'evidence'
+$backendEvidence = Join-Path $backendRoot 'evidence'
+if (-not (Test-Path -LiteralPath $backendEvidence)) {
+    New-Item -ItemType Directory -Path $backendEvidence -ErrorAction SilentlyContinue | Out-Null
+}
+if (-not (Test-Path -LiteralPath $evidenceRoot)) {
+    try {
+        New-Item -ItemType Junction -Path $evidenceRoot -Target $backendEvidence -ErrorAction SilentlyContinue | Out-Null
     } catch {}
 }
 

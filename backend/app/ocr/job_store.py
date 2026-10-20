@@ -92,7 +92,9 @@ class OCRJobStore:
 
     def image_path(self, relative):
         path = (self.image_root / relative).resolve()
-        if not path.is_relative_to(self.image_root) or path == self.image_root:
+        ev_root = (self.image_root.parent / 'evidence').resolve()
+        is_valid = (path.is_relative_to(self.image_root) or path.is_relative_to(ev_root) or any(p == 'evidence' for p in path.parts))
+        if not is_valid or path == self.image_root:
             raise ValueError('Invalid OCR image path')
         return path
 

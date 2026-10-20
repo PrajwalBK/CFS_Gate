@@ -187,7 +187,8 @@ class ContainerPassageSession:
                  target_frames_per_camera: int = 10,
                  container_slot: str = 'CONTAINER_1',
                  track_id: Optional[int] = None, min_ocr_confidence: float = 0.6,
-                 cross_camera_window: float = 25.0):
+                 cross_camera_window: float = 22.0,
+                 evidence_manager: Any = None):
         self.min_ocr_confidence = min_ocr_confidence
         self.cross_camera_window = cross_camera_window
         self.session_id = session_id
@@ -201,9 +202,19 @@ class ContainerPassageSession:
         self.container_slot = container_slot
         self.track_id = track_id
         self.tracks_by_camera: Dict[str, set[int]] = {}
+        self.camera_frame_seq: Dict[str, int] = {}
+        self.evidence_manager = evidence_manager
 
         self.event_id: str = str(uuid4())
         self.finalized: bool = False
+
+        if self.evidence_manager:
+            try:
+                self.evidence_manager.get_or_create_folder(
+                    self.event_id, gate_id=self.gate_id, direction=self.direction
+                )
+            except Exception as exc:
+                log.debug('folder_init_error', extra={'error': str(exc)})
 
         # Per-camera frame candidate buffers: cam_id -> list of CapturedFrameCandidate
         self.captured_frames: Dict[str, List[CapturedFrameCandidate]] = {
@@ -269,6 +280,22 @@ class ContainerPassageSession:
             if q_score <= 0.0:
                 # Useless frame: container is not present in this camera's angle
                 return None
+
+            seq = self.camera_frame_seq.get(camera_id, 0) + 1
+            self.camera_frame_seq[camera_id] = seq
+            if self.evidence_manager:
+                try:
+                    self.evidence_manager.save_captured_frame(
+                        event_id=self.event_id,
+                        camera_id=camera_id,
+                        image=image,
+                        frame_sequence=seq,
+                        gate_id=self.gate_id,
+                        direction=self.direction,
+                        container_number=self.confirmed_container_number
+                    )
+                except Exception as exc:
+                    log.debug('save_captured_frame_error', extra={'error': str(exc)})
 
             cand = CapturedFrameCandidate(
                 camera_id=camera_id,
@@ -339,6 +366,11 @@ class ContainerPassageSession:
             if not self.confirmed_container_number:
                 self.confirmed_container_number = norm
                 self.confirmed_confidence = val.confidence
+                if self.evidence_manager:
+                    try:
+                        self.evidence_manager.update_container_number(self.event_id, norm)
+                    except Exception:
+                        pass
             elif norm == self.confirmed_container_number:
                 if val.confidence > self.confirmed_confidence:
                     self.confirmed_confidence = val.confidence
@@ -350,6 +382,11 @@ class ContainerPassageSession:
                     self.confirmed_container_number = norm
                     self.confirmed_confidence = val.confidence
                     self.identity_conflict = False
+                    if self.evidence_manager:
+                        try:
+                            self.evidence_manager.update_container_number(self.event_id, norm)
+                        except Exception:
+                            pass
                 elif not same_prefix and abs(self.confirmed_confidence - val.confidence) < 0.15:
                     # Distinct owner codes with comparable confidence -> real conflict
                     self.identity_conflict = True
@@ -409,6 +446,11 @@ class ContainerPassageSession:
                         val = ContainerValidator().validate(best_read)
                         iso = (val.size_type if val else None) or self.confirmed_iso_code
                         conf = max(getattr(best_read, 'confidence', 0.8), self.confirmed_confidence)
+                        if self.evidence_manager:
+                            try:
+                                self.evidence_manager.update_container_number(self.event_id, norm)
+                            except Exception:
+                                pass
                         return (norm, iso, conf)
 
             if self.identity_conflict:
@@ -445,12 +487,12 @@ class ContainerPassageSession:
 
             idle_seconds = abs((now - self.last_seen).total_seconds())
             if all_cams_captured:
-                if idle_seconds >= max(4.0, gate_clear_seconds):
+                if idle_seconds >= max(1.5, gate_clear_seconds):
                     return True
                 return False
 
             # If not all cameras have captured frames yet, wait for cross-camera window
-            cross_window = max(getattr(self, 'cross_camera_window', 25.0), 20.0)
+            cross_window = max(getattr(self, 'cross_camera_window', 12.0), 5.0)
             if idle_seconds >= cross_window:
                 return True
 
@@ -466,9 +508,10 @@ class PassageSessionManager:
     its own independent session, track ID, OCR consensus, and event ID.
     """
 
-    def __init__(self, settings=None, target_frames_per_camera: Optional[int] = None, outbox=None):
+    def __init__(self, settings=None, target_frames_per_camera: Optional[int] = None, outbox=None, evidence_manager=None):
         self.settings = settings
         self.outbox = outbox
+        self.evidence_manager = evidence_manager
         if target_frames_per_camera is not None:
             self.target_frames_per_camera = target_frames_per_camera
         else:
@@ -559,7 +602,8 @@ class PassageSessionManager:
                     container_slot=container_slot,
                     track_id=track_id,
                     min_ocr_confidence=getattr(self.settings, "ocr_min_confidence", 0.6),
-                    cross_camera_window=float(getattr(self.settings, 'cross_camera_view_window_seconds', 25.0) if self.settings else 25.0)
+                    cross_camera_window=float(getattr(self.settings, 'cross_camera_view_window_seconds', 22.0) if self.settings else 22.0),
+                    evidence_manager=self.evidence_manager
                 )
                 if camera_id and track_id is not None:
                     session.record_camera_track(camera_id, track_id)

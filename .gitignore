@@ -91,6 +91,8 @@ backend/uploads/ocr-spool/
 uploads/ocr-spool/
 backend/uploads/*.json
 uploads/*.json
+evidence/
+backend/evidence/
 
 # --- Scratch, Test Crops & Temporary Images ---
 scratch/

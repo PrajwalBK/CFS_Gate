@@ -297,6 +297,11 @@ class GateRepository:
 
                 target_event_id = existing.id if existing else session.event_id
 
+                if existing and existing.id != session.event_id and snapshots and hasattr(snapshots, 'evidence_manager'):
+                    snapshots.evidence_manager.merge_event_folders(session.event_id, target_event_id, container_number=container_num)
+                elif snapshots and hasattr(snapshots, 'evidence_manager') and container_num:
+                    snapshots.evidence_manager.update_container_number(target_event_id, container_num)
+
                 if not existing:
                     event = GateEvent(
                         id=session.event_id,
@@ -331,12 +336,21 @@ class GateRepository:
                     if not has_cntr:
                         continue
                     snap_id = str(uuid4())
-                    img_path = snapshots.save_side_snapshot(
-                        target_event_id, cam_id, frame_cand.image,
-                        direction=session.direction,
-                        text=container_num or '',
-                        force=True
-                    )
+                    if hasattr(snapshots, 'evidence_manager'):
+                        rel_best, rel_leg = snapshots.evidence_manager.save_best_frame(
+                            target_event_id, cam_id, frame_cand.image,
+                            direction=session.direction,
+                            container_number=container_num or '',
+                            quality_score=snapshots.compute_quality(frame_cand.image)
+                        )
+                        img_path = rel_leg
+                    else:
+                        img_path = snapshots.save_side_snapshot(
+                            target_event_id, cam_id, frame_cand.image,
+                            direction=session.direction,
+                            text=container_num or '',
+                            force=True
+                        )
                     created_paths.append(img_path)
                     existing_snap = db_session.scalar(select(Snapshot).where(
                         (Snapshot.image_path == img_path) |

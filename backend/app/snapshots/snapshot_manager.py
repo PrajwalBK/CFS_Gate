@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 import datetime
 import math
 import os
@@ -6,20 +7,36 @@ import cv2
 
 
 class SnapshotManager:
-    def __init__(self, root):
+    def __init__(self, root, evidence_root=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        from app.snapshots.evidence_manager import EvidenceFolderManager
+        ev_root = Path(evidence_root).resolve() if evidence_root else (self.root.parent / 'evidence')
+        self.evidence_manager = EvidenceFolderManager(root=ev_root, legacy_root=self.root)
 
     def path(self, relative):
-        path = (self.root / relative).resolve()
-        if not path.is_relative_to(self.root) or path == self.root:
+        rel_str = str(relative).replace('\\', '/')
+        if rel_str.startswith('/'):
+            rel_str = rel_str.lstrip('/')
+        # 1. Resolve via EvidenceFolderManager if file exists
+        resolved = self.evidence_manager.resolve_path(rel_str)
+        if resolved.is_file():
+            return resolved
+
+        # 2. If relative starts with GATE_IN or GATE_OUT
+        if rel_str.startswith(('GATE_IN/', 'GATE_OUT/')):
+            cand = (self.evidence_manager.evidence_root / rel_str).resolve()
+            if cand.is_file():
+                return cand
+
+        # 3. Default resolution against legacy root
+        path = (self.root / rel_str).resolve()
+        if not path.is_relative_to(self.root) and not path.is_relative_to(self.evidence_manager.evidence_root):
             raise ValueError('Invalid snapshot reference')
         return path
 
-    def ensure_event_dir(self, event_id: str) -> Path:
-        event_dir = self.root / str(event_id)
-        event_dir.mkdir(parents=True, exist_ok=True)
-        return event_dir
+    def ensure_event_dir(self, event_id: str, gate_id: str = '', direction: str = '', container_number: Optional[str] = None) -> Path:
+        return self.evidence_manager.get_or_create_folder(str(event_id), gate_id=gate_id, direction=direction, container_number=container_number)
 
     @staticmethod
     def compute_quality(image) -> float:
@@ -188,19 +205,18 @@ class SnapshotManager:
             return 0.0
 
     def save_side_snapshot(self, event_id: str, camera_id: str, image, direction: str = '', text: str = '', force: bool = False) -> str:
-        """Saves or upgrades the compulsory side snapshot for camera_id under snapshots/{event_id}/{camera_id}.jpg."""
-        import cv2
-        self.ensure_event_dir(event_id)
+        """Saves or upgrades the compulsory side snapshot for camera_id under the single evidence folder."""
+        folder = self.ensure_event_dir(event_id, direction=direction, container_number=text if text else None)
         relative = f'{event_id}/{camera_id}.jpg'
-        final = self.path(relative)
+        final = folder / f'{camera_id}.jpg'
         meta_quality_path = final.with_suffix('.quality')
 
         new_quality = self.compute_quality(image)
         if not force and final.exists() and meta_quality_path.exists():
             try:
-                old_quality = float(meta_quality_path.read_text().strip())
+                old_quality = float(meta_quality_path.read_text(encoding='utf-8').strip())
                 if new_quality <= old_quality:
-                    return relative  # Existing snapshot is sharper/clearer
+                    return relative
             except Exception:
                 pass
 
@@ -269,9 +285,17 @@ class SnapshotManager:
             raise OSError('Snapshot encoding failed')
         is_rear = getattr(observation, 'slot_position', 'FRONT') == 'REAR' or observation.origin_key.endswith(':rear')
         slot_suffix = '_rear' if is_rear else ''
-        relative = f'{event_id}/{observation.detection.camera_id}_{snapshot_id}{slot_suffix}.jpg' if event_id else f'{snapshot_id}.jpg'
-        final = self.path(relative)
-        final.parent.mkdir(parents=True, exist_ok=True)
+        if event_id:
+            direction = getattr(observation, 'direction', '')
+            gate_id = getattr(observation, 'gate_id', '')
+            container_num = observation.ocr.normalized_text if (observation.ocr and observation.ocr.normalized_text) else ""
+            folder = self.ensure_event_dir(event_id, gate_id=gate_id, direction=direction, container_number=container_num if getattr(observation, 'confirmed', False) else None)
+            relative = f'{event_id}/{observation.detection.camera_id}_{snapshot_id}{slot_suffix}.jpg'
+            final = folder / f'{observation.detection.camera_id}_{snapshot_id}{slot_suffix}.jpg'
+        else:
+            relative = f'{snapshot_id}.jpg'
+            final = self.path(relative)
+            final.parent.mkdir(parents=True, exist_ok=True)
         quality_path = final.with_suffix('.quality')
         new_quality = self.compute_quality(image)
         if final.exists() and quality_path.exists():
@@ -294,27 +318,13 @@ class SnapshotManager:
         return self.save_side_snapshot(event_id, camera_id, image, direction=direction, text=text)
 
     def save_event_json(self, event_id: str, event_data: dict) -> Path:
-        import json
-        event_dir = self.root / str(event_id)
-        event_dir.mkdir(parents=True, exist_ok=True)
-        final_path = event_dir / 'event.json'
-        temp_path = event_dir / 'event.json.tmp'
-        try:
-            with temp_path.open('w', encoding='utf-8') as f:
-                json.dump(event_data, f, indent=2, default=str)
-            os.replace(temp_path, final_path)
-        finally:
-            temp_path.unlink(missing_ok=True)
         manifest = self.build_evidence_manifest(event_data)
-        manifest_path = event_dir / 'evidence.json'
-        manifest_temp = event_dir / 'evidence.json.tmp'
-        try:
-            with manifest_temp.open('w', encoding='utf-8') as f:
-                json.dump(manifest, f, indent=2, default=str)
-            os.replace(manifest_temp, manifest_path)
-        finally:
-            manifest_temp.unlink(missing_ok=True)
-        return final_path
+        event_path, _ = self.evidence_manager.save_event_json(
+            event_id=event_id,
+            event_data=event_data,
+            manifest_data=manifest
+        )
+        return event_path
 
     def remove(self, relative):
         path = self.path(relative)

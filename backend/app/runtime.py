@@ -111,7 +111,8 @@ class GateRuntime:
         self._passage_commit_lock = threading.Lock()
         self.passage_sessions = PassageSessionManager(
             settings, target_frames_per_camera=getattr(settings, 'passage_target_frames_per_camera', 10),
-            outbox=self.passage_outbox
+            outbox=self.passage_outbox,
+            evidence_manager=getattr(self.snapshots, 'evidence_manager', None)
         )
         self._gate_cameras = {gate_id: [c.id for c in cameras if c.gate_id == gate_id and getattr(c, 'enabled', True)]
                               for gate_id in {c.gate_id for c in cameras}}
