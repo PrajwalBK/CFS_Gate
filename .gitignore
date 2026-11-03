@@ -26,6 +26,7 @@ venv.bak/
 # --- Environment & Sensitive Credentials ---
 .env
 !.env.example
+!backend/.env
 *.pem
 *.key
 
