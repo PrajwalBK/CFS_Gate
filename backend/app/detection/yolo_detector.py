@@ -20,7 +20,7 @@ class YoloDetector:
 
     def detect(self, frame: Frame) -> list[Detection]:
         results = self.model.predict(source=frame.image, conf=self.settings.confidence_threshold,
-                                     imgsz=self.settings.model_image_size, device=self.settings.model_device,
+                                     imgsz=self.settings.model_image_size, device=(0 if str(self.settings.model_device).lower() == 'gpu' else self.settings.model_device),
                                      verbose=False, rect=False)
         height, width = frame.image.shape[:2]
         detections = []
