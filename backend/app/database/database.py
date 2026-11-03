@@ -59,6 +59,8 @@ class Database:
                     conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_synced_at DATETIME')
                 if 'cloud_event_id' not in cols:
                     conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_event_id VARCHAR(64)')
+                if 'cloud_visit_id' not in cols:
+                    conn.exec_driver_sql('ALTER TABLE gate_events ADD COLUMN cloud_visit_id VARCHAR(64)')
                 if 'cloud_delivery_state' not in cols:
                     conn.exec_driver_sql("ALTER TABLE gate_events ADD COLUMN cloud_delivery_state VARCHAR(20) DEFAULT 'PENDING'")
                     # Legacy acknowledgements cannot be distinguished from old

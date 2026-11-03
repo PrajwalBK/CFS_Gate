@@ -229,6 +229,7 @@ class ContainerPassageSession:
         self.identity_conflict = False
         self.sources_by_camera: Dict[str, str] = {}
         self.cloud_event_id: Optional[str] = None
+        self.cloud_visit_id: Optional[str] = None
         self.evidence_ready: bool = False
 
         self._lock = threading.Lock()
@@ -654,11 +655,13 @@ class PassageSessionManager:
                     return s
             return None
 
-    def set_cloud_event_id(self, event_id: str, cloud_event_id: str):
+    def set_cloud_event_id(self, event_id: str, cloud_event_id: str, cloud_visit_id: Optional[str] = None):
         session = self.get_session_by_event_id(event_id)
         if session:
             with session._lock:
                 session.cloud_event_id = cloud_event_id
+                if cloud_visit_id:
+                    session.cloud_visit_id = cloud_visit_id
 
     def mark_evidence_ready(self, event_id: str):
         session = self.get_session_by_event_id(event_id)

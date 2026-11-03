@@ -334,7 +334,7 @@ class ProsperSession:
             return 'OFFLINE'
 
         headers['Content-Type'] = 'application/json'
-        url = f'{self.events_url}/{cloud_event_id}/images'
+        url = f'{self.events_url.rstrip("/")}/{cloud_event_id}/images'
 
         try:
             res = self.session.put(url, json=payload, headers=headers, timeout=25)
@@ -975,7 +975,9 @@ class CloudOutboxDispatcher:
                         else:
                             dt_captured = datetime.now(timezone.utc)
 
-                        visit_id = f"VISIT-{dt_captured.strftime('%Y%m%d')}-{event_id[:8].upper()}"
+                        visit_id = (event_record.get('cloud_visit_id') if event_record else None) or (item.get('visit_id') if item else None)
+                        if not visit_id:
+                            visit_id = f"VISIT-{dt_captured.strftime('%Y%m%d')}-{event_id[:8].upper()}"
                         direction = (
                             obs.direction.upper() if (obs and hasattr(obs, 'direction') and obs.direction)
                             else ((event_record.get('event_type') or 'ENTRY').upper() if event_record else 'ENTRY')
@@ -1034,20 +1036,24 @@ class CloudOutboxDispatcher:
                         self._last_sync_time = datetime.now(timezone.utc).isoformat()
                         self._last_error = None
                         returned_ev_id = None
+                        returned_visit_id = None
                         if isinstance(success, dict):
-                            returned_ev_id = success.get('eventId') or success.get('visitDatabaseId')
+                            returned_ev_id = success.get('eventId') or success.get('EventId')
+                            returned_visit_id = success.get('visitId') or success.get('VisitId') or success.get('visitDatabaseId') or success.get('VisitDatabaseId')
                         if not returned_ev_id:
-                            returned_ev_id = event_id
+                            returned_ev_id = (str(returned_visit_id) if returned_visit_id else None) or event_id
+                        if not returned_visit_id:
+                            returned_visit_id = visit_id
 
                         if self.repository:
                             try:
-                                self.repository.set_cloud_event_id(event_id, returned_ev_id, state='EVENT_CREATED')
+                                self.repository.set_cloud_event_id(event_id, returned_ev_id, state='EVENT_CREATED', cloud_visit_id=str(returned_visit_id))
                             except Exception:
                                 log.exception('prosper_set_cloud_event_id_failed: %s', event_id)
 
                         if self.runtime and getattr(self.runtime, 'passage_sessions', None):
                             try:
-                                self.runtime.passage_sessions.set_cloud_event_id(event_id, returned_ev_id)
+                                self.runtime.passage_sessions.set_cloud_event_id(event_id, returned_ev_id, cloud_visit_id=str(returned_visit_id))
                             except Exception:
                                 pass
 
@@ -1107,23 +1113,40 @@ class CloudOutboxDispatcher:
                                 'captured_cameras': sorted(list(captured_cams))
                             })
 
+                    cloud_visit_id = (event_record.get('cloud_visit_id') if event_record else None) or item.get('visit_id')
+                    if not cloud_visit_id:
+                        if obs and hasattr(obs, 'detection'):
+                            dt_captured = obs.detection.frame_timestamp
+                        elif event_record and event_record.get('timestamp'):
+                            try:
+                                ts_str = event_record['timestamp'].rstrip('Z')
+                                dt_captured = datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
+                            except Exception:
+                                dt_captured = datetime.now(timezone.utc)
+                        else:
+                            dt_captured = datetime.now(timezone.utc)
+                        cloud_visit_id = f"VISIT-{dt_captured.strftime('%Y%m%d')}-{event_id[:8].upper()}"
+
                     # Strict validation: verify images belong to this event and gate cameras
                     orig_cntr = event_record.get('container_number')
                     valid_images = [img_item for img_item in c1_images if img_item.get('Image', '').startswith('data:image/')]
                     if not valid_images:
                         log.warning('prosper_put_skipped_no_valid_images', extra={'event_id': event_id, 'cloud_event_id': cloud_ev_id})
                         if self.repository:
-                            self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id)
+                            self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id, cloud_visit_id=str(cloud_visit_id))
                         self.queue.task_done()
                         continue
 
                     put_payload = {
                         'EventId': cloud_ev_id,
+                        'VisitId': str(cloud_visit_id),
                         'Containers': [
                             {
                                 'ContainerNumber': orig_cntr,
                                 'ContainerNumberConfidence': round(conf_1, 2),
                                 'Size': size_1,
+                                'ContainerSize': cs1 or None,
+                                'SizeCode': iso_s1 or None,
                                 'Position': 'SINGLE',
                                 'Images': valid_images
                             }
@@ -1136,7 +1159,7 @@ class CloudOutboxDispatcher:
                         self._last_sync_time = datetime.now(timezone.utc).isoformat()
                         self._last_error = None
                         if self.repository:
-                            self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id)
+                            self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id, cloud_visit_id=str(cloud_visit_id))
                         if self.metrics:
                             self.metrics.increment('prosper_events_synced')
                             self.metrics.increment('prosper_images_updated')

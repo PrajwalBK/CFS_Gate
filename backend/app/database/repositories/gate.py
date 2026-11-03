@@ -303,6 +303,7 @@ class GateRepository:
                     snapshots.evidence_manager.update_container_number(target_event_id, container_num)
 
                 sess_cloud_ev_id = getattr(session, 'cloud_event_id', None)
+                sess_cloud_visit_id = getattr(session, 'cloud_visit_id', None)
                 if not existing:
                     event = GateEvent(
                         id=session.event_id,
@@ -316,6 +317,7 @@ class GateRepository:
                         is_twin=False,
                         status=status,
                         cloud_event_id=sess_cloud_ev_id,
+                        cloud_visit_id=sess_cloud_visit_id,
                         cloud_delivery_state='EVENT_CREATED' if sess_cloud_ev_id else 'PENDING'
                     )
                     db_session.add(event)
@@ -325,6 +327,10 @@ class GateRepository:
                         existing.cloud_event_id = sess_cloud_ev_id
                     elif existing.cloud_event_id and not sess_cloud_ev_id:
                         session.cloud_event_id = existing.cloud_event_id
+                    if sess_cloud_visit_id and not existing.cloud_visit_id:
+                        existing.cloud_visit_id = sess_cloud_visit_id
+                    elif existing.cloud_visit_id and not sess_cloud_visit_id:
+                        session.cloud_visit_id = existing.cloud_visit_id
                     if container_num:
                         existing.container_number = container_num
                     if iso_code:
@@ -1173,7 +1179,7 @@ class GateRepository:
             row = session.get(Snapshot, snapshot_id)
             return serialize(row) if row else None
 
-    def mark_cloud_synced(self, event_id: str, cloud_event_id: str | None = None):
+    def mark_cloud_synced(self, event_id: str, cloud_event_id: str | None = None, cloud_visit_id: str | None = None):
         with self.db.sessions.begin() as session:
             ev = session.get(GateEvent, event_id)
             if ev:
@@ -1183,6 +1189,8 @@ class GateRepository:
                 ev.cloud_synced_at = utcnow()
                 if cloud_event_id:
                     ev.cloud_event_id = str(cloud_event_id)
+                if cloud_visit_id:
+                    ev.cloud_visit_id = str(cloud_visit_id)
 
     def mark_cloud_delivery(self, event_id: str, state: str, error: str | None = None):
         valid_states = (
@@ -1207,11 +1215,13 @@ class GateRepository:
                     if state in ('REJECTED', 'BLOCKED', 'DUPLICATE'):
                         ev.cloud_event_id = None
 
-    def set_cloud_event_id(self, event_id: str, cloud_event_id: str, state: str = 'EVENT_CREATED'):
+    def set_cloud_event_id(self, event_id: str, cloud_event_id: str, state: str = 'EVENT_CREATED', cloud_visit_id: str | None = None):
         with self.db.sessions.begin() as session:
             ev = session.get(GateEvent, event_id)
             if ev:
                 ev.cloud_event_id = str(cloud_event_id)
+                if cloud_visit_id:
+                    ev.cloud_visit_id = str(cloud_visit_id)
                 ev.cloud_delivery_state = state
                 ev.cloud_delivery_error = None
 

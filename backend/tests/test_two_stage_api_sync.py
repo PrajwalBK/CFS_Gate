@@ -129,6 +129,7 @@ def test_two_stage_normal_container_passage(gate_setup, repository, snapshots, m
 
         db_ev = repository.event(event_id)
         assert db_ev['cloud_event_id'] == "0e7d4fac-5f22-48a4-be37-0bc58a948eff"
+        assert db_ev['cloud_visit_id'] == "VISIT-38727D97"
         assert db_ev['container_number'] == 'MEDU9988770'
 
         # Step 2 Assertions: PUT called targeting exact eventId with all 3 camera images
@@ -137,6 +138,8 @@ def test_two_stage_normal_container_passage(gate_setup, repository, snapshots, m
         assert target_cloud_id == "0e7d4fac-5f22-48a4-be37-0bc58a948eff"
 
         put_payload = mock_put.call_args[0][1]
+        assert put_payload.get('EventId') == "0e7d4fac-5f22-48a4-be37-0bc58a948eff"
+        assert put_payload.get('VisitId') == "VISIT-38727D97"
         assert len(put_payload['Containers']) == 1
         container_data = put_payload['Containers'][0]
         assert container_data['ContainerNumber'] == 'MEDU9988770'
@@ -688,3 +691,56 @@ def test_api_contract_validation(gate_setup, repository, snapshots, mock_cloud_s
         assert called_url == f"https://api.smartyard.prosperinfotech.com/gate/api/v1/gate/events/{test_cloud_id}/images"
         assert mock_put_req.call_args[1]['headers']['Content-Type'] == 'application/json'
         assert 'Authorization' in mock_put_req.call_args[1]['headers']
+
+# -------------------------------------------------------------------------------------
+# Test M: PascalCase EventId and VisitId from Prosper Cloud API Spec
+# -------------------------------------------------------------------------------------
+def test_two_stage_pascal_case_keys_handling(gate_setup, repository, snapshots, mock_cloud_settings):
+    """Verify that response with PascalCase EventId & VisitId is correctly saved and used in PUT."""
+    cams = [c for c in gate_setup if c.gate_id == 'LANE-OUT']
+    cam_ids = [c.id for c in cams]
+
+    session = ContainerPassageSession('TRACK_PASCAL_01', 'LANE-OUT', 'EXIT', cam_ids, datetime.now(timezone.utc))
+    t = datetime.now(timezone.utc)
+    for cam in cams:
+        frame = _create_sharp_test_frame(f"{cam.id}_TGHU4455664")
+        dets = [Detection(cam.id, t, 'container', 0.95, (10, 10, 350, 250))]
+        session.add_frame(cam.id, frame, t, dets)
+
+    session.add_ocr_candidate(OCRRead('TGHU 445566 4', 0.98))
+    event_id = repository.finalize_passage_session(session, snapshots)
+
+    dispatcher = CloudOutboxDispatcher(mock_cloud_settings, repository=repository, snapshots=snapshots)
+
+    pascal_resp = {
+        "VisitDatabaseId": "bbbbbbbb-8d78-4806-acf2-42eb18e4ef8d",
+        "VisitId": "VISIT-PASCAL-9999",
+        "EventId": "11111111-5f22-48a4-be37-0bc58a948eff",
+        "EventType": "GATE_OUT"
+    }
+
+    with patch.object(dispatcher.session, 'post_gate_event', return_value=pascal_resp) as mock_post, \
+         patch.object(dispatcher.session, 'put_gate_event_images', return_value=True) as mock_put:
+
+        dispatcher.start()
+        dispatcher.enqueue(None, event_id, stage='POST', force=True)
+
+        for _ in range(40):
+            if mock_post.called and mock_put.called:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+        assert mock_post.called
+        db_ev = repository.event(event_id)
+        assert db_ev['cloud_event_id'] == "11111111-5f22-48a4-be37-0bc58a948eff"
+        assert db_ev['cloud_visit_id'] == "VISIT-PASCAL-9999"
+
+        assert mock_put.called
+        target_cloud_id = mock_put.call_args[0][0]
+        assert target_cloud_id == "11111111-5f22-48a4-be37-0bc58a948eff"
+
+        put_payload = mock_put.call_args[0][1]
+        assert put_payload.get('EventId') == "11111111-5f22-48a4-be37-0bc58a948eff"
+        assert put_payload.get('VisitId') == "VISIT-PASCAL-9999"

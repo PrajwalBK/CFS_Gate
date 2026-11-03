@@ -164,3 +164,7 @@ docs/snapshot-archive-validation/
 !docs/snapshot-archive-validation/README.md
 backend/models/acceptance-candidate.pt
 rollback-backups/
+
+# Nested clones & datasets
+ai-video-based-inventory/
+dataset/
