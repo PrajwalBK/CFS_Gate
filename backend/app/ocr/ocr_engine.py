@@ -112,7 +112,7 @@ class PaddleOCREngine:
     def __init__(self, settings):
         self._lock, self._sequence = threading.Lock(), 0
         self._context = get_context('spawn')
-        self._requests = self._context.Queue(maxsize=1)
+        self._requests = self._context.Queue(maxsize=8)
         self._responses = self._context.Queue(maxsize=1)
         self._process = self._context.Process(
             target=_paddle_worker,
@@ -139,10 +139,10 @@ class PaddleOCREngine:
             self._sequence += 1
             request_id = self._sequence
             try:
-                self._requests.put((request_id, image), timeout=2)
+                self._requests.put((request_id, image), timeout=5)
                 kind, returned_id, text, confidence, error = self._responses.get(timeout=20)
-            except queue_module.Empty:
-                log.warning('paddle_ocr_timeout')
+            except (queue_module.Empty, queue_module.Full):
+                log.warning('paddle_ocr_timeout_or_busy')
                 return OCRRead('', 0.0)
             if kind != 'result' or returned_id != request_id or error:
                 log.warning('paddle_ocr_read_failed', extra={'error': error or 'unexpected response'})
