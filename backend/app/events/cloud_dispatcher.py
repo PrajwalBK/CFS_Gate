@@ -1065,6 +1065,10 @@ class CloudOutboxDispatcher:
                     # STAGE 2: Deferred PUT evidence image upload using saved eventId
                     cloud_ev_id = event_record.get('cloud_event_id') if event_record else None
                     if not cloud_ev_id:
+                        # Auto-heal: If POST was never dispatched or not yet completed, initiate POST immediately
+                        if not item.get('post_initiated'):
+                            item['post_initiated'] = True
+                            self.enqueue(None, event_id, stage='POST', force=True)
                         # Case B: Evidence collection finished before POST response arrived
                         self.mark_evidence_ready(event_id)
                         put_wait = item.get('put_wait_count', 0)

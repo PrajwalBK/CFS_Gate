@@ -1464,7 +1464,8 @@ class GateRuntime:
                 self.ocr_store.cancel_event_pending(event_id)
                 if hasattr(self.dispatcher, 'mark_evidence_ready'):
                     self.dispatcher.mark_evidence_ready(event_id)
-                self.dispatcher.enqueue(None, event_id, stage='PUT')
+                stage = 'PUT' if event.get('cloud_event_id') else 'POST'
+                self.dispatcher.enqueue(None, event_id, stage=stage)
                 self.metrics.increment('passage_sessions_finalized')
                 if session.direction in ('EXIT', 'OUT', 'GATE_OUT'):
                     try:
