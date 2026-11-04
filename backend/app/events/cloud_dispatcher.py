@@ -112,9 +112,6 @@ class ProsperSession:
                     username = getattr(self.settings, 'prosper_username', None) or self.settings.prosper_email or 'abhay@prosperinfotech.com'
                     configured_pw = self.settings.prosper_password.get_secret_value() if self.settings.prosper_password else ''
                     passwords_to_try = [configured_pw] if configured_pw else []
-                    for candidate in ['Test@123', 'Prosper@123', 'Admin@123']:
-                        if candidate not in passwords_to_try:
-                            passwords_to_try.append(candidate)
 
                     login_urls = [self.auth_url]
                     alt_url = f'{self.base_url}/api/auth/login'
@@ -163,7 +160,10 @@ class ProsperSession:
                     if self._token:
                         headers['Authorization'] = f'Bearer {self._token}'
                     elif res is not None:
-                        log.warning('prosper_auth_login_failed', extra={'status_code': res.status_code, 'body': res.text[:200]})
+                        if res.status_code == 423:
+                            log.warning('prosper_auth_account_locked: Cloud account %s is temporarily locked on the server (HTTP 423). Please unlock or wait for lockout cooldown.', username)
+                        else:
+                            log.warning('prosper_auth_login_failed', extra={'status_code': res.status_code, 'body': res.text[:200]})
                     else:
                         log.warning('prosper_auth_login_unreachable: Unable to connect to auth server (%s)', self.auth_url)
 
