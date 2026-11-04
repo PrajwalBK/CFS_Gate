@@ -120,3 +120,23 @@ def test_recover_boxed_check_digit():
     cv2.putText(crop_no_box, "FANU 342338", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2)
     not_recovered = recover_boxed_check_digit(crop_no_box, "FANU 342338")
     assert not_recovered == "FANU 342338"
+
+
+def test_recover_zero_o_confusion():
+    from app.ocr.validator import recover_zero_o_confusion
+
+    # 1. '00CU8098620' -> 'OOCU8098620'
+    assert recover_zero_o_confusion('00CU8098620') == 'OOCU8098620'
+    val = ContainerValidator().validate(OCRRead(recover_zero_o_confusion('00CU8098620'), 0.98))
+    assert val.normalized_text == 'OOCU8098620'
+    assert val.valid_check_digit is True
+
+    # 2. 'O0CU 809862' -> 'OOCU8098620' (with check digit recovery)
+    assert recover_zero_o_confusion('O0CU 809862') == 'OOCU8098620'
+
+    # 3. Serial digit confusion 'CSQU3O54383' -> 'CSQU3054383'
+    assert recover_zero_o_confusion('CSQU3O54383') == 'CSQU3054383'
+
+    # 4. Irrelevant text or invalid checksum is left untouched
+    assert recover_zero_o_confusion('INVALID TEXT') == 'INVALID TEXT'
+    assert recover_zero_o_confusion('CA1U2528405') == 'CA1U2528405'

@@ -123,6 +123,41 @@ def recover_boxed_check_digit(crop, raw_text: str) -> str:
     return raw_text
 
 
+def recover_zero_o_confusion(raw_text: str) -> str:
+    """
+    Recover 0 (zero) vs O (letter) visual confusion in container codes.
+    Specifically:
+    - In owner code positions 0, 1, 2: digit '0' is corrected to letter 'O'.
+    - In serial digits and check digit positions 4-10: letter 'O' is corrected to digit '0'.
+    - If 10 characters are read and match, computes expected ISO check digit.
+    Only replaces if the candidate strictly satisfies ISO 6346 Modulo-11 check digit verification.
+    """
+    if not raw_text:
+        return raw_text
+    m = re.search(r'(?<![A-Z0-9])([A-Z0-9]{3}[UJZ0-9])[\s\-.:/|\[\]()]*((?:[0-9O][\s\-.:/|\[\]()]*){6,7})(?![0-9A-Z])', raw_text.upper())
+    if not m:
+        return raw_text
+    pref = list(m.group(1))
+    for i in range(min(3, len(pref))):
+        if pref[i] == '0':
+            pref[i] = 'O'
+    digits = re.sub(r'[^0-9O]', '', m.group(2)).replace('O', '0')
+    if len(digits) == 7:
+        candidate = ''.join(pref) + digits
+        if is_valid_iso_6346(candidate):
+            return raw_text[:m.start()] + candidate + raw_text[m.end():]
+    elif len(digits) == 6:
+        prefix10 = ''.join(pref) + digits
+        try:
+            cd = check_digit(prefix10)
+            candidate = f"{prefix10}{cd}"
+            if is_valid_iso_6346(candidate):
+                return raw_text[:m.start()] + candidate + raw_text[m.end():]
+        except Exception:
+            pass
+    return raw_text
+
+
 def normalize(text: str) -> str:
     return re.sub(r'[^A-Z0-9]', '', text.upper())
 

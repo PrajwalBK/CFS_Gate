@@ -29,7 +29,7 @@ from app.domain import Detection, OCRRead, Validation
 from app.ocr.consensus import CharacterConsensus
 from app.ocr.validator import is_valid_iso_6346
 from app.ocr.fast_selector import FastFrameSelector
-from app.ocr.validator import ContainerValidator
+from app.ocr.validator import ContainerValidator, recover_zero_o_confusion
 
 log = logging.getLogger('gate.passage_session')
 
@@ -257,6 +257,10 @@ class ContainerPassageSession:
             # does not belong to a different physical container
             if ocr_read and self.confirmed_container_number:
                 val = ocr_read if isinstance(ocr_read, Validation) else ContainerValidator().validate(ocr_read)
+                if not val.valid_check_digit and hasattr(ocr_read, 'raw_text') and ocr_read.raw_text:
+                    zero_text = recover_zero_o_confusion(ocr_read.raw_text)
+                    if zero_text != ocr_read.raw_text:
+                        val = ContainerValidator().validate(OCRRead(zero_text, getattr(ocr_read, 'confidence', 0.8)))
                 val_text = val.normalized_text
                 import re
                 if val_text and len(val_text) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', val_text):
@@ -345,6 +349,11 @@ class ContainerPassageSession:
             raw = getattr(read, 'raw_text', None) or getattr(read, 'normalized_text', '')
             conf = getattr(read, 'confidence', 0.8)
             val = validator.validate(OCRRead(raw_text=str(raw), confidence=float(conf)))
+
+        if not val.valid_check_digit and hasattr(read, 'raw_text') and read.raw_text:
+            zero_text = recover_zero_o_confusion(read.raw_text)
+            if zero_text != read.raw_text:
+                val = validator.validate(OCRRead(raw_text=zero_text, confidence=getattr(val, 'confidence', 0.8)))
 
         if not val or not val.normalized_text or val.confidence < self.min_ocr_confidence:
             return
