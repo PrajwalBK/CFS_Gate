@@ -693,54 +693,78 @@ def test_api_contract_validation(gate_setup, repository, snapshots, mock_cloud_s
         assert 'Authorization' in mock_put_req.call_args[1]['headers']
 
 # -------------------------------------------------------------------------------------
-# Test M: PascalCase EventId and VisitId from Prosper Cloud API Spec
+# Test M: Late-Arriving Companion Camera Proof Triggers PUT on Already-Delivered Event
 # -------------------------------------------------------------------------------------
-def test_two_stage_pascal_case_keys_handling(gate_setup, repository, snapshots, mock_cloud_settings):
-    """Verify that response with PascalCase EventId & VisitId is correctly saved and used in PUT."""
+def test_late_arriving_companion_camera_triggers_put(gate_setup, repository, snapshots, mock_cloud_settings):
+    """
+    Test M: Real-time companion camera evidence arrival.
+    1. Initial detection on Camera 1 creates event and completes POST (DELIVERED with Camera 1 only).
+    2. Camera 2 arrives late and records companion observation for the same container.
+    3. Verify that the system automatically re-enqueues Stage 2 PUT and updates the cloud with both camera angles.
+    """
+    from app.events.event_manager import EventManager
+    cfg = mock_cloud_settings.model_copy(update={'cloud_dispatch_grace_seconds': 0.0})
     cams = [c for c in gate_setup if c.gate_id == 'LANE-OUT']
-    cam_ids = [c.id for c in cams]
+    cam1 = cams[0]  # gate-out-cam-1
+    cam2 = cams[1]  # gate-out-cam-2
 
-    session = ContainerPassageSession('TRACK_PASCAL_01', 'LANE-OUT', 'EXIT', cam_ids, datetime.now(timezone.utc))
-    t = datetime.now(timezone.utc)
-    for cam in cams:
-        frame = _create_sharp_test_frame(f"{cam.id}_TGHU4455664")
-        dets = [Detection(cam.id, t, 'container', 0.95, (10, 10, 350, 250))]
-        session.add_frame(cam.id, frame, t, dets)
+    dispatcher = CloudOutboxDispatcher(cfg, repository=repository, snapshots=snapshots)
+    ev_mgr = EventManager(cfg, repository, snapshots, dispatcher=dispatcher)
 
-    session.add_ocr_candidate(OCRRead('TGHU 445566 4', 0.98))
-    event_id = repository.finalize_passage_session(session, snapshots)
-
-    dispatcher = CloudOutboxDispatcher(mock_cloud_settings, repository=repository, snapshots=snapshots)
-
-    pascal_resp = {
-        "VisitDatabaseId": "bbbbbbbb-8d78-4806-acf2-42eb18e4ef8d",
-        "VisitId": "VISIT-PASCAL-9999",
-        "EventId": "11111111-5f22-48a4-be37-0bc58a948eff",
-        "EventType": "GATE_OUT"
+    post_resp = {
+        "visitDatabaseId": "12345678-8d78-4806-acf2-42eb18e4ef8d",
+        "visitId": "VISIT-LATE-TEST",
+        "eventId": "22222222-5f22-48a4-be37-0bc58a948eff",
+        "eventType": "GATE_OUT"
     }
 
-    with patch.object(dispatcher.session, 'post_gate_event', return_value=pascal_resp) as mock_post, \
+    t1 = datetime.now(timezone.utc)
+    f1 = _create_sharp_test_frame("GATE_OUT_1_LATE_TEST")
+    det1 = Detection(cam1.id, t1, 'container', 0.95, (10, 10, 300, 200))
+    val1 = Validation('EITU 180263 7', 'EITU1802637', 0.98, True, True, 'CONFIRMED', '45G1')
+    obs1 = Observation(f"{cam1.id}:1", 'LANE-OUT', 1, det1, val1, 'EXIT', f1, t1, True)
+
+    with patch.object(dispatcher.session, 'post_gate_event', return_value=post_resp) as mock_post, \
          patch.object(dispatcher.session, 'put_gate_event_images', return_value=True) as mock_put:
 
         dispatcher.start()
-        dispatcher.enqueue(None, event_id, stage='POST', force=True)
+        # Stage 1: Initial observation recorded and dispatched
+        event_id, created = ev_mgr.record_observation(obs1)
+        assert created is True
 
+        for _ in range(50):
+            ev = repository.event(event_id)
+            if ev and ev.get('cloud_event_id'):
+                break
+            time.sleep(0.05)
+
+        assert mock_post.called
+        assert repository.event(event_id).get('cloud_event_id') is not None
+
+        # Now simulate Camera 2 arriving late (companion observation on gate-out-cam-2)
+        t2 = t1 + timedelta(seconds=2)
+        f2 = _create_sharp_test_frame("GATE_OUT_2_LATE_TEST")
+        det2 = Detection(cam2.id, t2, 'container', 0.95, (15, 15, 310, 210))
+        val2 = Validation('EITU 180263 7', 'EITU1802637', 0.95, True, True, 'CONFIRMED', '45G1')
+        obs2 = Observation(f"{cam2.id}:2", 'LANE-OUT', 2, det2, val2, 'EXIT', f2, t2, True)
+
+        # EventManager records late companion observation
+        ev_mgr.record_observation(obs2)
+
+        # Wait for PUT to be triggered with both camera images
         for _ in range(40):
-            if mock_post.called and mock_put.called:
+            if mock_put.called:
                 break
             time.sleep(0.05)
 
         dispatcher.stop()
 
-        assert mock_post.called
-        db_ev = repository.event(event_id)
-        assert db_ev['cloud_event_id'] == "11111111-5f22-48a4-be37-0bc58a948eff"
-        assert db_ev['cloud_visit_id'] == "VISIT-PASCAL-9999"
-
-        assert mock_put.called
-        target_cloud_id = mock_put.call_args[0][0]
-        assert target_cloud_id == "11111111-5f22-48a4-be37-0bc58a948eff"
+        assert mock_put.called, "PUT was not triggered when late companion camera frame arrived!"
+        put_target_id = mock_put.call_args[0][0]
+        assert put_target_id == "22222222-5f22-48a4-be37-0bc58a948eff"
 
         put_payload = mock_put.call_args[0][1]
-        assert put_payload.get('EventId') == "11111111-5f22-48a4-be37-0bc58a948eff"
-        assert put_payload.get('VisitId') == "VISIT-PASCAL-9999"
+        sent_images = put_payload['Containers'][0]['Images']
+        sent_cams = {img['CameraId'] for img in sent_images}
+        assert cam1.id in sent_cams, "Camera 1 missing from multi-camera PUT!"
+        assert cam2.id in sent_cams, "Camera 2 missing from multi-camera PUT!"

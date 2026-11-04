@@ -428,15 +428,31 @@ class CloudOutboxDispatcher:
             sess = self.runtime.passage_sessions.get_session_by_event_id(event_id)
             if sess and getattr(sess, 'evidence_ready', False):
                 return True
-        if event_record and event_record.get('snapshots') and len(event_record.get('snapshots', [])) > 0:
-            return True
-        if self.repository:
+        # Multi-camera completeness check: only ready if all expected gate cameras captured
+        rec = event_record
+        if not rec and self.repository:
             try:
-                ev = self.repository.event(event_id)
-                if ev and ev.get('snapshots') and len(ev.get('snapshots', [])) > 0:
-                    return True
+                rec = self.repository.event(event_id)
             except Exception:
                 pass
+        if rec and rec.get('snapshots'):
+            expected_cams = set()
+            gate_id = rec.get('gate_id')
+            if self.runtime and getattr(self.runtime, 'cameras', None):
+                expected_cams = {c.id for c in self.runtime.cameras if c.gate_id == gate_id and getattr(c, 'enabled', True)}
+            elif self.repository and hasattr(self.repository, 'cameras'):
+                try:
+                    expected_cams = {c.id for c in self.repository.cameras() if c.gate_id == gate_id and getattr(c, 'enabled', True)}
+                except Exception:
+                    pass
+            if not expected_cams and self.settings and hasattr(self.settings, 'cameras'):
+                try:
+                    expected_cams = {c.id for c in self.settings.cameras() if c.gate_id == gate_id and getattr(c, 'enabled', True)}
+                except Exception:
+                    pass
+            captured = {s.get('camera_id') for s in rec.get('snapshots', []) if s.get('camera_id')}
+            if expected_cams and expected_cams.issubset(captured):
+                return True
         return False
 
     def status(self) -> dict:
@@ -501,7 +517,7 @@ class CloudOutboxDispatcher:
                 ev = self.repository.event(event_id)
                 if not ev or ev.get('status') != 'CONFIRMED':
                     return
-                if not force and ev.get('cloud_synced') and ev.get('cloud_delivery_state') == 'DELIVERED':
+                if not force and stage == 'POST' and ev.get('cloud_synced') and ev.get('cloud_delivery_state') == 'DELIVERED':
                     return
                 cntr = ev.get('container_number')
                 if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr):
@@ -513,8 +529,9 @@ class CloudOutboxDispatcher:
                     if hasattr(self.repository, 'mark_duplicate_event'):
                         self.repository.mark_duplicate_event(event_id, canonical)
                         primary_ev = self.repository.event(canonical)
-                        if primary_ev and not primary_ev.get('cloud_synced') and primary_ev.get('status') == 'CONFIRMED':
-                            self.enqueue(None, canonical, force=True)
+                        if primary_ev and primary_ev.get('status') == 'CONFIRMED':
+                            stage_canon = 'PUT' if primary_ev.get('cloud_event_id') else 'POST'
+                            self.enqueue(None, canonical, stage=stage_canon, force=True)
                     else:
                         self.repository.mark_cloud_synced(event_id)
                     log.info('prosper_duplicate_event_suppressed', extra={
@@ -854,6 +871,7 @@ class CloudOutboxDispatcher:
             obs = item['obs']
             img = item['image_bytes']
             pre_payload = item.get('payload')
+            stage = item.get('stage') or 'AUTO'
 
             not_before = float(item.get('not_before') or 0.0)
             remaining = not_before - time.monotonic()
@@ -867,7 +885,9 @@ class CloudOutboxDispatcher:
                 # Persistent identity guard
                 event_record = self.repository.event(event_id) if self.repository else None
                 if self.repository and event_record:
-                    if event_record.get('status') != 'CONFIRMED' or (event_record.get('cloud_synced') and not item.get('force') and event_record.get('cloud_delivery_state') == 'DELIVERED'):
+                    eff_stage = ('PUT' if event_record.get('cloud_event_id') else 'POST') if stage == 'AUTO' else stage
+                    if event_record.get('status') != 'CONFIRMED' or (eff_stage == 'POST' and event_record.get('cloud_synced') and not item.get('force') and event_record.get('cloud_delivery_state') == 'DELIVERED'):
+                        print(f'EXITED AT CHECK 1: status={event_record.get("status")}, eff_stage={eff_stage}, cloud_synced={event_record.get("cloud_synced")}, state={event_record.get("cloud_delivery_state")}')
                         self.queue.task_done()
                         continue
                     canonical = self.repository.canonical_event_id(event_id)
@@ -875,8 +895,9 @@ class CloudOutboxDispatcher:
                         if hasattr(self.repository, 'mark_duplicate_event'):
                             self.repository.mark_duplicate_event(event_id, canonical)
                             primary_ev = self.repository.event(canonical)
-                            if primary_ev and not primary_ev.get('cloud_synced') and primary_ev.get('status') == 'CONFIRMED':
-                                self.enqueue(None, canonical, force=True)
+                            if primary_ev and primary_ev.get('status') == 'CONFIRMED':
+                                stage_canon = 'PUT' if primary_ev.get('cloud_event_id') else 'POST'
+                                self.enqueue(None, canonical, stage=stage_canon, force=True)
                         else:
                             self.repository.mark_cloud_synced(event_id)
                         log.info('prosper_duplicate_backlog_suppressed', extra={
@@ -887,6 +908,7 @@ class CloudOutboxDispatcher:
                 cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
                 import re
                 if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1):
+                    print(f'EXITED AT OCR CHECK: cntr1={cntr1}')
                     log.warning('prosper_dispatch_skipped_invalid_ocr', extra={'event_id': event_id, 'container_number': cntr1})
                     if self.repository:
                         self.repository.mark_cloud_synced(event_id)
@@ -1041,7 +1063,10 @@ class CloudOutboxDispatcher:
 
                         if self.repository:
                             try:
-                                self.repository.set_cloud_event_id(event_id, returned_ev_id, state='EVENT_CREATED', cloud_visit_id=str(returned_visit_id))
+                                if pre_payload:
+                                    self.repository.mark_cloud_synced(event_id, cloud_event_id=returned_ev_id, cloud_visit_id=str(returned_visit_id))
+                                else:
+                                    self.repository.set_cloud_event_id(event_id, returned_ev_id, state='EVENT_CREATED', cloud_visit_id=str(returned_visit_id))
                             except Exception:
                                 log.exception('prosper_set_cloud_event_id_failed: %s', event_id)
 
@@ -1062,9 +1087,10 @@ class CloudOutboxDispatcher:
                             'container_number': cntr1
                         })
 
-                        # Trigger Stage 2 PUT if final evidence is already ready (Case B)
-                        if self.is_evidence_ready(event_id, event_record):
-                            self.enqueue(None, event_id, stage='PUT', force=True)
+                        # Trigger Stage 2 PUT: if all cameras or final evidence ready, enqueue PUT; otherwise wait for companion cameras
+                        fresh_record = self.repository.event(event_id) if self.repository else event_record
+                        if not pre_payload and self.is_evidence_ready(event_id, fresh_record):
+                            self.enqueue(None, event_id, stage='PUT', force=False)
 
                         self.queue.task_done()
                         continue
@@ -1096,6 +1122,7 @@ class CloudOutboxDispatcher:
                     )
 
                     missing_cams = expected_gate_cams - captured_cams
+                    # Wait for companion cameras to capture before proceeding (up to 15s)
                     if missing_cams and not item.get('force'):
                         cam_waits = int(item.get('camera_wait_count', 0))
                         if cam_waits < 15:

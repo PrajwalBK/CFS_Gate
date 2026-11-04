@@ -953,6 +953,11 @@ class GateRepository:
                                       context={'camera_id': obs.detection.camera_id,
                                                'message': f'Container {number} confirmed on lane {obs.gate_id}'
                                                if obs.confirmed else f'Observation for {number or "unidentified container"} saved'}))
+                if not created and event_id:
+                    existing_ev = session.get(GateEvent, event_id)
+                    if existing_ev and existing_ev.cloud_event_id:
+                        existing_ev.cloud_delivery_state = 'PUT_PENDING'
+                        existing_ev.cloud_synced = False
             if event_id and snapshots:
                 try:
                     ev_dict = self.event(event_id)

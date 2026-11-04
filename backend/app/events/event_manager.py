@@ -169,6 +169,14 @@ class EventManager:
             )
             if profiler_record:
                 profiler_record.api_queue_ms = (time.perf_counter() - t_api0) * 1000.0
+        elif self.dispatcher and obs.confirmed and (event_id in self._dispatched_events or not created):
+            # Companion camera proof or updated evidence arrived for this existing container event
+            try:
+                ev_record = self.repository.event(event_id) if self.repository else None
+                if ev_record and ev_record.get('cloud_event_id'):
+                    self.dispatcher.enqueue(None, event_id, stage='PUT', force=True, delay_seconds=0.5)
+            except Exception:
+                pass
         if self.runtime and obs.direction in ('EXIT', 'OUT', 'GATE_OUT') and should_dispatch_post:
             try:
                 cntr = obs.ocr.normalized_text if (obs and obs.ocr and obs.confirmed) else 'Unconfirmed'
@@ -185,4 +193,35 @@ class EventManager:
                 pass
         log.info('gate_event_created' if created else 'gate_evidence_associated',
                  extra={'camera_id': job.detection.camera_id, 'event_id': event_id})
+        return event_id, created
+
+    def record_observation(self, obs, additional_frames=None, **options):
+        """Directly record a pre-validated observation (handles companion frames and direct multi-camera observations)."""
+        try:
+            event_id, created = self.repository.save_observation(
+                obs, self.snapshots, self.settings.dedup_seconds, additional_frames,
+                same_container_window_seconds=self.settings.same_container_event_window_seconds,
+                **options
+            )
+        except TypeError:
+            event_id, created = self.repository.save_observation(
+                obs, self.snapshots, self.settings.dedup_seconds, additional_frames, **options
+            )
+        is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
+        should_dispatch_post = obs.confirmed and is_ocr_valid and (event_id not in self._dispatched_events)
+        if self.dispatcher and should_dispatch_post:
+            self._dispatched_events.add(event_id)
+            self.dispatcher.enqueue(
+                obs,
+                event_id,
+                stage='POST',
+                delay_seconds=getattr(self.settings, 'cloud_dispatch_grace_seconds', 0.0),
+            )
+        elif self.dispatcher and obs.confirmed and (event_id in self._dispatched_events or not created):
+            try:
+                ev_record = self.repository.event(event_id) if self.repository else None
+                if ev_record and ev_record.get('cloud_event_id'):
+                    self.dispatcher.enqueue(None, event_id, stage='PUT', force=True, delay_seconds=0.0)
+            except Exception:
+                pass
         return event_id, created
