@@ -1133,6 +1133,12 @@ class GateRuntime:
                     t_val0 = time.perf_counter()
                     sub_v = self.validator.validate(sub_r)
                     t_iso_total += (time.perf_counter() - t_val0) * 1000.0
+                    if not sub_v.valid_check_digit:
+                        from app.ocr.validator import recover_boxed_check_digit
+                        rec_text = recover_boxed_check_digit(sub_crop, sub_r.raw_text)
+                        if rec_text != sub_r.raw_text:
+                            sub_r = OCRRead(rec_text, sub_r.confidence)
+                            sub_v = self.validator.validate(sub_r)
                     if not sub_v.valid_check_digit and (sub_crop.shape[0] >= 1.2 * sub_crop.shape[1] or not sub_r.raw_text.strip()):
                         import cv2
                         for rot_code in (cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE):
@@ -1210,6 +1216,12 @@ class GateRuntime:
             t_val0 = time.perf_counter()
             main_val = self.validator.validate(main_read)
             t_iso_total += (time.perf_counter() - t_val0) * 1000.0
+            if not main_val.valid_check_digit:
+                from app.ocr.validator import recover_boxed_check_digit
+                rec_text = recover_boxed_check_digit(crop, main_read.raw_text)
+                if rec_text != main_read.raw_text:
+                    main_read = OCRRead(rec_text, main_read.confidence)
+                    main_val = self.validator.validate(main_read)
             if validation is None or main_val.valid_check_digit or main_val.confidence > validation.confidence:
                 if validation and validation.size_type and main_val.valid_check_digit:
                     main_val = Validation(

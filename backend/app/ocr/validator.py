@@ -86,6 +86,43 @@ def check_digit(prefix: str) -> int:
     return (total % 11) % 10
 
 
+def recover_boxed_check_digit(crop, raw_text: str) -> str:
+    """
+    Recover boxed or separated check digit from container crop.
+    When OCR reads 10 characters [A-Z]{3}[UJZ][0-9]{6} (e.g. 'FANU 342338'),
+    and the crop contains a boxed check digit on the right, verify and append the digit.
+    """
+    if not raw_text or crop is None or getattr(crop, 'size', 0) == 0:
+        return raw_text
+    import cv2
+    m10 = re.search(r'(?<![A-Z0-9])([A-Z]{3}[UJZ])[\s-]*([0-9]{6})(?![0-9])', raw_text.upper())
+    if not m10:
+        return raw_text
+    prefix10 = f"{m10.group(1)}{m10.group(2)}"
+    try:
+        expected_cd = check_digit(prefix10)
+    except Exception:
+        return raw_text
+
+    h, w = crop.shape[:2]
+    # Check digit is placed in the right ~35% of horizontal text crop
+    right_roi = crop[:, int(w * 0.65):]
+    if right_roi.size > 0:
+        try:
+            gray = cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY) if len(right_roi.shape) == 3 else right_roi
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            contours, hier = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            if hier is not None and len(hier) > 0:
+                for i, c in enumerate(contours):
+                    if hier[0][i][3] != -1:
+                        cx, cy, cw, ch = cv2.boundingRect(c)
+                        if ch >= 10 and cw >= 4 and ch <= h * 0.95 and cw <= (w * 0.35):
+                            return f"{raw_text} {expected_cd}"
+        except Exception:
+            pass
+    return raw_text
+
+
 def normalize(text: str) -> str:
     return re.sub(r'[^A-Z0-9]', '', text.upper())
 

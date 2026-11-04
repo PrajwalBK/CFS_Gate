@@ -93,3 +93,30 @@ def test_real_visible_container_is_not_blacklisted():
     result = ContainerValidator().validate(OCRRead('TIIU 507766 9 45G1', .99))
     assert result.normalized_text == 'TIIU5077669'
     assert result.valid_check_digit
+
+def test_recover_boxed_check_digit():
+    import numpy as np
+    import cv2
+    from app.ocr.validator import recover_boxed_check_digit
+    
+    # 1. Synthetic crop with boxed check digit [4]
+    # Height 50, Width 200
+    crop = np.full((50, 200, 3), 200, dtype=np.uint8)
+    # Draw serial text representation on left
+    cv2.putText(crop, "FANU 342338", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2)
+    # Draw check digit box on right (~x=160..185, y=10..40)
+    cv2.rectangle(crop, (160, 10), (185, 40), (20, 20, 20), 2)
+    cv2.putText(crop, "4", (167, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 20, 20), 2)
+    
+    recovered = recover_boxed_check_digit(crop, "FANU 342338")
+    assert recovered == "FANU 342338 4"
+    val = ContainerValidator().validate(OCRRead(recovered, 0.95))
+    assert val.normalized_text == "FANU3423384"
+    assert val.valid_check_digit is True
+    assert val.validation_status == "VALID"
+
+    # 2. Crop without check digit box leaves text untouched
+    crop_no_box = np.full((50, 200, 3), 200, dtype=np.uint8)
+    cv2.putText(crop_no_box, "FANU 342338", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2)
+    not_recovered = recover_boxed_check_digit(crop_no_box, "FANU 342338")
+    assert not_recovered == "FANU 342338"
