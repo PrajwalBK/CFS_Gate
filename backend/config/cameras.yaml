@@ -74,4 +74,4 @@ cameras:
     role: REAR
     capture_fps: 25
     occupancy_roi: [0.0, 0.0, 1.0, 1.0]
-    enabled: false
+    enabled: true
