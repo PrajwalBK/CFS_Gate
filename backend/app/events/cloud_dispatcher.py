@@ -768,43 +768,29 @@ class CloudOutboxDispatcher:
                     else:
                         b = fallback_bytes
                     if b:
+                        cam_id = obs.detection.camera_id if obs and obs.detection else 'CAM-01'
                         c1_images.append({
-                            'ImageType': 'FRONT',
-                            'CameraId': obs.detection.camera_id if obs and obs.detection else 'CAM-01',
+                            'ImageType': _cam_image_type(cam_id) if '_cam_image_type' in locals() else 'FRONT',
+                            'CameraId': cam_id,
                             'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs and obs.detection else None),
                             'Image': f"data:image/jpeg;base64,{base64.b64encode(b).decode('utf-8')}"
                         })
                 except Exception:
                     pass
 
-        if allow_single_fallback and expected_gate_cams and obs is not None and len(c1_images) <= 1:
-            existing_cams = {i['CameraId'] for i in c1_images}
-            missing_for_post = expected_gate_cams - existing_cams
-            if missing_for_post:
-                fallback_b = None
-                if c1_images:
-                    fallback_b = c1_images[0]['Image']
-                else:
-                    fb = img if img is not None else (getattr(obs, 'image', None) if obs else None)
-                    if fb is not None:
-                        try:
-                            if not isinstance(fb, bytes):
-                                ok, buf = cv2.imencode('.jpg', fb, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-                                b_tmp = buf.tobytes() if ok else None
-                            else:
-                                b_tmp = fb
-                            if b_tmp:
-                                fallback_b = f"data:image/jpeg;base64,{base64.b64encode(b_tmp).decode('utf-8')}"
-                        except Exception:
-                            pass
-                if fallback_b:
-                    for cam_id in sorted(list(missing_for_post), key=_cam_sort_key):
-                        c1_images.append({
-                            'ImageType': _cam_image_type(cam_id),
-                            'CameraId': cam_id,
-                            'CapturedAt': _iso_utc(obs.detection.frame_timestamp if obs and obs.detection else None),
-                            'Image': fallback_b
-                        })
+        # Strict deduplication: NEVER replicate images across camera angles.
+        # Ensure each camera view is strictly unique per camera ID.
+        seen_cameras = set()
+        deduped_images = []
+        for img_item in c1_images:
+            cam = img_item.get('CameraId')
+            b64_str = img_item.get('Image', '')
+            if not b64_str or cam in seen_cameras:
+                log.warning('prosper_duplicate_same_angle_image_suppressed', extra={'camera_id': cam})
+                continue
+            seen_cameras.add(cam)
+            deduped_images.append(img_item)
+        c1_images = deduped_images
 
         captured_cams = {img_item['CameraId'] for img_item in c1_images}
         return c1_images, expected_gate_cams, captured_cams

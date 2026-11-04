@@ -310,3 +310,47 @@ def test_each_camera_sends_one_image_without_duplicate_views(mock_settings, tmp_
         assert camera_ids == ['gate-in-1', 'gate-in-2', 'gate-in-3']
         assert [img['ImageType'] for img in container['Images']] == ['FRONT', 'LEFT', 'REAR']
 
+def test_missing_cameras_never_replicated_with_duplicate_photos(mock_settings, tmp_path):
+    """
+    Verify that when only 1 camera (e.g. side camera) has captured a container frame,
+    the dispatcher NEVER duplicates or replicates that image into missing camera slots.
+    """
+    import cv2
+    from datetime import datetime, timezone
+    mock_snaps = MagicMock()
+    mock_repo = MagicMock()
+    mock_repo.event.return_value = {
+        'id': 'evt-single-cam',
+        'status': 'CONFIRMED',
+        'container_number': 'MSCU1234567',
+        'primary_snapshot_id': 'snap-side',
+        'snapshots': [
+            {'id': 'snap-side', 'camera_id': 'gate-out-2', 'image_path': 'evt/gate-out-2.jpg', 'timestamp': '2026-11-04T10:00:00Z'}
+        ]
+    }
+    mock_snaps.path.return_value = tmp_path / "nonexistent.jpg"
+    
+    dispatcher = CloudOutboxDispatcher(mock_settings, repository=mock_repo, snapshots=mock_snaps)
+    dummy_obs = MagicMock()
+    dummy_obs.detection.camera_id = 'gate-out-2'
+    dummy_obs.detection.frame_timestamp = datetime.now(timezone.utc)
+    dummy_obs.ocr.normalized_text = 'MSCU1234567'
+    dummy_obs.ocr.confidence = 0.98
+    dummy_obs.gate_id = 'lane-out'
+    dummy_obs.direction = 'EXIT'
+    
+    # 1 authentic frame from gate-out-2
+    img = np.ones((240, 320, 3), dtype=np.uint8) * 100
+    _, buf = cv2.imencode('.jpg', img)
+    dummy_obs.image = buf.tobytes()
+
+    c1_images, expected_cams, captured_cams = dispatcher._build_multi_camera_images(
+        mock_repo.event.return_value, dummy_obs, allow_single_fallback=True
+    )
+    
+    # Verify ONLY gate-out-2 is present and NO duplicate frames were created for missing cameras
+    cam_ids = [item['CameraId'] for item in c1_images]
+    assert cam_ids == ['gate-out-2']
+    assert len(c1_images) == 1
+    # Verify image types contain no duplicates
+    assert len(set(cam_ids)) == len(cam_ids)
