@@ -58,10 +58,17 @@ def is_distinct_container(num1: str | None, num2: str | None) -> bool:
     if is_valid_iso_6346(s1) and is_valid_iso_6346(s2):
         d1 = ''.join(c for c in s1 if c.isdigit())
         d2 = ''.join(c for c in s2 if c.isdigit())
-        # If 6 serial digits match: same physical container (OCR letter confusion in owner code)
-        if len(d1) >= 6 and len(d2) >= 6 and d1[-6:] == d2[-6:]:
-            return False
         sim = ocr_similarity_score(s1, s2)
+        pref1, pref2 = s1[:4], s2[:4]
+        matching_prefix_letters = sum(1 for a, b in zip(pref1, pref2) if a == b)
+
+        # If 6 serial digits match:
+        # Same physical container ONLY IF owner code is an OCR letter confusion (at least 2 matching prefix letters or similarity >= 0.70)
+        # Completely different owner codes (e.g. TGHU vs MSCU with coincidental matching digits on twin trailers) are distinct!
+        if len(d1) >= 6 and len(d2) >= 6 and (d1[:6] == d2[:6] or (len(s1) >= 10 and len(s2) >= 10 and s1[4:10] == s2[4:10])):
+            if matching_prefix_letters >= 2 or sim >= 0.70:
+                return False
+            return True
         # If owner prefix matches (first 3 letters): require moderate similarity (>= 0.52) for noisy digit reads
         if len(s1) >= 4 and len(s2) >= 4 and s1[:3] == s2[:3]:
             if sim >= 0.52:
@@ -257,7 +264,7 @@ class GateRepository:
                 dedup_sec = float(getattr(self, 'dedup_seconds', 35.0) or 35.0)
                 delta = timedelta(seconds=max(dedup_sec, 60.0))
 
-                if not existing:
+                if not existing and slot_pos == 'CONTAINER_1':
                     # 1. Search for existing event on the same gate with the exact same container number within delta
                     if container_num:
                         existing = db_session.scalar(select(GateEvent).where(
@@ -267,9 +274,10 @@ class GateRepository:
                             GateEvent.timestamp <= session.created_at + delta,
                         ).order_by(GateEvent.timestamp.desc()))
 
-                        # 2. Suffix match (matching 6 serial digits and check digit)
+                        # 2. Suffix / serial match (matching 6 serial digits)
                         if not existing and len(container_num) == 11 and container_num[4:].isdigit():
                             suffix = container_num[4:]
+                            num_serial = container_num[4:10]
                             cands = db_session.scalars(select(GateEvent).where(
                                 GateEvent.gate_id == session.gate_id,
                                 GateEvent.timestamp >= session.created_at - delta,
@@ -277,9 +285,10 @@ class GateRepository:
                             ).order_by(GateEvent.timestamp.desc())).all()
                             for c in cands:
                                 c1 = c.container_number or ''
-                                if len(c1) == 11 and c1[4:] == suffix:
-                                    existing = c
-                                    break
+                                if len(c1) == 11 and c1[4:].isdigit():
+                                    if c1[4:] == suffix or (c1[4:10] == num_serial and not is_distinct_container(container_num, c1)):
+                                        existing = c
+                                        break
 
                     # 3. Absorb any unconfirmed / in-flight draft event created on the lane during this passage
                     if not existing and slot_pos == 'CONTAINER_1':
@@ -553,9 +562,10 @@ class GateRepository:
                         GateEvent.timestamp >= obs.detection.frame_timestamp - delta,
                         GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
                     ).order_by(GateEvent.timestamp.desc()))
-                    # Tolerant suffix matching on same gate: if 6 serial digits and check digit match (e.g. AIPU5077669 vs TIIU5077669)
+                    # Tolerant suffix / serial matching on same gate: if 6 serial digits match (e.g. AIPU5077669 vs TIIU5077669, or TCNU7922652 vs TONU7922656)
                     if not existing and len(number) == 11 and number[4:].isdigit():
                         suffix = number[4:]
+                        num_serial = number[4:10]
                         candidates = session.scalars(select(GateEvent).where(
                             GateEvent.gate_id == obs.gate_id,
                             direction_match,
@@ -564,9 +574,10 @@ class GateRepository:
                         ).order_by(GateEvent.timestamp.desc())).all()
                         for cand in candidates:
                             c1 = cand.container_number or ''
-                            if len(c1) == 11 and c1[4:] == suffix:
-                                existing = cand
-                                break
+                            if len(c1) == 11 and c1[4:].isdigit():
+                                if c1[4:] == suffix or (c1[4:10] == num_serial and not is_distinct_container(number, c1)):
+                                    existing = cand
+                                    break
                     # Dwell/queue recovery: a different camera or a restarted
                     # tracker can produce a new origin several minutes after
                     # the first read.  If the same validated container is still
@@ -586,6 +597,7 @@ class GateRepository:
                         ).order_by(GateEvent.timestamp.asc()))
                         if not existing and len(number) == 11 and number[4:].isdigit():
                             suffix = number[4:]
+                            num_serial = number[4:10]
                             candidates = session.scalars(select(GateEvent).where(
                                 GateEvent.gate_id == obs.gate_id,
                                 direction_match,
@@ -595,9 +607,10 @@ class GateRepository:
                             ).order_by(GateEvent.timestamp.asc())).all()
                             for cand in candidates:
                                 c1 = cand.container_number or ''
-                                if len(c1) == 11 and c1[4:] == suffix:
-                                    existing = cand
-                                    break
+                                if len(c1) == 11 and c1[4:].isdigit():
+                                    if c1[4:] == suffix or (c1[4:10] == num_serial and not is_distinct_container(number, c1)):
+                                        existing = cand
+                                        break
 
                     # Visual and capture-timestamp deduplication:
                     # When OCR produces different strings for the same container (e.g. MSMU5388338 vs MSMU5386335),
@@ -628,13 +641,13 @@ class GateRepository:
                                 num_digits = ''.join(c for c in number if c.isdigit())
                                 cand_digits = ''.join(c for c in c_num if c.isdigit())
                                 if len(num_digits) >= 5 and len(cand_digits) >= 5:
-                                    if num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits):
+                                    if num_digits[:6] == cand_digits[:6] or num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits):
                                         match_found = True
 
                             if number and c_num and number != c_num:
                                 num_digits = ''.join(c for c in number if c.isdigit())
                                 cand_digits = ''.join(c for c in c_num if c.isdigit())
-                                digits_match = bool(len(num_digits) >= 5 and len(cand_digits) >= 5 and (num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits)))
+                                digits_match = bool(len(num_digits) >= 5 and len(cand_digits) >= 5 and (num_digits[:6] == cand_digits[:6] or num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits)))
                                 if not (ocr_sim >= 0.50 or digits_match):
                                     continue  # Distinct physical containers! NEVER merge!
 
@@ -734,7 +747,11 @@ class GateRepository:
                     time_diff = datetime_diff_seconds(existing.timestamp, obs.detection.frame_timestamp)
                     num_digits = ''.join(c for c in (number or '') if c.isdigit())
                     ex_digits = ''.join(c for c in (existing.container_number or '') if c.isdigit())
-                    digits_match = bool(num_digits and ex_digits and (num_digits[-5:] == ex_digits[-5:] or num_digits in ex_digits))
+                    digits_match = bool(num_digits and ex_digits and (
+                        (len(num_digits) >= 6 and len(ex_digits) >= 6 and num_digits[:6] == ex_digits[:6]) or
+                        num_digits[-5:] == ex_digits[-5:] or
+                        num_digits in ex_digits
+                    ))
                     is_same_container = bool(
                         time_diff <= 35.0 and (
                             (number and number == existing.container_number) or
@@ -749,7 +766,7 @@ class GateRepository:
                         is_distinct_read = bool(
                             number and existing.container_number and
                             number != existing.container_number and
-                            is_valid_iso_6346(number) and is_valid_iso_6346(existing.container_number)
+                            is_distinct_container(existing.container_number, number)
                         )
                         if is_distinct_read or time_diff > max(dedup_seconds, 35.0):
                             prior_view = session.scalar(select(DetectionRecord.id).where(
@@ -772,6 +789,7 @@ class GateRepository:
                         num_digits = ''.join(c for c in number if c.isdigit())
                         ex_digits = ''.join(c for c in existing.container_number if c.isdigit())
                         digits_overlap = bool(num_digits and ex_digits and (
+                            (len(num_digits) >= 6 and len(ex_digits) >= 6 and num_digits[:6] == ex_digits[:6]) or
                             num_digits[-6:] == ex_digits[-6:] or 
                             num_digits in ex_digits or 
                             difflib.SequenceMatcher(None, num_digits, ex_digits).ratio() >= 0.50
@@ -1328,7 +1346,10 @@ class GateRepository:
             groups: dict[str, list[GateEvent]] = {}
             for ev in events:
                 cntr = ev.container_number or ''
-                key = cntr[4:] if len(cntr) == 11 and cntr[4:].isdigit() else cntr
+                if len(cntr) == 11 and cntr[4:].isdigit():
+                    key = f"{ev.gate_id}:{cntr[4:10]}"
+                else:
+                    key = f"{ev.gate_id}:{cntr}"
                 groups.setdefault(key, []).append(ev)
 
             merged_count = 0
@@ -1427,7 +1448,10 @@ class GateRepository:
                                 pass
 
                     ocr_sim = ocr_similarity_score(c1, c2)
-                    if gap <= 35.0 and (c1 == c2 or (c1 and c2 and ocr_sim >= 0.80)):
+                    c1_digits = ''.join(c for c in c1 if c.isdigit())
+                    c2_digits = ''.join(c for c in c2 if c.isdigit())
+                    serial_match = bool(len(c1_digits) >= 6 and len(c2_digits) >= 6 and c1_digits[:6] == c2_digits[:6])
+                    if gap <= 35.0 and (c1 == c2 or (c1 and c2 and (ocr_sim >= 0.80 or serial_match))):
                         is_match = True
 
                     if is_match:
@@ -1490,10 +1514,13 @@ class GateRepository:
 
                 # Distinct container numbers must NEVER be merged as duplicates by static camera background similarity.
                 if num and c_num and num != c_num:
-                    if is_valid_iso_6346(num) and is_valid_iso_6346(c_num):
+                    if is_distinct_container(num, c_num):
                         continue
                     ocr_sim = ocr_similarity_score(num, c_num)
-                    if not (time_diff <= 35.0 and ocr_sim >= 0.80):
+                    num_digits = ''.join(c for c in num if c.isdigit())
+                    c_digits = ''.join(c for c in c_num if c.isdigit())
+                    serial_match = bool(len(num_digits) >= 6 and len(c_digits) >= 6 and num_digits[:6] == c_digits[:6])
+                    if not (time_diff <= 45.0 and (ocr_sim >= 0.70 or serial_match)):
                         continue
 
                 # Image comparison across matching cameras
@@ -1510,9 +1537,12 @@ class GateRepository:
                         except Exception:
                             continue
 
-                # Fuzzy OCR match within passage window
+                # Fuzzy OCR match or serial match within passage window
                 ocr_sim = ocr_similarity_score(event.container_number, cand.container_number)
-                if time_diff <= 35.0 and (num == c_num or (num and c_num and ocr_sim >= 0.80)):
+                num_digits = ''.join(c for c in num if c.isdigit())
+                c_digits = ''.join(c for c in c_num if c.isdigit())
+                serial_match = bool(len(num_digits) >= 6 and len(c_digits) >= 6 and num_digits[:6] == c_digits[:6])
+                if time_diff <= 45.0 and (num == c_num or (num and c_num and (ocr_sim >= 0.70 or serial_match))):
                     if cand.timestamp <= event.timestamp:
                         return cand.id
 

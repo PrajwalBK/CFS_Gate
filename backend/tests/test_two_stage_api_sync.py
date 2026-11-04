@@ -768,3 +768,29 @@ def test_late_arriving_companion_camera_triggers_put(gate_setup, repository, sna
         sent_cams = {img['CameraId'] for img in sent_images}
         assert cam1.id in sent_cams, "Camera 1 missing from multi-camera PUT!"
         assert cam2.id in sent_cams, "Camera 2 missing from multi-camera PUT!"
+
+
+def test_ocr_prefix_confusion_same_serial_deduplication(gate_setup, repository, snapshots):
+    """
+    Verify that single physical container with OCR prefix confusion (e.g. TCNU7922652 vs TONU7922656)
+    arriving on the same gate 18 seconds apart fuses into a SINGLE database event.
+    """
+    cams = [c for c in gate_setup if c.gate_id == 'LANE-IN']
+    cam_ids = [c.id for c in cams]
+
+    t1 = datetime.now(timezone.utc)
+    sess1 = ContainerPassageSession('TRACK_1', 'LANE-IN', 'ENTRY', cam_ids, t1)
+    for cam in cams:
+        sess1.add_frame(cam.id, _create_sharp_test_frame('TCNU7922652'), t1, [Detection(cam.id, t1, 'container', 0.95, (10, 10, 300, 200))])
+    sess1.add_ocr_candidate(OCRRead('TCNU7922652', 0.95))
+    ev1 = repository.finalize_passage_session(sess1, snapshots)
+
+    # 18 seconds later, trailing frame reads TONU7922656 (C misread as O, check digit recomputed to 6)
+    t2 = t1 + timedelta(seconds=18)
+    sess2 = ContainerPassageSession('TRACK_2', 'LANE-IN', 'ENTRY', cam_ids, t2)
+    for cam in cams:
+        sess2.add_frame(cam.id, _create_sharp_test_frame('TONU7922656'), t2, [Detection(cam.id, t2, 'container', 0.90, (10, 10, 300, 200))])
+    sess2.add_ocr_candidate(OCRRead('TONU7922656', 0.90))
+    ev2 = repository.finalize_passage_session(sess2, snapshots)
+
+    assert ev1 == ev2, f"Expected both sessions to resolve to identical event ID, got {ev1} and {ev2}"

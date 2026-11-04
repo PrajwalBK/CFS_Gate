@@ -268,8 +268,10 @@ class ContainerPassageSession:
                             self.confirmed_confidence = val_conf
                             self.identity_conflict = False
                         elif not same_prefix and is_valid_iso_6346(val_text) and abs(self.confirmed_confidence - val_conf) < 0.15:
-                            self.identity_conflict = True
-                            return None
+                            # Genuine conflict only if 6 serial digits also differ
+                            if val_text[4:10] != self.confirmed_container_number[4:10]:
+                                self.identity_conflict = True
+                                return None
 
             self.last_seen = max(self.last_seen, timestamp)
             self.clear_since = None
@@ -391,8 +393,9 @@ class ContainerPassageSession:
                         except Exception:
                             pass
                 elif not same_prefix and abs(self.confirmed_confidence - val.confidence) < 0.15:
-                    # Distinct owner codes with comparable confidence -> real conflict
-                    self.identity_conflict = True
+                    # Distinct owner codes with comparable confidence -> real conflict if 6 serial digits differ
+                    if norm[4:10] != self.confirmed_container_number[4:10]:
+                        self.identity_conflict = True
 
             if val.size_type and not self.confirmed_iso_code:
                 self.confirmed_iso_code = val.size_type
