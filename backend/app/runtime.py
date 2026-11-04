@@ -22,7 +22,7 @@ from app.config.settings import CameraSourceConfig
 from app.config.settings import resolve_source
 from app.detection.tracker import TemporalTracker, iou
 from app.detection.yolo_detector import YoloDetector
-from app.domain import Frame, Detection, Validation, utcnow
+from app.domain import Frame, Detection, OCRRead, Validation, utcnow
 from app.events.cloud_dispatcher import CloudOutboxDispatcher
 from app.events.event_manager import EventManager
 from app.events.gate_logic import update_direction
@@ -31,7 +31,7 @@ from app.events.passages import PassageCollector
 from app.metrics import Metrics
 from app.ocr.container_ocr import crop_identification
 from app.ocr.ocr_engine import EasyOCREngine, create_ocr_engine
-from app.ocr.validator import ContainerValidator, extract_iso_size_code
+from app.ocr.validator import ContainerValidator, extract_iso_size_code, recover_boxed_check_digit
 from app.ocr.job_store import OCRJobStore
 from app.ocr.fast_selector import FastFrameSelector
 from app.events.pipeline_profiler import PipelineProfiler, LatencyRecord
