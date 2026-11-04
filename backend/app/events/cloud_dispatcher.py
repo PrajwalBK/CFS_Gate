@@ -944,8 +944,16 @@ class CloudOutboxDispatcher:
                         self.queue.task_done()
                         continue
 
+                    visit_id = (
+                        (pre_payload.get('VisitId') if (pre_payload and isinstance(pre_payload, dict)) else None)
+                        or (event_record.get('cloud_visit_id') if event_record else None)
+                        or (item.get('visit_id') if item else None)
+                    )
+
                     if pre_payload and isinstance(pre_payload, dict):
                         payload = pre_payload
+                        if not visit_id:
+                            visit_id = f"VISIT-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{event_id[:8].upper()}"
                     else:
                         c1_images, expected_gate_cams, captured_cams = self._build_multi_camera_images(
                             event_record, obs, img, allow_single_fallback=True
