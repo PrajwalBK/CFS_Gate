@@ -140,3 +140,22 @@ def test_recover_zero_o_confusion():
     # 4. Irrelevant text or invalid checksum is left untouched
     assert recover_zero_o_confusion('INVALID TEXT') == 'INVALID TEXT'
     assert recover_zero_o_confusion('CA1U2528405') == 'CA1U2528405'
+
+
+def test_is_distinct_container_ocr_confusion_and_twin_isolation():
+    from app.database.repositories.gate import is_distinct_container
+
+    # 1. OCR confusion pairs on same physical container must NOT be distinct (return False):
+    assert is_distinct_container('DFSU3084122', 'DISU3014120') is False
+    assert is_distinct_container('TONU7922656', 'TCNU7922652') is False
+    assert is_distinct_container('EGSU8198223', 'EGSU3198220') is False
+    assert is_distinct_container('FLKU4008772', 'FLRU4808774') is False
+    assert is_distinct_container('KOCU2069147', 'KOCU2009148') is False
+    assert is_distinct_container('VMLU3861045', 'VMLU3867043') is False
+    assert is_distinct_container('ESLU2222850', 'ESLU2226100') is False
+    assert is_distinct_container('MRKU1751000', 'MRKU7756009') is False
+
+    # 2. Genuine distinct containers (twin trailers or distinct visits) must be distinct (return True):
+    assert is_distinct_container('MSKU1234565', 'TGHU8765436') is True
+    assert is_distinct_container('MSKU1234565', 'MSKU9876540') is True
+    assert is_distinct_container('TGHU2020209', 'MSCU2020208') is True

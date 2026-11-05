@@ -48,8 +48,24 @@ def datetime_diff_seconds(dt1: Any, dt2: Any) -> float:
         return float('inf')
 
 
+COMMON_OCR_CONFUSIONS = {
+    ('F', 'I'), ('I', 'F'), ('8', '1'), ('1', '8'), ('8', '0'), ('0', '8'),
+    ('8', '3'), ('3', '8'), ('8', 'B'), ('B', '8'), ('0', 'O'), ('O', '0'),
+    ('0', 'D'), ('D', '0'), ('0', 'Q'), ('Q', '0'), ('0', 'C'), ('C', '0'),
+    ('1', 'I'), ('I', '1'), ('1', '7'), ('7', '1'), ('1', 'T'), ('T', '1'),
+    ('1', 'L'), ('L', '1'), ('5', 'S'), ('S', '5'), ('2', 'Z'), ('Z', '2'),
+    ('6', 'G'), ('G', '6'), ('6', 'C'), ('C', '6'), ('K', 'R'), ('R', 'K'),
+    ('U', 'V'), ('V', 'U'), ('E', 'F'), ('F', 'E'), ('P', 'F'), ('F', 'P'),
+    ('P', 'R'), ('R', 'P'), ('C', 'O'), ('O', 'C'), ('A', '4'), ('4', 'A'),
+}
+
+
 def is_distinct_container(num1: str | None, num2: str | None) -> bool:
-    """Return True if both are valid ISO 6346 container numbers representing different physical containers."""
+    """Return True if both are valid ISO 6346 container numbers representing different physical containers.
+    
+    Returns False when both strings represent the same container (even with common OCR substitutions,
+    noisy character reads, or check-digit flips resulting from 1-2 character errors).
+    """
     if not num1 or not num2:
         return False
     s1, s2 = num1.strip().upper(), num2.strip().upper()
@@ -61,21 +77,40 @@ def is_distinct_container(num1: str | None, num2: str | None) -> bool:
         sim = ocr_similarity_score(s1, s2)
         pref1, pref2 = s1[:4], s2[:4]
         matching_prefix_letters = sum(1 for a, b in zip(pref1, pref2) if a == b)
+        matching_serial_digits = sum(1 for a, b in zip(d1[:6], d2[:6]) if a == b) if len(d1) >= 6 and len(d2) >= 6 else 0
+        body_diff_pairs = [(s1[i], s2[i]) for i in range(min(10, len(s1))) if s1[i] != s2[i]]
+        all_body_confused = bool(body_diff_pairs and all((a, b) in COMMON_OCR_CONFUSIONS for a, b in body_diff_pairs))
 
-        # If 6 serial digits match:
-        # Same physical container ONLY IF owner code is an OCR letter confusion (at least 2 matching prefix letters or similarity >= 0.70)
+        # 1. 6 serial digits match exactly (e.g. TONU7922656 vs TCNU7922652):
+        # Same physical container if at least 2 prefix letters match or recognized OCR confusions.
         # Completely different owner codes (e.g. TGHU vs MSCU with coincidental matching digits on twin trailers) are distinct!
         if len(d1) >= 6 and len(d2) >= 6 and (d1[:6] == d2[:6] or (len(s1) >= 10 and len(s2) >= 10 and s1[4:10] == s2[4:10])):
-            if matching_prefix_letters >= 2 or sim >= 0.70:
+            if matching_prefix_letters >= 2 or all_body_confused:
                 return False
             return True
-        # If owner prefix matches (first 3 letters): require moderate similarity (>= 0.52) for noisy digit reads
+
+        # 2. At least 5 of 6 serial digits match (e.g. DFSU3084122 vs DISU3014120, EGSU8198223 vs EGSU3198220):
+        # Same physical container when 5 serial digits match and prefix has at least 2 matching letters or OCR confusions.
+        if matching_serial_digits >= 5:
+            if matching_prefix_letters >= 2 or all_body_confused:
+                return False
+
+        # 3. Owner prefix matches (first 3 letters): require at least 3 matching serial digits or similarity >= 0.63
         if len(s1) >= 4 and len(s2) >= 4 and s1[:3] == s2[:3]:
-            if sim >= 0.52:
+            if matching_serial_digits >= 3 or sim >= 0.63:
                 return False
             return True
-        # If owner prefix differs: must have high similarity (>= 0.75, at most 2 characters differ)
-        if sim >= 0.75:
+
+        # 4. Differing owner prefix with high similarity or OCR character confusion:
+        # Accommodates 1-2 character substitutions plus resulting check-digit change (up to 3 total character differences)
+        char_diffs = sum(1 for a, b in zip(s1, s2) if a != b)
+        if char_diffs <= 3:
+            if matching_prefix_letters >= 2 and sim >= 0.70:
+                return False
+            if all_body_confused:
+                return False
+
+        if matching_prefix_letters >= 3 and sim >= 0.78:
             return False
         return True
     return False
@@ -575,7 +610,7 @@ class GateRepository:
                         for cand in candidates:
                             c1 = cand.container_number or ''
                             if len(c1) == 11 and c1[4:].isdigit():
-                                if c1[4:] == suffix or (c1[4:10] == num_serial and not is_distinct_container(number, c1)):
+                                if c1[4:] == suffix or not is_distinct_container(number, c1):
                                     existing = cand
                                     break
                     # Dwell/queue recovery: a different camera or a restarted
@@ -608,7 +643,7 @@ class GateRepository:
                             for cand in candidates:
                                 c1 = cand.container_number or ''
                                 if len(c1) == 11 and c1[4:].isdigit():
-                                    if c1[4:] == suffix or (c1[4:10] == num_serial and not is_distinct_container(number, c1)):
+                                    if c1[4:] == suffix or not is_distinct_container(number, c1):
                                         existing = cand
                                         break
 
@@ -648,7 +683,7 @@ class GateRepository:
                                 num_digits = ''.join(c for c in number if c.isdigit())
                                 cand_digits = ''.join(c for c in c_num if c.isdigit())
                                 digits_match = bool(len(num_digits) >= 5 and len(cand_digits) >= 5 and (num_digits[:6] == cand_digits[:6] or num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits)))
-                                if not (ocr_sim >= 0.50 or digits_match):
+                                if not (ocr_sim >= 0.50 or digits_match or not is_distinct_container(number, c_num)):
                                     continue  # Distinct physical containers! NEVER merge!
 
                             slot_pos = getattr(obs, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
