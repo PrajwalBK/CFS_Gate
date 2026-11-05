@@ -599,7 +599,7 @@ class GateRuntime:
                 except Exception as exc:
                     self.metrics.increment('inference_errors')
                     self.last_processing_error = type(exc).__name__
-                    log.error('inference_failed', extra={'camera_id': camera.id, 'error_type': type(exc).__name__, 'error': str(exc)})
+                    log.error('inference_failed', extra={'camera_id': camera.id, 'error_type': type(exc).__name__, 'error': str(exc)}, exc_info=True)
             self._stop.wait(.005)
 
     def process_frame(self, camera, frame):

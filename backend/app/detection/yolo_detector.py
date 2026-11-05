@@ -9,6 +9,19 @@ class YoloDetector:
             expected = {'pytorch': '.pt', 'onnx': '.onnx', 'tensorrt': '.engine'}[settings.model_backend]
             if settings.model_path.suffix != expected or not settings.model_path.is_file():
                 raise ValueError('Model file missing or backend does not match extension')
+            try:
+                import ultralytics.nn.autobackend as _ab
+                _orig_warmup = _ab.AutoBackend.warmup
+                def _safe_warmup(self, *args, **kwargs):
+                    try:
+                        return _orig_warmup(self, *args, **kwargs)
+                    except RuntimeError as re_err:
+                        if 'torchvision::nms' in str(re_err):
+                            return
+                        raise
+                _ab.AutoBackend.warmup = _safe_warmup
+            except Exception:
+                pass
             from ultralytics import YOLO
             model = YOLO(str(settings.model_path), task='detect')
         self.model = model
