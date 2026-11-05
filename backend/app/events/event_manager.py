@@ -98,14 +98,18 @@ class EventManager:
                         active_lane = self.runtime._active_lane_events.get(f"{job.gate_id}:{slot_pos}") or self.runtime._active_lane_events.get(job.gate_id)
                     else:
                         active_lane = self.runtime._active_lane_events.get(f"{job.gate_id}:{slot_pos}")
-                    if active_lane and active_lane.get('event_id') and not active_lane.get('finalized_at'):
-                        lane_num = active_lane.get('container_number')
-                        val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
-                        from app.database.repositories.gate import is_distinct_container
-                        if lane_num and val_num and is_distinct_container(lane_num, val_num):
-                            ongoing_event_id = None
-                        else:
-                            ongoing_event_id = active_lane.get('event_id')
+                    if active_lane and active_lane.get('event_id'):
+                        is_recent = True
+                        if active_lane.get('finalized_at'):
+                            is_recent = (time.monotonic() - active_lane['finalized_at']) <= max(getattr(self.settings, 'dedup_seconds', 35.0), 35.0)
+                        if is_recent:
+                            lane_num = active_lane.get('container_number')
+                            val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
+                            from app.database.repositories.gate import is_distinct_container
+                            if lane_num and val_num and is_distinct_container(lane_num, val_num):
+                                ongoing_event_id = None
+                            else:
+                                ongoing_event_id = active_lane.get('event_id')
 
             # If all attempts yielded no readable text, flag for review with an alert rather than silently dropping
             if not any(getattr(r, 'raw_text', None) for r in evidence.reads if r):

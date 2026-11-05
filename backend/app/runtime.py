@@ -1368,14 +1368,18 @@ class GateRuntime:
                         active_lane = self._active_lane_events.get(f"{job.gate_id}:{slot_pos}") or self._active_lane_events.get(job.gate_id)
                     else:
                         active_lane = self._active_lane_events.get(f"{job.gate_id}:{slot_pos}")
-                    if active_lane and active_lane.get('event_id') and not active_lane.get('finalized_at'):
-                        lane_num = active_lane.get('container_number')
-                        val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
-                        from app.database.repositories.gate import is_distinct_container
-                        if lane_num and val_num and is_distinct_container(lane_num, val_num):
-                            ongoing = None
-                        else:
-                            ongoing = active_lane.get('event_id')
+                    if active_lane and active_lane.get('event_id'):
+                        is_recent = True
+                        if active_lane.get('finalized_at'):
+                            is_recent = (time.monotonic() - active_lane['finalized_at']) <= max(getattr(self.settings, 'dedup_seconds', 35.0), 35.0)
+                        if is_recent:
+                            lane_num = active_lane.get('container_number')
+                            val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
+                            from app.database.repositories.gate import is_distinct_container
+                            if lane_num and val_num and is_distinct_container(lane_num, val_num):
+                                ongoing = None
+                            else:
+                                ongoing = active_lane.get('event_id')
             result = self.events.observe(job, validation, additional_frames=additional,
                                          proof_job=proof, ongoing_event_id=ongoing)
             self.ocr_store.complete(job_id, result[0] if result else None)

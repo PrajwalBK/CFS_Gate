@@ -390,20 +390,30 @@ class ContainerPassageSession:
                     self.confirmed_confidence = val.confidence
             else:
                 # Different container number observed
-                same_prefix = (norm[:4] == self.confirmed_container_number[:4])
-                if val.confidence > self.confirmed_confidence:
-                    # New read is higher confidence: update confirmed container
-                    self.confirmed_container_number = norm
-                    self.confirmed_confidence = val.confidence
-                    self.identity_conflict = False
-                    if self.evidence_manager:
-                        try:
-                            self.evidence_manager.update_container_number(self.event_id, norm)
-                        except Exception:
-                            pass
-                elif not same_prefix and abs(self.confirmed_confidence - val.confidence) < 0.15:
-                    # Distinct owner codes with comparable confidence -> real conflict if 6 serial digits differ
-                    if norm[4:10] != self.confirmed_container_number[4:10]:
+                from app.database.repositories.gate import is_distinct_container
+                if not is_distinct_container(self.confirmed_container_number, norm):
+                    # Same physical container, OCR variation!
+                    if val.confidence > self.confirmed_confidence:
+                        self.confirmed_container_number = norm
+                        self.confirmed_confidence = val.confidence
+                        self.identity_conflict = False
+                        if self.evidence_manager:
+                            try:
+                                self.evidence_manager.update_container_number(self.event_id, norm)
+                            except Exception:
+                                pass
+                else:
+                    # Genuinely distinct container numbers observed on this lane
+                    if val.confidence > self.confirmed_confidence + 0.15:
+                        self.confirmed_container_number = norm
+                        self.confirmed_confidence = val.confidence
+                        self.identity_conflict = False
+                        if self.evidence_manager:
+                            try:
+                                self.evidence_manager.update_container_number(self.event_id, norm)
+                            except Exception:
+                                pass
+                    elif abs(self.confirmed_confidence - val.confidence) < 0.15:
                         self.identity_conflict = True
 
             if val.size_type and not self.confirmed_iso_code:
