@@ -130,6 +130,21 @@ class SnapshotManager:
                 decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if decoded is None or decoded.size == 0 or decoded.shape[0] < 240 or decoded.shape[1] < 320:
                     continue
+                # Passage window scoping: reject snapshots captured outside the event passage window (> 30s)
+                ev_ts = event_record.get('timestamp')
+                snap_ts = snap.get('timestamp')
+                if ev_ts and snap_ts:
+                    def _parse_ts(v):
+                        if isinstance(v, datetime.datetime):
+                            return v
+                        try:
+                            return datetime.datetime.fromisoformat(str(v).replace('Z', '+00:00'))
+                        except Exception:
+                            return None
+                    dt1, dt2 = _parse_ts(ev_ts), _parse_ts(snap_ts)
+                    if dt1 and dt2 and abs((dt2 - dt1).total_seconds()) > 30.0:
+                        continue
+
                 gray = cv2.cvtColor(decoded, cv2.COLOR_BGR2GRAY)
                 quality = self.compute_quality(decoded)
                 if float(gray.std()) < 8.0 or quality < min_quality:

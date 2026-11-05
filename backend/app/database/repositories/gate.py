@@ -10,9 +10,10 @@ from typing import Any
 from sqlalchemy import func, select, update
 
 from app.database.models import Camera, DetectionRecord, GateEvent, OCRResult, Snapshot, SystemLog
-from app.domain import Observation, utcnow
+from app.domain import Observation, Validation, utcnow
 from app.snapshots.snapshot_manager import SnapshotManager
 from app.ocr.validator import is_valid_iso_6346
+from app.ocr.consensus import CharacterConsensus
 
 log = logging.getLogger('gate')
 
@@ -376,7 +377,29 @@ class GateRepository:
                     elif existing.cloud_visit_id and not sess_cloud_visit_id:
                         session.cloud_visit_id = existing.cloud_visit_id
                     if container_num:
-                        existing.container_number = container_num
+                        if not existing.container_number:
+                            existing.container_number = container_num
+                        elif existing.container_number != container_num:
+                            all_cands = list(session.ocr_candidates or [])
+                            for ocr_rec in db_session.scalars(
+                                select(OCRResult)
+                                .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
+                                .where(DetectionRecord.event_id == existing.id)
+                            ).all():
+                                all_cands.append(Validation(
+                                    raw_text=getattr(ocr_rec, 'raw_text', '') or '',
+                                    normalized_text=getattr(ocr_rec, 'normalized_text', '') or '',
+                                    confidence=float(getattr(ocr_rec, 'confidence', 0.0) or 0.0),
+                                    valid_format=bool(getattr(ocr_rec, 'valid_format', False)),
+                                    valid_check_digit=bool(getattr(ocr_rec, 'valid_check_digit', False)),
+                                    validation_status=getattr(ocr_rec, 'validation_status', '') or '',
+                                    size_type=getattr(ocr_rec, 'size_type', None)
+                                ))
+                            best_c = CharacterConsensus.resolve(all_cands)
+                            if best_c and best_c.normalized_text and best_c.valid_check_digit and is_valid_iso_6346(best_c.normalized_text):
+                                existing.container_number = best_c.normalized_text
+                            elif conf > (getattr(existing, 'confidence', 0.0) or 0.0):
+                                existing.container_number = container_num
                     if iso_code:
                         existing.iso_code_1 = iso_code
                     if is_confirmed:
@@ -733,8 +756,16 @@ class GateRepository:
                                     match_found = True
 
                             # 4. Short-window same-lane fusion for unconfirmed/partial reads
-                            if not match_found and time_diff <= 35.0 and (not cand.container_number or not number or ocr_sim >= 0.45):
-                                match_found = True
+                            if not match_found and time_diff <= 8.0:
+                                same_track = False
+                                if getattr(obs, 'track_id', None) is not None:
+                                    same_track = bool(session.scalar(select(DetectionRecord.id).where(
+                                        DetectionRecord.event_id == cand.id,
+                                        DetectionRecord.camera_id == obs.detection.camera_id,
+                                        DetectionRecord.track_id == obs.track_id
+                                    ).limit(1)))
+                                if same_track or ocr_sim >= 0.45 or (not number and time_diff <= 3.0):
+                                    match_found = True
 
                             if match_found:
                                 existing = cand
@@ -881,24 +912,49 @@ class GateRepository:
                     ))
                     session.flush()
                 else:
-                    prior_best_conf = session.scalar(
-                        select(func.max(OCRResult.confidence))
-                        .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
-                        .where(DetectionRecord.event_id == existing.id, OCRResult.valid_check_digit == True)
-                    ) or 0.0
-                    obs_conf = getattr(obs.ocr, 'confidence', 0.0) or 0.0
                     existing.is_twin = False
                     existing.container_number_2 = None
                     existing.iso_code_2 = None
-                    is_obs_valid_iso = bool(number and is_valid_iso_6346(number))
-                    if (not existing.container_number and is_obs_valid_iso) or (is_obs_valid_iso and obs_conf >= prior_best_conf) or (obs.confirmed and obs_conf >= prior_best_conf):
-                        existing.container_number = number or existing.container_number
-                        if is_obs_valid_iso:
-                            existing.status = 'CONFIRMED'
-                    if size_type and not existing.iso_code_1:
-                        existing.iso_code_1 = size_type
-                    elif size_type and obs_conf >= prior_best_conf:
-                        existing.iso_code_1 = size_type
+                    all_reads = []
+                    for ocr_rec in session.scalars(
+                        select(OCRResult)
+                        .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
+                        .where(DetectionRecord.event_id == existing.id)
+                    ).all():
+                        all_reads.append(Validation(
+                            raw_text=getattr(ocr_rec, 'raw_text', '') or '',
+                            normalized_text=getattr(ocr_rec, 'normalized_text', '') or '',
+                            confidence=float(getattr(ocr_rec, 'confidence', 0.0) or 0.0),
+                            valid_format=bool(getattr(ocr_rec, 'valid_format', False)),
+                            valid_check_digit=bool(getattr(ocr_rec, 'valid_check_digit', False)),
+                            validation_status=getattr(ocr_rec, 'validation_status', '') or '',
+                            size_type=getattr(ocr_rec, 'size_type', None)
+                        ))
+                    if obs.ocr:
+                        all_reads.append(obs.ocr)
+
+                    consensus_val = CharacterConsensus.resolve(all_reads)
+                    if consensus_val and consensus_val.normalized_text and consensus_val.valid_check_digit and is_valid_iso_6346(consensus_val.normalized_text):
+                        existing.container_number = consensus_val.normalized_text
+                        existing.status = 'CONFIRMED'
+                        if consensus_val.size_type:
+                            existing.iso_code_1 = consensus_val.size_type
+                    else:
+                        prior_best_conf = session.scalar(
+                            select(func.max(OCRResult.confidence))
+                            .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
+                            .where(DetectionRecord.event_id == existing.id, OCRResult.valid_check_digit == True)
+                        ) or 0.0
+                        obs_conf = getattr(obs.ocr, 'confidence', 0.0) or 0.0
+                        is_obs_valid_iso = bool(number and is_valid_iso_6346(number))
+                        if (not existing.container_number and is_obs_valid_iso) or (is_obs_valid_iso and obs_conf >= prior_best_conf) or (obs.confirmed and obs_conf >= prior_best_conf):
+                            existing.container_number = number or existing.container_number
+                            if is_obs_valid_iso:
+                                existing.status = 'CONFIRMED'
+                        if size_type and not existing.iso_code_1:
+                            existing.iso_code_1 = size_type
+                        elif size_type and obs_conf >= prior_best_conf:
+                            existing.iso_code_1 = size_type
                     if obs.confirmed:
                         existing.status = 'CONFIRMED'
                 detection_id = str(uuid4())
@@ -935,9 +991,8 @@ class GateRepository:
                     Snapshot.image_path == image_path
                 ))
                 if existing_path_snap:
-                    existing_path_snap.timestamp = obs.detection.frame_timestamp
-                    if existing_path_snap.event_id != event_id:
-                        existing_path_snap.event_id = event_id
+                    if existing_path_snap.event_id == event_id:
+                        existing_path_snap.timestamp = obs.detection.frame_timestamp
                 else:
                     created_paths.append(image_path)
                     session.add(Snapshot(id=snapshot_id, event_id=event_id, camera_id=obs.detection.camera_id,
@@ -983,9 +1038,8 @@ class GateRepository:
                                 Snapshot.image_path == other_path
                             ))
                             if existing_other_snap:
-                                existing_other_snap.timestamp = obs.detection.frame_timestamp
-                                if existing_other_snap.event_id != event_id:
-                                    existing_other_snap.event_id = event_id
+                                if existing_other_snap.event_id == event_id:
+                                    existing_other_snap.timestamp = obs.detection.frame_timestamp
                             elif already_saved:
                                 if snapshots and hasattr(snapshots, 'path'):
                                     try:
@@ -1549,6 +1603,8 @@ class GateRepository:
 
                 # Distinct container numbers must NEVER be merged as duplicates by static camera background similarity.
                 if num and c_num and num != c_num:
+                    if is_valid_iso_6346(num) and is_valid_iso_6346(c_num):
+                        continue
                     if is_distinct_container(num, c_num):
                         continue
                     ocr_sim = ocr_similarity_score(num, c_num)

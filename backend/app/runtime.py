@@ -1333,26 +1333,45 @@ class GateRuntime:
         try:
             additional = {}
             slot_pos = job.slot_position or 'CONTAINER_1'
-            active_session = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
+            target_session = None
+            if getattr(job, 'event_id', None) and hasattr(self, 'passage_sessions'):
+                target_session = self.passage_sessions.get_session_by_event_id(job.event_id)
+            if not target_session and hasattr(self, 'passage_sessions'):
+                cand_sess = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
+                if cand_sess and abs((job.frame.timestamp - cand_sess.created_at).total_seconds()) <= 25.0:
+                    target_session = cand_sess
+            active_session = target_session
+
             if hasattr(self, 'manager') and hasattr(self.manager, 'workers'):
                 for c in self.cameras:
                     if c.gate_id == job.gate_id and c.id != job.frame.camera_id and getattr(c, 'enabled', True):
-                        w = self.manager.workers.get(c.id)
-                        if w:
-                            latest_f = w.latest()
-                            if latest_f and getattr(latest_f, 'image', None) is not None:
-                                prev = self._preview_detections.get(c.id)
-                                prev_dets = prev[2] if prev and len(prev) >= 3 else ()
+                        # 1. Strictly prefer best frame captured DURING this specific container's passage session
+                        if target_session and target_session.captured_frames.get(c.id):
+                            best_c = max(target_session.captured_frames[c.id], key=lambda f: f.quality_score, default=None)
+                            if best_c and getattr(best_c, 'image', None) is not None:
                                 has_cntr = any(
                                     getattr(d, 'class_name', '') in ('container', 'container_object')
-                                    for d in prev_dets
+                                    for d in (best_c.detections or [])
                                 )
                                 if has_cntr:
-                                    additional[c.id] = latest_f.image
-                                elif active_session and active_session.captured_frames.get(c.id):
-                                    best_c = max(active_session.captured_frames[c.id], key=lambda f: f.quality_score, default=None)
-                                    if best_c and any(getattr(d, 'class_name', '') in ('container', 'container_object') for d in (best_c.detections or [])):
-                                        additional[c.id] = best_c.image
+                                    additional[c.id] = best_c.image
+                                    continue
+
+                        # 2. Only fallback to live worker frame if contemporaneous (<= 2.0s) and lane session has not cleared
+                        w = self.manager.workers.get(c.id)
+                        if w and (not target_session or (target_session.clear_since is None and not target_session.finalized)):
+                            latest_f = w.latest()
+                            if latest_f and getattr(latest_f, 'image', None) is not None:
+                                time_delta = abs((latest_f.timestamp - job.frame.timestamp).total_seconds())
+                                if time_delta <= 2.0:
+                                    prev = self._preview_detections.get(c.id)
+                                    prev_dets = prev[2] if prev and len(prev) >= 3 else ()
+                                    has_cntr = any(
+                                        getattr(d, 'class_name', '') in ('container', 'container_object')
+                                        for d in prev_dets
+                                    )
+                                    if has_cntr:
+                                        additional[c.id] = latest_f.image
             expected = validation.normalized_text if validation and validation.valid_check_digit else None
             proof = self.ocr_store.best_proof(job.origin_key, job_id, expected) or job
             ongoing = job.event_id

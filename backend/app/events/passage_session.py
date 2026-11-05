@@ -375,49 +375,31 @@ class ContainerPassageSession:
         # Always record candidate for character/identity consensus
         self.ocr_candidates.append(val)
 
+        # Character and identity consensus resolution across all observed reads
         is_valid_iso = bool(val.valid_check_digit and is_valid_iso_6346(norm))
-        if is_valid_iso:
-            if not self.confirmed_container_number:
-                self.confirmed_container_number = norm
-                self.confirmed_confidence = val.confidence
-                if self.evidence_manager:
-                    try:
-                        self.evidence_manager.update_container_number(self.event_id, norm)
-                    except Exception:
-                        pass
-            elif norm == self.confirmed_container_number:
-                if val.confidence > self.confirmed_confidence:
-                    self.confirmed_confidence = val.confidence
-            else:
-                # Different container number observed
-                from app.database.repositories.gate import is_distinct_container
-                if not is_distinct_container(self.confirmed_container_number, norm):
-                    # Same physical container, OCR variation!
-                    if val.confidence > self.confirmed_confidence:
-                        self.confirmed_container_number = norm
-                        self.confirmed_confidence = val.confidence
-                        self.identity_conflict = False
-                        if self.evidence_manager:
-                            try:
-                                self.evidence_manager.update_container_number(self.event_id, norm)
-                            except Exception:
-                                pass
-                else:
-                    # Genuinely distinct container numbers observed on this lane
-                    if val.confidence > self.confirmed_confidence + 0.15:
-                        self.confirmed_container_number = norm
-                        self.confirmed_confidence = val.confidence
-                        self.identity_conflict = False
-                        if self.evidence_manager:
-                            try:
-                                self.evidence_manager.update_container_number(self.event_id, norm)
-                            except Exception:
-                                pass
-                    elif abs(self.confirmed_confidence - val.confidence) < 0.15:
-                        self.identity_conflict = True
+        consensus_read = CharacterConsensus.resolve(self.ocr_candidates)
+        if consensus_read and consensus_read.normalized_text and consensus_read.valid_check_digit and is_valid_iso_6346(consensus_read.normalized_text):
+            c_norm = consensus_read.normalized_text
+            old_num = self.confirmed_container_number
+            self.confirmed_container_number = c_norm
+            self.confirmed_confidence = max(getattr(consensus_read, 'confidence', 0.8), self.confirmed_confidence)
+            self.identity_conflict = False
+            if self.evidence_manager and c_norm != old_num:
+                try:
+                    self.evidence_manager.update_container_number(self.event_id, c_norm)
+                except Exception:
+                    pass
+        elif is_valid_iso and not self.confirmed_container_number:
+            self.confirmed_container_number = norm
+            self.confirmed_confidence = val.confidence
+            if self.evidence_manager:
+                try:
+                    self.evidence_manager.update_container_number(self.event_id, norm)
+                except Exception:
+                    pass
 
-            if val.size_type and not self.confirmed_iso_code:
-                self.confirmed_iso_code = val.size_type
+        if val.size_type and not self.confirmed_iso_code:
+            self.confirmed_iso_code = val.size_type
 
     def get_best_frame_per_camera(self) -> Dict[str, CapturedFrameCandidate]:
         """
@@ -567,7 +549,9 @@ class PassageSessionManager:
                     seen_tracks = session.tracks_by_camera.get(camera_id, set())
                     if seen_tracks and track_id not in seen_tracks:
                         duration = abs((timestamp - session.created_at).total_seconds())
-                        if session.clear_since is not None or duration >= 1.5:
+                        all_cams_captured = bool(session.cameras) and all(bool(session.captured_frames.get(c)) for c in session.cameras)
+                        # A new track signals a new container if lane cleared, or all prior cameras already captured, or confirmed OCR exists with duration >= 1.5s
+                        if session.clear_since is not None or duration >= 6.0 or all_cams_captured or (session.confirmed_container_number and duration >= 1.5):
                             new_track_on_camera = True
                         else:
                             session.record_camera_track(camera_id, track_id)
@@ -576,7 +560,8 @@ class PassageSessionManager:
                 new_session_track = False
                 if not camera_id and track_id is not None and session.track_id is not None and track_id != session.track_id:
                     duration = abs((timestamp - session.created_at).total_seconds())
-                    if (session.confirmed_container_number or any(len(f) >= 2 for f in session.captured_frames.values())) and duration >= 1.5:
+                    all_cams_captured = bool(session.cameras) and all(bool(session.captured_frames.get(c)) for c in session.cameras)
+                    if session.clear_since is not None or duration >= 6.0 or all_cams_captured or (session.confirmed_container_number and duration >= 1.5):
                         new_session_track = True
 
                 # 3. Session clearance timeout
