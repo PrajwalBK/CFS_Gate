@@ -3,6 +3,7 @@ from typing import Optional
 import datetime
 import math
 import os
+import shutil
 import cv2
 
 
@@ -250,6 +251,15 @@ class SnapshotManager:
             meta_quality_path.write_text(f'{new_quality:.2f}', encoding='utf-8')
         finally:
             temp_img.unlink(missing_ok=True)
+
+        try:
+            legacy_file = self.root / event_id / final.name
+            if legacy_file.resolve() != final.resolve():
+                legacy_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(final), str(legacy_file))
+        except Exception:
+            pass
+
         return relative
 
     def save_best_crop(self, event_id: str, slot_pos: str, crop, text: str = '', force: bool = False) -> str:
@@ -285,6 +295,16 @@ class SnapshotManager:
             meta_quality_path.write_text(f'{new_quality:.2f}', encoding='utf-8')
         finally:
             temp_crop.unlink(missing_ok=True)
+
+        if event_id:
+            try:
+                legacy_file = self.root / event_id / final.name
+                if legacy_file.resolve() != final.resolve():
+                    legacy_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(final), str(legacy_file))
+            except Exception:
+                pass
+
         return relative
 
     def save(self, snapshot_id, observation, event_id=None):
@@ -330,6 +350,16 @@ class SnapshotManager:
             quality_path.write_text(f'{new_quality:.2f}', encoding='utf-8')
         finally:
             temporary.unlink(missing_ok=True)
+
+        if event_id:
+            try:
+                legacy_file = self.root / event_id / final.name
+                if legacy_file.resolve() != final.resolve():
+                    legacy_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(final), str(legacy_file))
+            except Exception:
+                pass
+
         return relative
 
     def save_camera_frame(self, snapshot_id, event_id, camera_id, image, direction='', text=''):

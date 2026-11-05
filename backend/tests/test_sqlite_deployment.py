@@ -8,6 +8,7 @@ from tests.test_events_database import observation
 def test_local_database_initializes_and_events_survive_restart(settings, camera, tmp_path, make_job):
     settings.deployment_mode = 'development'
     settings.camera_discovery_enabled = False
+    settings.pipeline_enabled = False
     path = tmp_path / 'nested' / 'gate.db'
     from pydantic import SecretStr
     settings.database_url = SecretStr('sqlite+pysqlite:///' + path.as_posix())

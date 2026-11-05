@@ -438,12 +438,12 @@ class OCRJobStore:
                         except OSError:
                             pass
             else:
-                db.execute("UPDATE jobs SET state='DONE', event_id=?, error_type=NULL, retry_at=? WHERE id=?",
+                db.execute("UPDATE jobs SET state='DONE', event_id=COALESCE(?, event_id), error_type=NULL, retry_at=? WHERE id=?",
                            (event_id, time.time(), job_id))
 
     def cancel_pending(self, origin, event_id=None):
         with self.connection() as db:
-            db.execute("UPDATE jobs SET state='DONE', event_id=?, error_type=NULL, retry_at=? WHERE origin=? AND state='PENDING'",
+            db.execute("UPDATE jobs SET state='DONE', event_id=COALESCE(?, event_id), error_type=NULL, retry_at=? WHERE origin=? AND state='PENDING'",
                        (event_id, time.time(), origin))
 
     def cancel_event_pending(self, event_id):
