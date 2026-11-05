@@ -936,6 +936,17 @@ class CloudOutboxDispatcher:
                     cloud_ev_id = event_record.get('cloud_event_id') if event_record else None
                     stage = 'PUT' if cloud_ev_id else 'POST'
 
+                # If stage is POST, wait briefly if active passage session is still accumulating reads
+                # to guarantee that the full character consensus and maximum confidence percentage are used.
+                if stage == 'POST' and not item.get('force'):
+                    if self.runtime and getattr(self.runtime, 'passage_sessions', None):
+                        sess = self.runtime.passage_sessions.get_session_by_event_id(event_id)
+                        if sess and not getattr(sess, 'finalized', False) and (time.monotonic() - float(item.get('enqueued_at', time.monotonic()))) < 3.0:
+                            item['not_before'] = time.monotonic() + 0.3
+                            self.queue.put(item)
+                            self.queue.task_done()
+                            continue
+
                 # Common container metadata extraction
                 iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
                 cs1 = str((event_record.get('container_size') if event_record else None) or '')
@@ -952,9 +963,39 @@ class CloudOutboxDispatcher:
                     size_1 = '45'
                 else:
                     size_1 = '40'
-                confidences = [float(o.get('confidence') or 0) for o in (event_record.get('ocr_results') or [])
-                    if o.get('normalized_text') == cntr1 and o.get('valid_check_digit')] if event_record else []
-                conf_1 = max(confidences, default=float(obs.ocr.confidence) if (obs and obs.ocr and obs.ocr.confidence) else 0.95)
+                # Extract and select the MAXIMUM confidence percentage across all valid reads and frames
+                all_results = (event_record.get('ocr_results') or []) if event_record else []
+                matching_confs = []
+                for o in all_results:
+                    text = (o.get('normalized_text') or '').replace(' ', '').replace('-', '').upper()
+                    conf = float(o.get('confidence') or 0.0)
+                    if text == cntr1 and conf > 0.0:
+                        matching_confs.append(conf)
+
+                if self.runtime and getattr(self.runtime, 'passage_sessions', None):
+                    sess = self.runtime.passage_sessions.get_session_by_event_id(event_id)
+                    if sess:
+                        for c in (sess.ocr_candidates or []):
+                            text = (getattr(c, 'normalized_text', '') or '').replace(' ', '').replace('-', '').upper()
+                            conf = float(getattr(c, 'confidence', 0.0) or 0.0)
+                            if text == cntr1 and conf > 0.0:
+                                matching_confs.append(conf)
+
+                if obs and getattr(obs, 'ocr', None) and getattr(obs.ocr, 'confidence', None):
+                    obs_text = (getattr(obs.ocr, 'normalized_text', '') or '').replace(' ', '').replace('-', '').upper()
+                    obs_conf = float(obs.ocr.confidence or 0.0)
+                    if obs_text == cntr1 and obs_conf > 0.0:
+                        matching_confs.append(obs_conf)
+                    elif not matching_confs and obs_conf > 0.0:
+                        matching_confs.append(obs_conf)
+
+                if not matching_confs:
+                    matching_confs = [float(o.get('confidence') or 0.0) for o in all_results if o.get('valid_check_digit') and float(o.get('confidence') or 0.0) > 0.0]
+
+                max_conf = max(matching_confs, default=0.98)
+                if max_conf > 1.0:
+                    max_conf = max_conf / 100.0
+                conf_1 = round(max_conf, 2)
 
                 if stage == 'POST':
                     # STAGE 1: Immediate POST gate event creation

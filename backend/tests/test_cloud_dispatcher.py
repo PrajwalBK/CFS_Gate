@@ -354,3 +354,63 @@ def test_missing_cameras_never_replicated_with_duplicate_photos(mock_settings, t
     assert len(c1_images) == 1
     # Verify image types contain no duplicates
     assert len(set(cam_ids)) == len(cam_ids)
+
+
+def test_post_gate_event_selects_maximum_percentage_and_consensus_accuracy(mock_settings, tmp_path):
+    import cv2, numpy as np
+    from unittest.mock import MagicMock, patch
+    from datetime import datetime, timezone
+    from app.events.cloud_dispatcher import CloudOutboxDispatcher
+
+    mock_snaps = MagicMock()
+    mock_repo = MagicMock()
+    
+    # Event has multiple OCR reads: early 0.82, peak sweet-spot 0.99, trailing 0.94
+    mock_repo.event.return_value = {
+        'id': 'evt-max-pct',
+        'status': 'CONFIRMED',
+        'container_number': 'CSQU3054383',
+        'primary_snapshot_id': 'snap-1',
+        'snapshots': [
+            {'id': 'snap-1', 'camera_id': 'gate-in-1', 'image_path': 'evt/gate-in-1.jpg', 'timestamp': '2026-11-04T10:00:00Z'}
+        ],
+        'ocr_results': [
+            {'normalized_text': 'CSQU3054383', 'confidence': 0.82, 'valid_check_digit': True},
+            {'normalized_text': 'CSQU3054383', 'confidence': 0.99, 'valid_check_digit': True},
+            {'normalized_text': 'CSQU3054383', 'confidence': 0.94, 'valid_check_digit': True},
+        ]
+    }
+    img_file = tmp_path / 'snap.jpg'
+    img = np.full((240, 320, 3), 150, dtype=np.uint8)
+    cv2.imwrite(str(img_file), img)
+    mock_snaps.path.return_value = img_file
+
+    dispatcher = CloudOutboxDispatcher(mock_settings, repository=mock_repo, snapshots=mock_snaps)
+    
+    # Early observation passed into enqueue has only 0.82 confidence
+    early_obs = MagicMock()
+    early_obs.detection.camera_id = 'gate-in-1'
+    early_obs.detection.frame_timestamp = datetime.now(timezone.utc)
+    early_obs.ocr.normalized_text = 'CSQU3054383'
+    early_obs.ocr.confidence = 0.82
+    early_obs.gate_id = 'lane-in'
+    early_obs.direction = 'ENTRY'
+    early_obs.image = img
+
+    with patch.object(dispatcher.session, 'post_gate_event', return_value=True) as mock_post:
+        dispatcher.start()
+        dispatcher.enqueue(early_obs, 'evt-max-pct', force=True)
+
+        for _ in range(30):
+            if mock_post.called:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+        assert mock_post.called
+        payload = mock_post.call_args[0][0]
+        container = payload['Containers'][0]
+        assert container['ContainerNumber'] == 'CSQU3054383'
+        # Must select the MAXIMUM percentage (0.99 / 99%) across all reads rather than the early 0.82!
+        assert container['ContainerNumberConfidence'] == 0.99
