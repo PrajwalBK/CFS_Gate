@@ -1420,10 +1420,10 @@ class GateRepository:
             )
             return int(session.scalar(query) or 0)
 
-    def clean_duplicate_events(self, max_gap_seconds: int = 1200, snapshots=None):
+    def clean_duplicate_events(self, max_gap_seconds: int = 60, snapshots=None):
         """
         Merges and removes duplicate events created for the same container within dwell windows.
-        Re-parents detections and snapshots to the primary event, then safely deletes duplicates.
+        Re-parents detections and snapshots strictly within the passage window, resolving true consensus.
         """
         with self._write_lock, self.db.sessions.begin() as session:
             events = session.scalars(
@@ -1450,7 +1450,7 @@ class GateRepository:
                 for ev in ev_list[1:]:
                     last_ev = current_cluster[-1]
                     gap = datetime_diff_seconds(ev.timestamp, last_ev.timestamp)
-                    if gap <= max_gap_seconds:
+                    if gap <= max_gap_seconds and not is_distinct_container(ev.container_number, last_ev.container_number):
                         current_cluster.append(ev)
                     else:
                         clusters.append(current_cluster)
@@ -1463,11 +1463,30 @@ class GateRepository:
                     primary = cluster[0]
                     if any(e.status == 'CONFIRMED' for e in cluster):
                         primary.status = 'CONFIRMED'
-                    # Prefer valid 11-char container number with valid check digit
-                    for e in cluster:
-                        if e.container_number and len(e.container_number) == 11 and e.container_number not in ('TIIU5077669', 'MSCU6546021'):
-                            primary.container_number = e.container_number
-                            break
+
+                    # Resolve authoritative container number across all reads in cluster via multi-read consensus
+                    all_reads = []
+                    for ev_member in cluster:
+                        for ocr_rec in session.scalars(
+                            select(OCRResult)
+                            .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
+                            .where(DetectionRecord.event_id == ev_member.id)
+                        ).all():
+                            all_reads.append(Validation(
+                                raw_text=getattr(ocr_rec, 'raw_text', '') or '',
+                                normalized_text=getattr(ocr_rec, 'normalized_text', '') or '',
+                                confidence=float(getattr(ocr_rec, 'confidence', 0.0) or 0.0),
+                                valid_format=bool(getattr(ocr_rec, 'valid_format', False)),
+                                valid_check_digit=bool(getattr(ocr_rec, 'valid_check_digit', False)),
+                                validation_status=getattr(ocr_rec, 'validation_status', '') or '',
+                                size_type=getattr(ocr_rec, 'size_type', None)
+                            ))
+                    best_c = CharacterConsensus.resolve(all_reads)
+                    if best_c and best_c.normalized_text and best_c.valid_check_digit and is_valid_iso_6346(best_c.normalized_text):
+                        primary.container_number = best_c.normalized_text
+                        primary.status = 'CONFIRMED'
+                        if best_c.size_type:
+                            primary.iso_code_1 = best_c.size_type
 
                     for dup in cluster[1:]:
                         session.execute(
@@ -1475,11 +1494,12 @@ class GateRepository:
                             .where(DetectionRecord.event_id == dup.id)
                             .values(event_id=primary.id)
                         )
-                        session.execute(
-                            update(Snapshot)
-                            .where(Snapshot.event_id == dup.id)
-                            .values(event_id=primary.id)
-                        )
+                        # Re-parent only snapshots within the true passage window (<= 25s) to prevent cross-contamination
+                        for snap in session.scalars(select(Snapshot).where(Snapshot.event_id == dup.id)).all():
+                            if abs(datetime_diff_seconds(snap.timestamp, primary.timestamp)) <= 25.0:
+                                snap.event_id = primary.id
+                            else:
+                                session.delete(snap)
                         session.execute(
                             update(SystemLog)
                             .where(SystemLog.event_id == dup.id)
@@ -1487,6 +1507,7 @@ class GateRepository:
                         )
                         session.delete(dup)
                         merged_count += 1
+
 
             # Second pass: merge near-simultaneous events using image similarity and capture timestamps
             snap_mgr = None
