@@ -135,10 +135,13 @@ class SnapshotManager:
                 snap_ts = snap.get('timestamp')
                 if ev_ts and snap_ts:
                     def _parse_ts(v):
+                        if not v:
+                            return None
                         if isinstance(v, datetime.datetime):
-                            return v
+                            return v.replace(tzinfo=None)
                         try:
-                            return datetime.datetime.fromisoformat(str(v).replace('Z', '+00:00'))
+                            clean_str = str(v).replace('Z', '').split('+')[0]
+                            return datetime.datetime.fromisoformat(clean_str)
                         except Exception:
                             return None
                     dt1, dt2 = _parse_ts(ev_ts), _parse_ts(snap_ts)

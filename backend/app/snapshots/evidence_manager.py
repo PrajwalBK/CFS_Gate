@@ -433,12 +433,7 @@ class EvidenceFolderManager:
         if cand.is_file():
             return cand
 
-        # 2. Direct match in legacy_root
-        cand_legacy = (self.legacy_root / rel_str).resolve()
-        if cand_legacy.is_file():
-            return cand_legacy
-
-        # 3. If path is <event_id>/<filename>:
+        # 2. If path is <event_id>/<filename>, check authoritative single evidence folder first
         parts = rel_str.split('/')
         if len(parts) == 2:
             event_id, fname = parts[0], parts[1]
@@ -450,6 +445,11 @@ class EvidenceFolderManager:
                 alt = f"best_{fname}" if not fname.startswith('best_') else fname[5:]
                 if (folder / alt).is_file():
                     return folder / alt
+
+        # 3. Direct match in legacy_root
+        cand_legacy = (self.legacy_root / rel_str).resolve()
+        if cand_legacy.is_file():
+            return cand_legacy
 
         # 4. If path is GATE_IN/<folder>/<fname> or GATE_OUT/<folder>/<fname>:
         if len(parts) >= 3 and parts[0] in ('GATE_IN', 'GATE_OUT'):

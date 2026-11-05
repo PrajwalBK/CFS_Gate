@@ -378,7 +378,10 @@ class ContainerPassageSession:
         # Character and identity consensus resolution across all observed reads
         is_valid_iso = bool(val.valid_check_digit and is_valid_iso_6346(norm))
         consensus_read = CharacterConsensus.resolve(self.ocr_candidates)
-        if consensus_read and consensus_read.normalized_text and consensus_read.valid_check_digit and is_valid_iso_6346(consensus_read.normalized_text):
+        if consensus_read and getattr(consensus_read, 'validation_status', '') == 'AMBIGUOUS':
+            self.identity_conflict = True
+            self.confirmed_container_number = None
+        elif consensus_read and consensus_read.normalized_text and consensus_read.valid_check_digit and is_valid_iso_6346(consensus_read.normalized_text):
             c_norm = consensus_read.normalized_text
             old_num = self.confirmed_container_number
             self.confirmed_container_number = c_norm
