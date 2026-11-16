@@ -161,6 +161,67 @@ def recover_zero_o_confusion(raw_text: str) -> str:
     return raw_text
 
 
+def recover_visual_confusion(raw_text: str) -> str:
+    """
+    Recover common OCR visual confusions (1/I, 0/O, 8/B, 5/S, 2/Z, etc.) in container codes.
+    Only replaces if the candidate strictly satisfies ISO 6346 Modulo-11 check digit verification.
+    """
+    if not raw_text:
+        return raw_text
+    char_to_letter = {'0': 'O', '1': 'I', '8': 'B', '5': 'S', '2': 'Z'}
+    letter_to_digit = {'O': '0', 'I': '1', 'L': '1', 'B': '8', 'S': '5', 'Z': '2', 'G': '6'}
+
+    m = re.search(r'(?<![A-Z0-9])([A-Z0-9]{3}[UJZ0-9])[\s\-.:/|\[\]()]*((?:[0-9A-Z][\s\-.:/|\[\]()]*){6,7})(?![0-9A-Z])', raw_text.upper())
+    if m:
+        pref = list(m.group(1))
+        for i in range(min(3, len(pref))):
+            if pref[i] in char_to_letter:
+                pref[i] = char_to_letter[pref[i]]
+        if len(pref) >= 4 and pref[3] not in ('U', 'J', 'Z'):
+            if pref[3] in ('0', 'O', '4', '1'):
+                pref[3] = 'U'
+        digits_raw = re.sub(r'[^0-9A-Z]', '', m.group(2))
+        digits = [letter_to_digit.get(ch, ch) for ch in digits_raw]
+        if len(digits) == 7:
+            candidate = ''.join(pref) + ''.join(digits)
+            if is_valid_iso_6346(candidate):
+                return raw_text[:m.start()] + candidate + raw_text[m.end():]
+        elif len(digits) == 6:
+            prefix10 = ''.join(pref) + ''.join(digits)
+            try:
+                cd = check_digit(prefix10)
+                candidate = f"{prefix10}{cd}"
+                if is_valid_iso_6346(candidate):
+                    return raw_text[:m.start()] + candidate + raw_text[m.end():]
+            except Exception:
+                pass
+
+    cleaned = re.sub(r'[^A-Z0-9]', '', raw_text.upper())
+    if len(cleaned) in (10, 11):
+        pref = list(cleaned[:4])
+        for i in range(min(3, len(pref))):
+            if pref[i] in char_to_letter:
+                pref[i] = char_to_letter[pref[i]]
+        if pref[3] not in ('U', 'J', 'Z'):
+            if pref[3] in ('0', 'O', '4', '1'):
+                pref[3] = 'U'
+        digits = [letter_to_digit.get(ch, ch) for ch in cleaned[4:]]
+        if len(digits) == 7:
+            cand = ''.join(pref) + ''.join(digits)
+            if is_valid_iso_6346(cand):
+                return cand
+        elif len(digits) == 6:
+            prefix10 = ''.join(pref) + ''.join(digits)
+            try:
+                cd = check_digit(prefix10)
+                cand = f"{prefix10}{cd}"
+                if is_valid_iso_6346(cand):
+                    return cand
+            except Exception:
+                pass
+    return raw_text
+
+
 def normalize(text: str) -> str:
     return re.sub(r'[^A-Z0-9]', '', text.upper())
 

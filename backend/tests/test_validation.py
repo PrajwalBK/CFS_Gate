@@ -159,3 +159,22 @@ def test_is_distinct_container_ocr_confusion_and_twin_isolation():
     assert is_distinct_container('MSKU1234565', 'TGHU8765436') is True
     assert is_distinct_container('MSKU1234565', 'MSKU9876540') is True
     assert is_distinct_container('TGHU2020209', 'MSCU2020208') is True
+
+
+def test_recover_visual_confusion():
+    from app.ocr.validator import recover_visual_confusion
+
+    # 1. 'BS1U9204300' -> 'BSIU9204300' (check digit 0 matches)
+    assert recover_visual_confusion('BS1U9204300') == 'BSIU9204300'
+    val1 = ContainerValidator().validate(OCRRead(recover_visual_confusion('BS1U9204300'), 0.98))
+    assert val1.normalized_text == 'BSIU9204300'
+    assert val1.valid_check_digit is True
+
+    # 2. 'CA1U2528405' -> 'CAIU2528405' (check digit 5 matches)
+    assert recover_visual_confusion('CA1U2528405') == 'CAIU2528405'
+
+    # 3. Serial digit confusion 'CSQU3O54383' -> 'CSQU3054383'
+    assert recover_visual_confusion('CSQU3O54383') == 'CSQU3054383'
+
+    # 4. Irrelevant text left untouched
+    assert recover_visual_confusion('INVALID TEXT') == 'INVALID TEXT'

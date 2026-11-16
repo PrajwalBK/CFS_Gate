@@ -596,7 +596,14 @@ class GateRepository:
                          same_container_window_seconds: float = 900):
         """One writer per service; DB uniqueness also protects retried track writes."""
         if obs.ocr and not is_valid_iso_6346(obs.ocr.normalized_text):
-            obs = replace(obs, confirmed=False, ocr=replace(obs.ocr, valid_check_digit=False))
+            from app.ocr.validator import recover_visual_confusion
+            raw_t = getattr(obs.ocr, 'raw_text', '') or ''
+            norm_t = getattr(obs.ocr, 'normalized_text', '') or ''
+            rep = recover_visual_confusion(raw_t) or recover_visual_confusion(norm_t)
+            if rep and is_valid_iso_6346(rep):
+                obs = replace(obs, confirmed=True, ocr=replace(obs.ocr, normalized_text=rep, valid_check_digit=True, valid_format=True, validation_status='VALID'))
+            else:
+                obs = replace(obs, confirmed=False, ocr=replace(obs.ocr, valid_check_digit=False))
         created_paths = []
         try:
             with self._write_lock, self.db.sessions.begin() as session:
@@ -871,7 +878,13 @@ class GateRepository:
                             number != existing.container_number and
                             is_distinct_container(existing.container_number, number)
                         )
-                        if is_distinct_read or time_diff > max(dedup_seconds, 35.0):
+                        is_confused_same_container = bool(
+                            number and existing.container_number and
+                            number != existing.container_number and
+                            not is_distinct_container(existing.container_number, number)
+                        )
+                        split_threshold = max(float(same_container_window_seconds or 0), dedup_seconds, 600.0) if is_confused_same_container else max(dedup_seconds, 35.0)
+                        if is_distinct_read or time_diff > split_threshold:
                             is_same_stationary_scene = False
                             if not number and not existing.container_number and snapshots and getattr(obs, 'image', None) is not None:
                                 try:

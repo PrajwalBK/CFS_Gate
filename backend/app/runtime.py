@@ -31,7 +31,7 @@ from app.events.passages import PassageCollector
 from app.metrics import Metrics
 from app.ocr.container_ocr import crop_identification
 from app.ocr.ocr_engine import EasyOCREngine, create_ocr_engine
-from app.ocr.validator import ContainerValidator, extract_iso_size_code, recover_boxed_check_digit, recover_zero_o_confusion
+from app.ocr.validator import ContainerValidator, extract_iso_size_code, recover_boxed_check_digit, recover_zero_o_confusion, recover_visual_confusion
 from app.ocr.job_store import OCRJobStore
 from app.ocr.fast_selector import FastFrameSelector
 from app.events.pipeline_profiler import PipelineProfiler, LatencyRecord
@@ -1142,6 +1142,11 @@ class GateRuntime:
                             sub_r = OCRRead(rec_text, sub_r.confidence)
                             sub_v = self.validator.validate(sub_r)
                     if not sub_v.valid_check_digit:
+                        vis_text = recover_visual_confusion(sub_r.raw_text)
+                        if vis_text != sub_r.raw_text:
+                            sub_r = OCRRead(vis_text, sub_r.confidence)
+                            sub_v = self.validator.validate(sub_r)
+                    if not sub_v.valid_check_digit:
                         zero_text = recover_zero_o_confusion(sub_r.raw_text)
                         if zero_text != sub_r.raw_text:
                             sub_r = OCRRead(zero_text, sub_r.confidence)
@@ -1154,6 +1159,11 @@ class GateRuntime:
                             t_val0 = time.perf_counter()
                             rot_v = self.validator.validate(rot_r)
                             t_iso_total += (time.perf_counter() - t_val0) * 1000.0
+                            if not rot_v.valid_check_digit:
+                                vis_rot = recover_visual_confusion(rot_r.raw_text)
+                                if vis_rot != rot_r.raw_text:
+                                    rot_r = OCRRead(vis_rot, rot_r.confidence)
+                                    rot_v = self.validator.validate(rot_r)
                             if rot_v.valid_check_digit or (not sub_v.valid_check_digit and rot_v.confidence > sub_v.confidence and len(rot_v.normalized_text) >= 4):
                                 sub_r, sub_v = rot_r, rot_v
                                 if sub_v.valid_check_digit:
