@@ -62,9 +62,15 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
         sys.modules['modelscope'] = types.ModuleType('modelscope')
         os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'
         os.environ['PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT'] = 'False'
+        os.environ['FLAGS_use_mkldnn'] = '0'
+        os.environ['FLAGS_enable_pir_api'] = '0'
         from paddleocr import PaddleOCR
         device = 'gpu:0' if use_gpu and paddle.is_compiled_with_cuda() else 'cpu'
         paddle.set_device(device)
+        try:
+            paddle.set_flags({'FLAGS_use_mkldnn': False})
+        except Exception:
+            pass
         engine = PaddleOCR(
             text_detection_model_name=detection_model,
             text_recognition_model_name=recognition_model,
@@ -83,6 +89,15 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
                 return
             request_id, image = request
             try:
+                # Upscale tiny crops so PaddleOCR does not crash on PIR/oneDNN array attributes
+                if hasattr(image, 'shape') and len(image.shape) >= 2:
+                    h, w = image.shape[:2]
+                    if min(h, w) < 32:
+                        import cv2
+                        scale = 32.0 / max(1, min(h, w))
+                        new_w = max(32, int(w * scale))
+                        new_h = max(32, int(h * scale))
+                        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                 output = list(engine.predict(image))
                 payload = output[0].json if output else {}
                 text, confidence = _paddle_text(payload)
@@ -145,7 +160,8 @@ class PaddleOCREngine:
                 log.warning('paddle_ocr_timeout_or_busy')
                 return OCRRead('', 0.0)
             if kind != 'result' or returned_id != request_id or error:
-                log.warning('paddle_ocr_read_failed', extra={'error': error or 'unexpected response'})
+                err_detail = error or 'unexpected response'
+                log.warning(f'paddle_ocr_read_failed: {err_detail}', extra={'error_type': err_detail.split(':')[0]})
                 return OCRRead('', 0.0)
             return OCRRead(text[:4096], float(confidence))
 
