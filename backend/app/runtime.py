@@ -891,9 +891,11 @@ class GateRuntime:
                     ts_since_last = float('inf')
                 if state['pending'] or state['done']:
                     continue
-                if state.get('last_ocr_ts') is not None and ts_since_last < self.settings.ocr_interval_seconds:
+                is_stat = bool((active_slot_obj and active_slot_obj.stationary) or getattr(occupancy, 'stationary', False))
+                effective_interval = 0.20 if not is_stat else self.settings.ocr_interval_seconds
+                if state.get('last_ocr_ts') is not None and ts_since_last < effective_interval:
                     continue
-                if getattr(camera, 'source_type', 'live') != 'file' and getattr(frame, 'source_id', '') not in ('test', 'file') and wall_since_last < self.settings.ocr_interval_seconds:
+                if getattr(camera, 'source_type', 'live') != 'file' and getattr(frame, 'source_id', '') not in ('test', 'file') and wall_since_last < effective_interval:
                     continue
                 if state.get('done'):
                     continue
@@ -901,16 +903,17 @@ class GateRuntime:
                 max_samples = max(30, self.settings.ocr_max_attempts * 3) if has_text_det else max(15, self.settings.ocr_max_attempts)
                 if state.get('samples', 0) >= max_samples:
                     continue
-                if track.hits < self.settings.min_track_hits:
+                min_hits = 1 if track.detection.class_name in ('container_number', 'iso_code') else min(2, self.settings.min_track_hits)
+                if track.hits < min_hits:
                     continue
                 if track.detection.class_name not in self.settings.ocr_classes:
                     continue
-                # Physical minimum dimensions to eliminate noise/glare/chassis specks:
+                # Physical minimum dimensions (aligned with detector limits to avoid discarding valid crops)
                 t_bw = max(0.0, track.detection.bbox[2] - track.detection.bbox[0])
                 t_bh = max(0.0, track.detection.bbox[3] - track.detection.bbox[1])
-                if track.detection.class_name == 'container_number' and (t_bw < 60.0 or t_bh < 18.0):
+                if track.detection.class_name == 'container_number' and (t_bw < 20.0 or t_bh < 8.0):
                     continue
-                if track.detection.class_name == 'iso_code' and (t_bw < 24.0 or t_bh < 14.0):
+                if track.detection.class_name == 'iso_code' and (t_bw < 12.0 or t_bh < 6.0):
                     continue
                 if camera.line_axis and direction == 'UNKNOWN':
                     continue
@@ -1487,6 +1490,51 @@ class GateRuntime:
 
     def _commit_passage_session(self, session):
         try:
+            # Multi-camera fallback OCR sweep: if no container number was confirmed during transit,
+            # run OCR on the sharpest frames recorded from all camera angles on this gate.
+            if not session.confirmed_container_number and self.ocr:
+                for cam_id, cand_list in (session.captured_frames or {}).items():
+                    if session.confirmed_container_number:
+                        break
+                    for f_cand in sorted(cand_list, key=lambda f: f.quality_score, reverse=True)[:3]:
+                        if f_cand.image is None or getattr(f_cand.image, 'size', 0) == 0:
+                            continue
+                        img_h, img_w = f_cand.image.shape[:2]
+                        # 1. First try any container_number text crops detected on this sharp frame
+                        num_dets = [d for d in (f_cand.detections or []) if getattr(d, 'class_name', '') == 'container_number']
+                        for nd in num_dets:
+                            pad_x = max(20, int((nd.bbox[2] - nd.bbox[0]) * 0.15))
+                            pad_y = max(15, int((nd.bbox[3] - nd.bbox[1]) * 0.25))
+                            y1 = max(0, int(nd.bbox[1]) - pad_y)
+                            y2 = min(img_h, int(nd.bbox[3]) + pad_y)
+                            x1 = max(0, int(nd.bbox[0]) - pad_x)
+                            x2 = min(img_w, int(nd.bbox[2]) + pad_x)
+                            crop = f_cand.image[y1:y2, x1:x2]
+                            if crop.size > 0:
+                                r = self.ocr.read(crop)
+                                val = self.validator.validate(r)
+                                if val and val.valid_check_digit:
+                                    session.add_ocr_candidate(val)
+                                    break
+                        if session.confirmed_container_number:
+                            break
+                        # 2. Next try main container crop on this sharp frame
+                        cntr_dets = [d for d in (f_cand.detections or []) if getattr(d, 'class_name', '') in ('container', 'container_object')]
+                        for cd in cntr_dets:
+                            cy1 = max(0, int(cd.bbox[1]))
+                            cy2 = min(img_h, int(cd.bbox[3]))
+                            cx1 = max(0, int(cd.bbox[0]))
+                            cx2 = min(img_w, int(cd.bbox[2]))
+                            c_crop = f_cand.image[cy1:cy2, cx1:cx2]
+                            if c_crop.size > 0:
+                                r = self.ocr.read(c_crop)
+                                val = self.validator.validate(r)
+                                if val and val.valid_check_digit:
+                                    session.add_ocr_candidate(val)
+                                    break
+                        if session.confirmed_container_number:
+                            break
+
             event_id = self.repository.finalize_passage_session(session, self.snapshots)
             self.passage_outbox.complete(session.event_id)
             self.passage_sessions.acknowledge(session.event_id)
