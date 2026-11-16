@@ -473,7 +473,9 @@ class OlmOCREngine:
             ]
 
             text_template = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
+            vision_info = process_vision_info(messages)
+            image_inputs = vision_info[0] if len(vision_info) > 0 else None
+            video_inputs = vision_info[1] if len(vision_info) > 1 else None
             inputs = self.processor(
                 text=[text_template],
                 images=image_inputs,
