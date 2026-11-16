@@ -1085,6 +1085,18 @@ class CloudOutboxDispatcher:
                             )
                         except Exception:
                             log.exception('prosper_alert_failed: %s', event_id)
+                    elif success in ('CONFLICT', 'REJECTED'):
+                        if self.repository:
+                            try:
+                                self.repository.mark_cloud_delivery(
+                                    event_id,
+                                    success,
+                                    f'Cloud returned {success} (terminal conflict/rejection: container already in yard or invalid state)'
+                                )
+                            except Exception:
+                                pass
+                        self.queue.task_done()
+                        continue
                     elif success == 'OFFLINE':
                         log.info('prosper_event_buffered_offline: Event %s buffered locally; will auto-sync when cloud service is available.', event_id)
 
@@ -1276,12 +1288,13 @@ class CloudOutboxDispatcher:
                     )
                 except Exception:
                     pass
-            item['retries'] += 1
-            if item['retries'] < self.settings.prosper_max_retries:
-                backoff = min(2.0 ** item['retries'], 30.0)
-                item['not_before'] = time.monotonic() + backoff
-                try:
-                    self.queue.put_nowait(item)
-                except Full:
-                    log.error('prosper_retry_dropped_queue_full', extra={'event_id': event_id})
+            if success not in ('CONFLICT', 'REJECTED'):
+                item['retries'] += 1
+                if item['retries'] < self.settings.prosper_max_retries:
+                    backoff = min(2.0 ** item['retries'], 30.0)
+                    item['not_before'] = time.monotonic() + backoff
+                    try:
+                        self.queue.put_nowait(item)
+                    except Full:
+                        log.error('prosper_retry_dropped_queue_full', extra={'event_id': event_id})
             self.queue.task_done()

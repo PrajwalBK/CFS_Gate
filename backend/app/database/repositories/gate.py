@@ -1420,7 +1420,7 @@ class GateRepository:
                 .where(
                     GateEvent.status == 'CONFIRMED',
                     func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_([
-                        'PENDING', 'OFFLINE', 'CONFLICT', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
+                        'PENDING', 'OFFLINE', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
                     ]),
                     (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
                     (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
