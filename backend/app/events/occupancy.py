@@ -140,7 +140,10 @@ class ViewOccupancy:
 
             if not candidates:
                 state.clear_since = state.clear_since or now
-                if (now - state.clear_since).total_seconds() >= self.settings.gate_clear_seconds:
+                clear_timeout = getattr(self.settings, 'gate_clear_seconds', 2.0)
+                if state.stationary:
+                    clear_timeout = max(clear_timeout, 8.0)
+                if (now - state.clear_since).total_seconds() >= clear_timeout:
                     self.current = None
                 return None
 
@@ -164,7 +167,10 @@ class ViewOccupancy:
                 return det
             else:
                 # Different container or no IoU match: keep tracking existing without stealing
-                if (now - state.last_measured).total_seconds() >= self.settings.gate_clear_seconds:
+                clear_timeout = getattr(self.settings, 'gate_clear_seconds', 2.0)
+                if state.stationary:
+                    clear_timeout = max(clear_timeout, 8.0)
+                if (now - state.last_measured).total_seconds() >= clear_timeout:
                     self.current = None
                 return None
 

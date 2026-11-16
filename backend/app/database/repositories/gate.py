@@ -786,6 +786,42 @@ class GateRepository:
                         GateEvent.timestamp >= obs.detection.frame_timestamp - delta,
                         GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
                     ).order_by(GateEvent.timestamp.desc()))
+                    if not existing and obs.origin_key.startswith('dwell:') and snapshots and getattr(obs, 'image', None) is not None:
+                        long_delta = timedelta(seconds=max(float(same_container_window_seconds or 0), 600.0))
+                        unconfirmed_candidates = session.scalars(select(GateEvent).where(
+                            GateEvent.gate_id == obs.gate_id,
+                            GateEvent.container_number.is_(None),
+                            direction_match,
+                            GateEvent.status == 'NEEDS_REVIEW',
+                            GateEvent.timestamp >= obs.detection.frame_timestamp - long_delta,
+                            GateEvent.timestamp <= obs.detection.frame_timestamp,
+                        ).order_by(GateEvent.timestamp.desc())).all()
+                        for cand in unconfirmed_candidates:
+                            cam_id = obs.detection.camera_id
+                            cand_img_path = None
+                            try:
+                                p = snapshots.path(f"{cand.id}/{cam_id}.jpg")
+                                if p.is_file():
+                                    cand_img_path = p
+                            except Exception:
+                                pass
+                            if not cand_img_path:
+                                snap_rec = session.scalar(select(Snapshot).where(
+                                    Snapshot.event_id == cand.id,
+                                    Snapshot.camera_id == cam_id
+                                ).order_by(Snapshot.timestamp.desc()))
+                                if snap_rec and snap_rec.image_path:
+                                    try:
+                                        p = snapshots.path(snap_rec.image_path)
+                                        if p.is_file():
+                                            cand_img_path = p
+                                    except Exception:
+                                        pass
+                            if cand_img_path:
+                                sim = SnapshotManager.compute_similarity(obs.image, cand_img_path)
+                                if sim >= 0.88:
+                                    existing = cand
+                                    break
                     if existing and existing.event_type == 'UNKNOWN' and obs.direction != 'UNKNOWN':
                         existing.event_type = obs.direction
                 is_second_slot = getattr(obs, 'slot_position', 'CONTAINER_1') in ('REAR', 'CONTAINER_2')
@@ -835,13 +871,23 @@ class GateRepository:
                             is_distinct_container(existing.container_number, number)
                         )
                         if is_distinct_read or time_diff > max(dedup_seconds, 35.0):
-                            prior_view = session.scalar(select(DetectionRecord.id).where(
-                                DetectionRecord.event_id == existing.id,
-                                DetectionRecord.camera_id == obs.detection.camera_id,
-                                DetectionRecord.origin_key.like('dwell:%'),
-                                DetectionRecord.origin_key != obs.origin_key))
-                            if prior_view:
-                                existing = None  # New cleared passage, not time-window fusion.
+                            is_same_stationary_scene = False
+                            if not number and not existing.container_number and snapshots and getattr(obs, 'image', None) is not None:
+                                try:
+                                    cam_id = obs.detection.camera_id
+                                    p = snapshots.path(f"{existing.id}/{cam_id}.jpg")
+                                    if p.is_file() and SnapshotManager.compute_similarity(obs.image, p) >= 0.88:
+                                        is_same_stationary_scene = True
+                                except Exception:
+                                    pass
+                            if not is_same_stationary_scene:
+                                prior_view = session.scalar(select(DetectionRecord.id).where(
+                                    DetectionRecord.event_id == existing.id,
+                                    DetectionRecord.camera_id == obs.detection.camera_id,
+                                    DetectionRecord.origin_key.like('dwell:%'),
+                                    DetectionRecord.origin_key != obs.origin_key))
+                                if prior_view:
+                                    existing = None  # New cleared passage, not time-window fusion.
 
                 if (existing and number and existing.container_number and
                         number != existing.container_number):
@@ -1533,7 +1579,8 @@ class GateRepository:
                     if ev2.id in merged_set:
                         continue
                     gap = datetime_diff_seconds(ev2.timestamp, ev1.timestamp)
-                    if gap > 30.0:
+                    max_gap = 600.0 if (not ev1.container_number and not ev2.container_number) else 45.0
+                    if gap > max_gap:
                         break
                     if ev1.gate_id != ev2.gate_id:
                         continue
