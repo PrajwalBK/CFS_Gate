@@ -105,7 +105,10 @@ def recover_boxed_check_digit(crop, raw_text: str) -> str:
         return raw_text
 
     h, w = crop.shape[:2]
-    # Check digit is placed in the right ~35% of horizontal text crop
+    # Check digit box recovery only applies to horizontal text strips where the check digit
+    # is positioned to the right of the serial digits. Never run on vertical corner post crops.
+    if w < 1.5 * h:
+        return raw_text
     right_roi = crop[:, int(w * 0.65):]
     if right_roi.size > 0:
         try:

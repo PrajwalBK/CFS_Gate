@@ -376,34 +376,35 @@ class GateRepository:
                         existing.cloud_visit_id = sess_cloud_visit_id
                     elif existing.cloud_visit_id and not sess_cloud_visit_id:
                         session.cloud_visit_id = existing.cloud_visit_id
-                    if container_num:
-                        if not existing.container_number:
-                            existing.container_number = container_num
-                        elif existing.container_number != container_num:
-                            all_cands = list(session.ocr_candidates or [])
-                            for ocr_rec in db_session.scalars(
-                                select(OCRResult)
-                                .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
-                                .where(DetectionRecord.event_id == existing.id)
-                            ).all():
-                                all_cands.append(Validation(
-                                    raw_text=getattr(ocr_rec, 'raw_text', '') or '',
-                                    normalized_text=getattr(ocr_rec, 'normalized_text', '') or '',
-                                    confidence=float(getattr(ocr_rec, 'confidence', 0.0) or 0.0),
-                                    valid_format=bool(getattr(ocr_rec, 'valid_format', False)),
-                                    valid_check_digit=bool(getattr(ocr_rec, 'valid_check_digit', False)),
-                                    validation_status=getattr(ocr_rec, 'validation_status', '') or '',
-                                    size_type=getattr(ocr_rec, 'size_type', None)
-                                ))
-                            best_c = CharacterConsensus.resolve(all_cands)
-                            if best_c and best_c.normalized_text and best_c.valid_check_digit and is_valid_iso_6346(best_c.normalized_text):
-                                existing.container_number = best_c.normalized_text
-                            elif conf > (getattr(existing, 'confidence', 0.0) or 0.0):
-                                existing.container_number = container_num
-                    if iso_code:
-                        existing.iso_code_1 = iso_code
-                    if is_confirmed:
+                    # Determine authoritative multi-frame multi-camera consensus across all reads
+                    all_cands = list(session.ocr_candidates or [])
+                    for ocr_rec in db_session.scalars(
+                        select(OCRResult)
+                        .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
+                        .where(DetectionRecord.event_id == existing.id)
+                    ).all():
+                        all_cands.append(Validation(
+                            raw_text=getattr(ocr_rec, 'raw_text', '') or '',
+                            normalized_text=getattr(ocr_rec, 'normalized_text', '') or '',
+                            confidence=float(getattr(ocr_rec, 'confidence', 0.0) or 0.0),
+                            valid_format=bool(getattr(ocr_rec, 'valid_format', False)),
+                            valid_check_digit=bool(getattr(ocr_rec, 'valid_check_digit', False)),
+                            validation_status=getattr(ocr_rec, 'validation_status', '') or '',
+                            size_type=getattr(ocr_rec, 'size_type', None)
+                        ))
+                    best_c = CharacterConsensus.resolve(all_cands)
+                    if best_c and best_c.normalized_text and best_c.valid_check_digit and is_valid_iso_6346(best_c.normalized_text):
+                        existing.container_number = best_c.normalized_text
                         existing.status = 'CONFIRMED'
+                        if best_c.size_type:
+                            existing.iso_code_1 = best_c.size_type
+                    elif container_num and is_valid_iso_6346(container_num):
+                        existing.container_number = container_num
+                        existing.status = 'CONFIRMED'
+                    elif not existing.container_number and container_num:
+                        existing.container_number = container_num
+                    if iso_code and not existing.iso_code_1:
+                        existing.iso_code_1 = iso_code
 
                 # Save the independent BEST frame for EVERY camera on this gate that captured a container
                 primary_det_id = None
@@ -915,12 +916,16 @@ class GateRepository:
 
                         if ocr_sim >= 0.45 or digits_overlap:
                             # Same physical container, OCR read improved or varied!
-                            if obs_conf >= prior_best_conf:
+                            ex_is_valid = bool(existing.container_number and is_valid_iso_6346(existing.container_number))
+                            obs_is_valid = bool(number and is_valid_iso_6346(number))
+                            if not ex_is_valid and obs_is_valid:
                                 existing.container_number = number
                                 if obs.confirmed:
                                     existing.status = 'CONFIRMED'
+                            elif not ex_is_valid and obs_conf >= prior_best_conf:
+                                existing.container_number = number
                             else:
-                                number = existing.container_number
+                                number = existing.container_number or number
                         else:
                             # Genuine distinct identities on different containers
                             if not is_second_slot:
