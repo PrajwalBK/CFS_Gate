@@ -173,18 +173,19 @@ class PaddleOCREngine:
     def read(self, image) -> OCRRead:
         if image is None or getattr(image, 'size', 0) == 0:
             return OCRRead('', 0.0)
-        if not self._process.is_alive():
-            log.warning('paddle_ocr_worker_not_alive_restarting')
-            try:
-                self.close()
-                self._requests = self._context.Queue(maxsize=1)
-                self._responses = self._context.Queue(maxsize=1)
-                self._start_worker()
-            except Exception as e:
-                log.error('paddle_ocr_restart_failed', extra={'error': str(e)})
-                return OCRRead('', 0.0)
 
         with self._lock:
+            if not getattr(self, '_process', None) or not self._process.is_alive():
+                log.warning('paddle_ocr_worker_not_alive_restarting')
+                try:
+                    self.close()
+                    self._requests = self._context.Queue(maxsize=1)
+                    self._responses = self._context.Queue(maxsize=1)
+                    self._start_worker()
+                except Exception as e:
+                    log.error('paddle_ocr_restart_failed', extra={'error': str(e)})
+                    return OCRRead('', 0.0)
+
             # 1. Drain any leftover responses from previous timed-out calls
             while not self._responses.empty():
                 try:
@@ -210,17 +211,27 @@ class PaddleOCREngine:
                     log.warning('paddle_ocr_timeout_or_busy')
                     return OCRRead('', 0.0)
 
-                # Discard stale responses from earlier abandoned requests and keep waiting
-                if returned_id < request_id:
-                    log.debug('paddle_ocr_stale_response_discarded', extra={'stale_id': returned_id, 'expected_id': request_id})
+                # Discard non-result messages (e.g. late worker initialization or handshake messages)
+                if kind != 'result':
+                    log.debug('paddle_ocr_non_result_discarded', extra={'kind': kind})
                     if time.monotonic() >= deadline:
                         log.warning('paddle_ocr_timeout_or_busy')
                         return OCRRead('', 0.0)
                     continue
 
-                if kind != 'result' or returned_id != request_id or error:
-                    err_detail = error or f'unexpected response (expected {request_id}, got {returned_id}, kind={kind})'
-                    log.warning(f'paddle_ocr_read_failed: {err_detail}', extra={'error_type': err_detail.split(':')[0]})
+                # Discard stale or desynchronized responses from earlier calls and keep waiting
+                if returned_id != request_id:
+                    if returned_id < request_id:
+                        log.debug('paddle_ocr_stale_response_discarded', extra={'stale_id': returned_id, 'expected_id': request_id})
+                    else:
+                        self._sequence = max(self._sequence, returned_id)
+                    if time.monotonic() >= deadline:
+                        log.warning('paddle_ocr_timeout_or_busy')
+                        return OCRRead('', 0.0)
+                    continue
+
+                if error:
+                    log.warning(f'paddle_ocr_read_failed: {error}', extra={'error_type': str(error).split(':')[0]})
                     return OCRRead('', 0.0)
 
                 return OCRRead(text[:4096], float(confidence))

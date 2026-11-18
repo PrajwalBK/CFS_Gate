@@ -695,6 +695,22 @@ class CloudOutboxDispatcher:
                             })
                             continue
 
+                        # 2b. Reject any snapshot associated with a distinct event or container
+                        snap_ev_id = str(snap.get('event_id') or '')
+                        if snap_ev_id and event_id_str and snap_ev_id != event_id_str:
+                            if self.repository:
+                                try:
+                                    other_ev = self.repository.event(snap_ev_id)
+                                    if other_ev and other_ev.get('container_number'):
+                                        if is_distinct_container(cntr1, other_ev.get('container_number')):
+                                            log.warning('prosper_snapshot_skipped_distinct_container_event', extra={
+                                                'camera_id': cam_id, 'snapshot_id': snap.get('id'),
+                                                'expected_container': cntr1, 'other_container': other_ev.get('container_number')
+                                            })
+                                            continue
+                                except Exception:
+                                    pass
+
                         # 3. Provenance metadata check
                         prov = snap.get('provenance') or {}
                         prov_cntr = prov.get('container_number')
@@ -1012,8 +1028,12 @@ class CloudOutboxDispatcher:
                 # evidence has been collected. Prioritize 100% accuracy over immediate dispatch:
                 # wait up to 25.0s for passage session finalization and companion camera capture.
                 if stage == 'POST' and not item.get('force'):
+                    gate_id_for_event = (event_record.get('gate_id') if event_record else None) or (obs.gate_id if obs else None)
+                    slot_name = getattr(obs, 'slot_position', 'CONTAINER_1') if obs else 'CONTAINER_1'
                     if self.runtime and getattr(self.runtime, 'passage_sessions', None):
                         sess = self.runtime.passage_sessions.get_session_by_event_id(event_id)
+                        if not sess and gate_id_for_event:
+                            sess = self.runtime.passage_sessions.get_active_session(gate_id_for_event, container_slot=slot_name)
                         if sess and not getattr(sess, 'finalized', False):
                             wait_duration = time.monotonic() - float(item.get('enqueued_at', time.monotonic()))
                             if wait_duration < 25.0:  # Allow ample time for container to clear the gate
@@ -1029,6 +1049,12 @@ class CloudOutboxDispatcher:
                         fresh = self.repository.event(event_id)
                         if fresh:
                             event_record = fresh
+                            # Strict duplicate suppression: if this intermediate event was absorbed into
+                            # another passage or marked DUPLICATE, never dispatch a dirty duplicate visit to the cloud!
+                            if event_record.get('status') == 'DUPLICATE' or event_record.get('cloud_delivery_state') == 'DUPLICATE':
+                                log.info('prosper_post_suppressed_merged_duplicate', extra={'event_id': event_id})
+                                self.queue.task_done()
+                                continue
                             if event_record.get('container_number'):
                                 cntr1 = event_record.get('container_number')
 

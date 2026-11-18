@@ -911,3 +911,72 @@ def test_container_a_and_container_b_image_separation_strict(gate_setup, reposit
     overlap = b64_a.intersection(b64_b)
     assert not overlap, f"Container A and Container B share identical image data: {overlap}"
 
+
+def test_noisy_preliminary_reads_dispatch_only_final_consensus_post(gate_setup, repository, snapshots, mock_cloud_settings):
+    """
+    Verify that when early frames yield noisy reads (LASU2004222, FSZU1228227) before
+    the authoritative consensus read (DFSU2004225), the system dispatches EXACTLY ONE
+    authoritative POST to the cloud API with DFSU2004225, and zero premature POSTs for LASU or FSZU.
+    """
+    cams = [c for c in gate_setup if c.gate_id == 'LANE-IN']
+    cam_ids = [c.id for c in cams]
+
+    session = ContainerPassageSession('TRACK_NOISY_01', 'LANE-IN', 'ENTRY', cam_ids, datetime.now(timezone.utc))
+    t0 = datetime.now(timezone.utc)
+
+    # 1. Early noisy frames and reads
+    f1 = _create_sharp_test_frame('LASU2004222')
+    session.add_frame(cams[0].id, f1, t0, [Detection(cams[0].id, t0, 'container', 0.90, (10, 10, 300, 200))],
+                      ocr_read=OCRRead('LASU2004222', 0.85))
+
+    t1 = t0 + timedelta(seconds=2)
+    f2 = _create_sharp_test_frame('FSZU1228227')
+    session.add_frame(cams[1].id, f2, t1, [Detection(cams[1].id, t1, 'container', 0.88, (10, 10, 300, 200))],
+                      ocr_read=OCRRead('FSZU1228227', 0.82))
+
+    # 2. Strong clear reads on multiple sharp frames for true container DFSU2004225
+    for i in range(4):
+        t_clear = t1 + timedelta(seconds=1 + i)
+        f_clear = _create_sharp_test_frame('DFSU2004225')
+        session.add_frame(cams[2].id, f_clear, t_clear, [Detection(cams[2].id, t_clear, 'container', 0.98, (10, 10, 300, 200))],
+                          ocr_read=OCRRead('DFSU2004225', 0.96))
+
+    event_id = repository.finalize_passage_session(session, snapshots)
+
+    # Verify local database resolved DFSU2004225 with 100% consensus
+    db_ev = repository.event(event_id)
+    assert db_ev['container_number'] == 'DFSU2004225'
+    assert db_ev['status'] == 'CONFIRMED'
+
+    dispatcher = CloudOutboxDispatcher(mock_cloud_settings, repository=repository, snapshots=snapshots)
+
+    post_calls = []
+
+    def mock_post(payload):
+        post_calls.append(payload)
+        return {
+            "visitDatabaseId": "afcf4cc6-8d78-4806-acf2-42eb18e4ef8d",
+            "visitId": "VISIT-DFSU2004225",
+            "eventId": "CLOUD-DFSU2004225",
+            "eventType": "GATE_IN"
+        }
+
+    with patch.object(dispatcher.session, 'post_gate_event', side_effect=mock_post), \
+         patch.object(dispatcher.session, 'put_gate_event_images', return_value=True):
+        dispatcher.start()
+        dispatcher.enqueue(None, event_id, stage='POST', force=True)
+
+        for _ in range(40):
+            if len(post_calls) >= 1:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+    assert len(post_calls) == 1, f"Expected exactly 1 POST call for this passage, got {len(post_calls)}"
+    dispatched_container = post_calls[0]['Containers'][0]['ContainerNumber']
+    assert dispatched_container == 'DFSU2004225', f"Expected DFSU2004225 dispatched to cloud, got {dispatched_container}"
+    assert 'LASU2004222' not in [p['Containers'][0]['ContainerNumber'] for p in post_calls]
+    assert 'FSZU1228227' not in [p['Containers'][0]['ContainerNumber'] for p in post_calls]
+
+

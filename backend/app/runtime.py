@@ -728,10 +728,26 @@ class GateRuntime:
                 and (d.bbox[3] - d.bbox[1]) >= 10.0
             ]
             has_cntr_number = any(d.class_name == 'container_number' for d in container_dets)
-            active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_1')
-            if not active_slot_session:
-                active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_2')
-            target_slot = active_slot_session.container_slot if active_slot_session else 'CONTAINER_1'
+            target_slot = None
+            if tracks:
+                t_id = tracks[0].id
+                s1 = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_1')
+                s2 = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_2')
+                if s1 and t_id in s1.tracks_by_camera.get(camera.id, set()):
+                    target_slot = 'CONTAINER_1'
+                elif s2 and t_id in s2.tracks_by_camera.get(camera.id, set()):
+                    target_slot = 'CONTAINER_2'
+                elif s2 and s2.track_id == t_id:
+                    target_slot = 'CONTAINER_2'
+                elif s1 and s1.track_id == t_id:
+                    target_slot = 'CONTAINER_1'
+            if not target_slot:
+                active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_1')
+                if not active_slot_session or (active_slot_session.clear_since is not None and self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_2')):
+                    active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_2')
+                target_slot = active_slot_session.container_slot if active_slot_session else 'CONTAINER_1'
+            else:
+                active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot=target_slot)
 
             # Record if there is an active session, OR if container_number is directly visible
             if container_dets and (active_slot_session or has_cntr_number):
@@ -1373,13 +1389,19 @@ class GateRuntime:
                                     additional[c.id] = best_c.image
                                     continue
 
-                        # 2. Only fallback to live worker frame if contemporaneous (<= 2.0s) and lane session has not cleared
+                        # 2. Only fallback to live worker frame if strictly contemporaneous (<= 0.4s) and lane session has not cleared.
+                        # Strict container isolation: NEVER pull live worker frame if multiple containers/twin trailers are active!
+                        has_multiple_containers = bool(
+                            getattr(self, 'passage_sessions', None) and
+                            self.passage_sessions.get_active_session(job.gate_id, container_slot='CONTAINER_1') and
+                            self.passage_sessions.get_active_session(job.gate_id, container_slot='CONTAINER_2')
+                        )
                         w = self.manager.workers.get(c.id)
-                        if w and (not target_session or (target_session.clear_since is None and not target_session.finalized)):
+                        if w and not has_multiple_containers and (not target_session or (target_session.clear_since is None and not target_session.finalized)):
                             latest_f = w.latest()
                             if latest_f and getattr(latest_f, 'image', None) is not None:
                                 time_delta = abs((latest_f.timestamp - job.frame.timestamp).total_seconds())
-                                if time_delta <= 1.2:
+                                if time_delta <= 0.4:
                                     prev = self._preview_detections.get(c.id)
                                     prev_dets = prev[2] if prev and len(prev) >= 3 else ()
                                     has_cntr = any(

@@ -426,6 +426,9 @@ class ContainerPassageSession:
                             txt = getattr(val, 'normalized_text', '') or ''
                             if txt and len(txt) == 11 and is_distinct_container(self.confirmed_container_number, txt):
                                 continue
+                        # Strict track isolation: reject frame candidates belonging to a different container track
+                        if self.track_id is not None and getattr(f, 'track_id', None) is not None and f.track_id != self.track_id:
+                            continue
                         valid_frames.append(f)
                     if valid_frames:
                         best = max(valid_frames, key=lambda f: (self._identity_read_matches(f), f.quality_score))

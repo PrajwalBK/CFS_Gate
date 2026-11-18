@@ -157,11 +157,24 @@ class EventManager:
         evidence.event_id = event_id
         evidence.confirmed = confirmed
 
-        # Two-stage cloud integration:
-        # Step 1: Immediately POST gate event with initial confirmed OCR and any immediately available image.
-        # Step 2: Background multi-camera passage session continues and later triggers PUT with final evidence.
+        # Gate cloud dispatch behind passage session completion or multi-read consensus:
+        # If the runtime has an active passage session for this lane, do NOT prematurely dispatch a Stage 1 POST
+        # with an unverified single-frame OCR read (which could be an optical typo or chassis marking).
+        # The authoritative passage session finalization in runtime._commit_passage_session() will dispatch
+        # the single 100% consensus container event with clean multi-camera proof.
+        has_active_passage_session = False
+        if self.runtime and getattr(self.runtime, 'passage_sessions', None):
+            slot_name = getattr(obs, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+            act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id, container_slot=slot_name)
+            if act_sess and not getattr(act_sess, 'finalized', False):
+                has_active_passage_session = True
+
         is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
-        should_dispatch_post = obs.confirmed and is_ocr_valid and (event_id not in self._dispatched_events)
+        should_dispatch_post = (
+            obs.confirmed and is_ocr_valid
+            and not has_active_passage_session
+            and (event_id not in self._dispatched_events)
+        )
         if self.dispatcher and should_dispatch_post:
             t_api0 = time.perf_counter()
             self._dispatched_events.add(event_id)
@@ -211,8 +224,19 @@ class EventManager:
             event_id, created = self.repository.save_observation(
                 obs, self.snapshots, self.settings.dedup_seconds, additional_frames, **options
             )
+        has_active_passage_session = False
+        if self.runtime and getattr(self.runtime, 'passage_sessions', None):
+            slot_name = getattr(obs, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+            act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id, container_slot=slot_name)
+            if act_sess and not getattr(act_sess, 'finalized', False):
+                has_active_passage_session = True
+
         is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
-        should_dispatch_post = obs.confirmed and is_ocr_valid and (event_id not in self._dispatched_events)
+        should_dispatch_post = (
+            obs.confirmed and is_ocr_valid
+            and not has_active_passage_session
+            and (event_id not in self._dispatched_events)
+        )
         if self.dispatcher and should_dispatch_post:
             self._dispatched_events.add(event_id)
             self.dispatcher.enqueue(
