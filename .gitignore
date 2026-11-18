@@ -168,3 +168,6 @@ rollback-backups/
 # Nested clones & datasets
 ai-video-based-inventory/
 dataset/
+
+Ultralytics/
+backend/Ultralytics/

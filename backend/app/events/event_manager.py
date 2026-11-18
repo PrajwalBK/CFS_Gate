@@ -49,7 +49,8 @@ class EventManager:
         votes = Counter(r.normalized_text for r in good)
         best, count = votes.most_common(1)[0] if votes else (None, 0)
         tied = sum(v == count for v in votes.values()) > 1
-        confirmed = count >= self.settings.ocr_confirmations and not tied
+        min_required = self.settings.ocr_confirmations if ongoing_event_id else max(2, self.settings.ocr_confirmations)
+        confirmed = count >= min_required and not tied
 
         # Early confirmation: If at least 2 distinct observations agree on a valid check-digit code, confirm immediately
         if not confirmed and count >= 2 and not tied:
@@ -107,7 +108,13 @@ class EventManager:
                             val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
                             from app.database.repositories.gate import is_distinct_container
                             if lane_num and val_num and is_distinct_container(lane_num, val_num):
-                                ongoing_event_id = None
+                                lane_ts = active_lane.get('last_seen')
+                                frame_ts = getattr(getattr(job, 'frame', None), 'timestamp', None)
+                                time_diff = abs((frame_ts - lane_ts).total_seconds()) if (lane_ts and frame_ts) else 999.0
+                                if time_diff <= 25.0:
+                                    ongoing_event_id = active_lane.get('event_id')
+                                else:
+                                    ongoing_event_id = None
                             else:
                                 ongoing_event_id = active_lane.get('event_id')
 

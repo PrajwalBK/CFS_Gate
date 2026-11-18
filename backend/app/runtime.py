@@ -1434,7 +1434,13 @@ class GateRuntime:
                             val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
                             from app.database.repositories.gate import is_distinct_container
                             if lane_num and val_num and is_distinct_container(lane_num, val_num):
-                                ongoing = None
+                                lane_ts = active_lane.get('last_seen')
+                                frame_ts = getattr(getattr(job, 'frame', None), 'timestamp', None)
+                                time_diff = abs((frame_ts - lane_ts).total_seconds()) if (lane_ts and frame_ts) else 999.0
+                                if time_diff <= 25.0:
+                                    ongoing = active_lane.get('event_id')
+                                else:
+                                    ongoing = None
                             else:
                                 ongoing = active_lane.get('event_id')
             result = self.events.observe(job, validation, additional_frames=additional,

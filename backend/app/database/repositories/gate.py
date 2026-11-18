@@ -915,7 +915,7 @@ class GateRepository:
                             pass  # Distinct containers! Never merge!
                         else:
                             time_diff = datetime_diff_seconds(active.timestamp, obs.detection.frame_timestamp)
-                            if not active.cloud_synced and time_diff <= max(dedup_seconds, 60.0):
+                            if not active.cloud_synced and (obs.origin_key.startswith('dwell:') or time_diff <= max(dedup_seconds, 60.0)):
                                 existing = active
 
                 if ongoing_event_id and not existing:
@@ -925,7 +925,7 @@ class GateRepository:
                             pass  # Distinct containers! Never merge!
                         else:
                             time_diff = datetime_diff_seconds(active.timestamp, obs.detection.frame_timestamp)
-                            if not active.cloud_synced and time_diff <= max(dedup_seconds, 60.0):
+                            if not active.cloud_synced and (obs.origin_key.startswith('dwell:') or time_diff <= max(dedup_seconds, 60.0)):
                                 existing = active
 
                 if obs.origin_key.startswith('dwell:') and existing:

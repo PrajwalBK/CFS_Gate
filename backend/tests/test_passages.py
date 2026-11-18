@@ -230,3 +230,24 @@ def test_three_rapid_reads_one_container_fuses_to_single_confirmed_event(reposit
         assert len(confirmed_events) == 1, f"Expected 1 confirmed event, got {len(confirmed_events)}"
         assert confirmed_events[0].container_number == "DFSU2004225"
         assert confirmed_events[0].id == eid
+
+
+def test_stray_single_frame_ocr_cannot_confirm_spurious_event(settings, repository, snapshots, make_job):
+    """
+    Verification: A single stray frame with a coincidentally valid check-digit
+    (like ILCU0053226) without an ongoing event must NOT confirm as a brand new event.
+    """
+    from app.events.event_manager import EventManager
+    from app.domain import Validation
+    event_mgr = EventManager(settings, repository, snapshots)
+
+    job = make_job(origin='gate-out-1:track:85')
+    # Coincidentally valid ISO check digit (e.g. ILCU0053226)
+    val = Validation('ILCU 005322 6', 'ILCU0053226', confidence=0.88,
+                     valid_format=True, valid_check_digit=True, validation_status='VALID')
+
+    # Single observation on a new origin
+    res = event_mgr.observe(job, val, ongoing_event_id=None)
+    # With min_required=2 for brand new events, 1 read cannot confirm and attempts remain (< 4), so res is None
+    assert res is None, "Single stray read must not prematurely confirm or publish a new event"
+

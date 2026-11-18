@@ -570,9 +570,11 @@ class PassageSessionManager:
                         duration = abs((timestamp - session.created_at).total_seconds())
                         idle_from_last = abs((timestamp - session.last_seen).total_seconds())
                         all_cams_captured = bool(session.cameras) and all(bool(session.captured_frames.get(c)) for c in session.cameras)
+                        has_ocr = bool(session.confirmed_container_number or (session.ocr_candidates and any(c.valid_check_digit for c in session.ocr_candidates)))
                         if (session.clear_since is not None and abs((timestamp - session.clear_since).total_seconds()) >= 2.0) or \
                            (idle_from_last >= 8.0) or \
-                           (duration >= 20.0 and (all_cams_captured or idle_from_last >= 4.0)):
+                           (duration >= 20.0 and (all_cams_captured or idle_from_last >= 4.0)) or \
+                           (all_cams_captured and has_ocr):
                             new_track_on_camera = True
                         else:
                             session.record_camera_track(camera_id, track_id)
