@@ -88,7 +88,10 @@ class OCRJobStore:
                 continue
             current = str(row['image']).replace('\\', '/').split('/', 1)[0]
             if current != str(event_id):
-                self.complete(row['id'], event_id)
+                try:
+                    self.complete(row['id'], event_id)
+                except Exception as exc:
+                    log.warning('reconcile_job_complete_failed', extra={'job_id': row['id'], 'event_id': event_id, 'error': str(exc)})
 
     def image_path(self, relative):
         path = (self.image_root / relative).resolve()
@@ -384,7 +387,20 @@ class OCRJobStore:
                 metadata = json.loads(row['metadata'])
                 updates = {}
                 target_dir = self.image_root / str(event_id)
-                target_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                except FileExistsError:
+                    try:
+                        if sys.platform == 'win32':
+                            os.unlink(str(target_dir))
+                        else:
+                            target_dir.unlink(missing_ok=True)
+                    except Exception:
+                        try:
+                            os.rmdir(str(target_dir))
+                        except Exception:
+                            pass
+                    target_dir.mkdir(parents=True, exist_ok=True)
 
                 def rehome(relative, label):
                     if not relative:

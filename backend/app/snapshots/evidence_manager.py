@@ -94,6 +94,32 @@ class EvidenceFolderManager:
         # In-memory mapping of event_id -> active folder path
         self._folder_cache: Dict[str, Path] = {}
 
+        # Self-healing: Clean up any broken legacy junctions/symlinks left behind by moved or deleted folders
+        self._prune_broken_links()
+
+    def _prune_broken_links(self):
+        try:
+            if not self.legacy_root.is_dir():
+                return
+            for item in self.legacy_root.iterdir():
+                try:
+                    os.lstat(item)
+                    if not item.exists():
+                        try:
+                            if sys.platform == 'win32':
+                                os.unlink(str(item))
+                            else:
+                                item.unlink(missing_ok=True)
+                        except Exception:
+                            try:
+                                os.rmdir(str(item))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     @staticmethod
     def get_gate_type(gate_id: str = '', direction: str = '') -> str:
         """Categorize into 'GATE_IN' or 'GATE_OUT'."""
