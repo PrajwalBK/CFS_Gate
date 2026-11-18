@@ -168,12 +168,14 @@ def stream_camera(camera_id: str, request: Request):
 
     def frame_generator():
         import cv2, time
+        last_seq = None
         while True:
             if runtime._stop.is_set():
                 return
             cam = worker(request, camera_id)
             frame = cam.latest()
-            if frame is not None and frame.image is not None:
+            if frame is not None and frame.image is not None and frame.sequence != last_seq:
+                last_seq = frame.sequence
                 img = frame.image
                 if img.shape[1] > 640:
                     img = cv2.resize(img, (640, round(img.shape[0] * 640 / img.shape[1])))
@@ -181,7 +183,7 @@ def stream_camera(camera_id: str, request: Request):
                 if ok:
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-            time.sleep(0.04)  # ~25 FPS smooth playback
+            time.sleep(0.015)  # Fast responsive poll, sends only fresh frames without lag accumulation
 
     return StreamingResponse(frame_generator(), media_type='multipart/x-mixed-replace; boundary=frame')
 

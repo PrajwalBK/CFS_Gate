@@ -794,3 +794,120 @@ def test_ocr_prefix_confusion_same_serial_deduplication(gate_setup, repository, 
     ev2 = repository.finalize_passage_session(sess2, snapshots)
 
     assert ev1 == ev2, f"Expected both sessions to resolve to identical event ID, got {ev1} and {ev2}"
+
+
+def test_container_a_and_container_b_image_separation_strict(gate_setup, repository, snapshots, mock_cloud_settings):
+    """
+    Test F: Verify that when Container A (PRSU1563121) and Container B (MSCU1234566)
+    pass on the same lane in close succession:
+    1. Neither event absorbs or re-parents the other's snapshots or drafts.
+    2. Container A's database snapshots and folder contain strictly Container A's images.
+    3. Container B's database snapshots and folder contain strictly Container B's images.
+    4. Both POST and PUT payloads sent to the cloud have 100% isolated, non-overlapping images.
+    """
+    cams = [c for c in gate_setup if c.gate_id == 'LANE-OUT']
+    cam_ids = [c.id for c in cams]
+
+    t_a = datetime.now(timezone.utc)
+    sess_a = ContainerPassageSession('TRACK_PRSU_A', 'LANE-OUT', 'EXIT', cam_ids, t_a)
+    for cam in cams:
+        sess_a.add_frame(cam.id, _create_sharp_test_frame(f'CONTAINER_A_{cam.id}'), t_a,
+                         [Detection(cam.id, t_a, 'container', 0.95, (10, 10, 350, 250))])
+    sess_a.add_ocr_candidate(OCRRead('PRSU1563121', 0.98))
+
+    # 12 seconds later, Container B arrives on the same gate
+    t_b = t_a + timedelta(seconds=12)
+    sess_b = ContainerPassageSession('TRACK_MSCU_B', 'LANE-OUT', 'EXIT', cam_ids, t_b)
+    for cam in cams:
+        sess_b.add_frame(cam.id, _create_sharp_test_frame(f'CONTAINER_B_{cam.id}'), t_b,
+                         [Detection(cam.id, t_b, 'container', 0.95, (10, 10, 350, 250))])
+    sess_b.add_ocr_candidate(OCRRead('MSCU1234566', 0.98))
+
+    # Finalize both sessions
+    ev_a_id = repository.finalize_passage_session(sess_a, snapshots)
+    ev_b_id = repository.finalize_passage_session(sess_b, snapshots)
+
+    assert ev_a_id != ev_b_id, "Distinct containers must have distinct event IDs!"
+
+    # 1. Verify database separation
+    ev_a_record = repository.event(ev_a_id)
+    ev_b_record = repository.event(ev_b_id)
+
+    assert ev_a_record['container_number'] == 'PRSU1563121'
+    assert ev_b_record['container_number'] == 'MSCU1234566'
+
+    for snap in ev_a_record['snapshots']:
+        img_p = snap['image_path']
+        assert 'MSCU1234566' not in img_p, f"Container A contains Container B snapshot path: {img_p}"
+
+    for snap in ev_b_record['snapshots']:
+        img_p = snap['image_path']
+        assert 'PRSU1563121' not in img_p, f"Container B contains Container A snapshot path: {img_p}"
+
+    # 2. Verify Cloud Dispatcher POST and PUT payloads
+    dispatcher = CloudOutboxDispatcher(mock_cloud_settings, repository=repository, snapshots=snapshots)
+
+    post_payloads = {}
+    put_payloads = {}
+
+    def mocked_post(payload):
+        eid = payload['id']
+        post_payloads[eid] = payload
+        return {
+            'eventId': f'CLOUD-{eid[:8]}',
+            'visitId': f'VISIT-{eid[:8]}'
+        }
+
+    def mocked_put(cloud_id, payload):
+        put_payloads[cloud_id] = payload
+        return True
+
+    with patch.object(dispatcher.session, 'post_gate_event', side_effect=mocked_post), \
+         patch.object(dispatcher.session, 'put_gate_event_images', side_effect=mocked_put):
+
+        dispatcher.start()
+        dispatcher.enqueue(None, ev_a_id, stage='POST', force=True)
+        dispatcher.enqueue(None, ev_b_id, stage='POST', force=True)
+
+        for _ in range(50):
+            if len(put_payloads) == 2:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+    assert len(post_payloads) == 2, f"Expected 2 POST calls, got {len(post_payloads)}"
+    assert len(put_payloads) == 2, f"Expected 2 PUT calls, got {len(put_payloads)}"
+
+    # Check Container A's POST payload
+    post_a = post_payloads[ev_a_id]
+    assert post_a['Containers'][0]['ContainerNumber'] == 'PRSU1563121'
+    post_a_imgs = post_a['Containers'][0]['Images']
+    assert len(post_a_imgs) == 3, f"Expected 3 images for Container A, got {len(post_a_imgs)}"
+
+    # Check Container B's POST payload
+    post_b = post_payloads[ev_b_id]
+    assert post_b['Containers'][0]['ContainerNumber'] == 'MSCU1234566'
+    post_b_imgs = post_b['Containers'][0]['Images']
+    assert len(post_b_imgs) == 3, f"Expected 3 images for Container B, got {len(post_b_imgs)}"
+
+    # Check Container A's PUT payload
+    cloud_a_id = f'CLOUD-{ev_a_id[:8]}'
+    put_a = put_payloads[cloud_a_id]
+    assert put_a['Containers'][0]['ContainerNumber'] == 'PRSU1563121'
+    put_a_imgs = put_a['Containers'][0]['Images']
+    assert len(put_a_imgs) == 3
+
+    # Check Container B's PUT payload
+    cloud_b_id = f'CLOUD-{ev_b_id[:8]}'
+    put_b = put_payloads[cloud_b_id]
+    assert put_b['Containers'][0]['ContainerNumber'] == 'MSCU1234566'
+    put_b_imgs = put_b['Containers'][0]['Images']
+    assert len(put_b_imgs) == 3
+
+    # Check that images in Container A do not share base64 content with Container B
+    b64_a = {img['Image'] for img in put_a_imgs}
+    b64_b = {img['Image'] for img in put_b_imgs}
+    overlap = b64_a.intersection(b64_b)
+    assert not overlap, f"Container A and Container B share identical image data: {overlap}"
+

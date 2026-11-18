@@ -8,7 +8,10 @@ class OpenCVStream:
         # Suppress native decoder logs that can include credential-bearing URLs.
         os.environ.setdefault('OPENCV_FFMPEG_LOGLEVEL', '-8')
         os.environ.setdefault('OPENCV_LOG_LEVEL', 'SILENT')
-        os.environ.setdefault('OPENCV_FFMPEG_CAPTURE_OPTIONS', 'rtsp_transport;tcp')
+        # Low-latency real-time RTSP capture options: disable internal buffering, enforce TCP, and minimize delay
+        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = (
+            'rtsp_transport;tcp|fflags;nobuffer|max_delay;500000|flags;low_delay'
+        )
         import cv2
         if hasattr(cv2, 'setLogLevel'):
             cv2.setLogLevel(0)

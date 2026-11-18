@@ -4,6 +4,7 @@ import os
 import queue as queue_module
 import sys
 import threading
+import time
 import types
 import logging
 from app.domain import OCRRead
@@ -64,6 +65,10 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
         os.environ['PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT'] = 'False'
         os.environ['FLAGS_use_mkldnn'] = '0'
         os.environ['FLAGS_enable_pir_api'] = '0'
+        if 'PADDLE_PDX_CACHE_HOME' not in os.environ:
+            pdx_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'paddlex'))
+            if os.path.isdir(pdx_dir):
+                os.environ['PADDLE_PDX_CACHE_HOME'] = pdx_dir
         from paddleocr import PaddleOCR
         device = 'gpu:0' if use_gpu and paddle.is_compiled_with_cuda() else 'cpu'
         paddle.set_device(device)
@@ -101,17 +106,31 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
                 output = list(engine.predict(image))
                 payload = output[0].json if output else {}
                 text, confidence = _paddle_text(payload)
-                # Handle vertical text crops (e.g. ECMU 5580439 on vertical corner post)
+                import re
+                has_iso = bool(re.search(r'[A-Z]{3}[UJZ][\s-]*(?:[0-9][\s-]*){6,7}', text.upper()) or
+                               re.search(r'[1-4LMN][0-9][GVRHBUTP][0-9A-Z]', text.upper()))
+                # Multi-angle / orientation handling (vertical corner posts, 180-deg inverted markings)
                 if hasattr(image, 'shape') and len(image.shape) >= 2:
                     h, w = image.shape[:2]
+                    rotations = []
                     if h > 1.25 * w or (not text.strip() and h > w):
+                        import cv2
+                        rotations.extend([cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE])
+                    if not has_iso or confidence < 0.85:
+                        import cv2
+                        rotations.append(cv2.ROTATE_180)
+                    for rot in rotations:
                         try:
                             import cv2
-                            rot_img = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                            rot_img = cv2.rotate(image, rot)
                             rot_out = list(engine.predict(rot_img))
                             rot_payload = rot_out[0].json if rot_out else {}
                             rot_text, rot_conf = _paddle_text(rot_payload)
-                            if (not text.strip() and rot_text.strip()) or rot_conf > confidence:
+                            rot_has_iso = bool(re.search(r'[A-Z]{3}[UJZ][\s-]*(?:[0-9][\s-]*){6,7}', rot_text.upper()) or
+                                               re.search(r'[1-4LMN][0-9][GVRHBUTP][0-9A-Z]', rot_text.upper()))
+                            if rot_has_iso and (not has_iso or rot_conf > confidence):
+                                text, confidence, has_iso = rot_text, rot_conf, True
+                            elif not has_iso and rot_conf > confidence:
                                 text, confidence = rot_text, rot_conf
                         except Exception:
                             pass
@@ -125,14 +144,18 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
 class PaddleOCREngine:
     """PP-OCRv6 primary reader backed by a persistent, GPU-only worker."""
     def __init__(self, settings):
+        self._settings = settings
         self._lock, self._sequence = threading.Lock(), 0
         self._context = get_context('spawn')
-        self._requests = self._context.Queue(maxsize=8)
+        self._requests = self._context.Queue(maxsize=1)
         self._responses = self._context.Queue(maxsize=1)
+        self._start_worker()
+
+    def _start_worker(self):
         self._process = self._context.Process(
             target=_paddle_worker,
-            args=(self._requests, self._responses, bool(settings.ocr_gpu),
-                  settings.paddle_ocr_detection_model, settings.paddle_ocr_recognition_model),
+            args=(self._requests, self._responses, bool(self._settings.ocr_gpu),
+                  self._settings.paddle_ocr_detection_model, self._settings.paddle_ocr_recognition_model),
             name='gate-paddle-ocr', daemon=True,
         )
         self._process.start()
@@ -148,22 +171,59 @@ class PaddleOCREngine:
         log.info('paddle_ocr_ready', extra={'device': self.device})
 
     def read(self, image) -> OCRRead:
-        if image is None or getattr(image, 'size', 0) == 0 or not self._process.is_alive():
+        if image is None or getattr(image, 'size', 0) == 0:
             return OCRRead('', 0.0)
+        if not self._process.is_alive():
+            log.warning('paddle_ocr_worker_not_alive_restarting')
+            try:
+                self.close()
+                self._requests = self._context.Queue(maxsize=1)
+                self._responses = self._context.Queue(maxsize=1)
+                self._start_worker()
+            except Exception as e:
+                log.error('paddle_ocr_restart_failed', extra={'error': str(e)})
+                return OCRRead('', 0.0)
+
         with self._lock:
+            # 1. Drain any leftover responses from previous timed-out calls
+            while not self._responses.empty():
+                try:
+                    self._responses.get_nowait()
+                except (queue_module.Empty, ValueError, OSError):
+                    break
+
             self._sequence += 1
             request_id = self._sequence
             try:
                 self._requests.put((request_id, image), timeout=5)
-                kind, returned_id, text, confidence, error = self._responses.get(timeout=20)
-            except (queue_module.Empty, queue_module.Full):
+            except queue_module.Full:
                 log.warning('paddle_ocr_timeout_or_busy')
                 return OCRRead('', 0.0)
-            if kind != 'result' or returned_id != request_id or error:
-                err_detail = error or 'unexpected response'
-                log.warning(f'paddle_ocr_read_failed: {err_detail}', extra={'error_type': err_detail.split(':')[0]})
-                return OCRRead('', 0.0)
-            return OCRRead(text[:4096], float(confidence))
+
+            # 2. Wait up to 20 seconds for response matching this request_id
+            deadline = time.monotonic() + 20.0
+            while True:
+                remaining = max(0.05, deadline - time.monotonic())
+                try:
+                    kind, returned_id, text, confidence, error = self._responses.get(timeout=remaining)
+                except (queue_module.Empty, queue_module.Full):
+                    log.warning('paddle_ocr_timeout_or_busy')
+                    return OCRRead('', 0.0)
+
+                # Discard stale responses from earlier abandoned requests and keep waiting
+                if returned_id < request_id:
+                    log.debug('paddle_ocr_stale_response_discarded', extra={'stale_id': returned_id, 'expected_id': request_id})
+                    if time.monotonic() >= deadline:
+                        log.warning('paddle_ocr_timeout_or_busy')
+                        return OCRRead('', 0.0)
+                    continue
+
+                if kind != 'result' or returned_id != request_id or error:
+                    err_detail = error or f'unexpected response (expected {request_id}, got {returned_id}, kind={kind})'
+                    log.warning(f'paddle_ocr_read_failed: {err_detail}', extra={'error_type': err_detail.split(':')[0]})
+                    return OCRRead('', 0.0)
+
+                return OCRRead(text[:4096], float(confidence))
 
     def read_iso(self, image) -> OCRRead:
         import re

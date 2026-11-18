@@ -13,6 +13,7 @@ import io
 import json
 import logging
 from queue import Empty, Full, Queue
+import re
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -289,9 +290,19 @@ class ProsperSession:
         if res.status_code in (500, 502, 503, 504):
             body_text = res.text[:400].strip()
             # Detect known Prosper API server-side bugs:
+            # - fk_gate_event_container_event / DbUpdateException: cloud database foreign key constraint failure on GATE_OUT
             # - DbUpdateConcurrencyException: optimistic concurrency failure on visits table (GATE_OUT bug)
             # - ck_departure: check constraint violation when GATE_IN has no corresponding visit
-            if 'DbUpdateConcurrencyException' in body_text:
+            if 'fk_gate_event_container_event' in body_text or 'saving the entity changes' in body_text:
+                event_type = payload.get('EventType', '')
+                log.warning(
+                    'prosper_gate_event_server_schema_bug: Cloud server EF Core constraint failure (fk_gate_event_container_event). '
+                    'Event preserved in local database; retired from 15s retry storm. EventType=%s VisitId=%s',
+                    event_type, payload.get('VisitId', ''),
+                    extra={'status_code': 500, 'exception': 'fk_gate_event_container_event'}
+                )
+                return 'SERVER_ERROR'
+            elif 'DbUpdateConcurrencyException' in body_text:
                 event_type = payload.get('EventType', '')
                 log.warning(
                     'prosper_gate_event_concurrency_retry: GATE_OUT concurrency conflict on cloud (known server bug). '
@@ -517,10 +528,14 @@ class CloudOutboxDispatcher:
                 ev = self.repository.event(event_id)
                 if not ev or ev.get('status') != 'CONFIRMED':
                     return
-                if not force and stage == 'POST' and ev.get('cloud_synced') and ev.get('cloud_delivery_state') == 'DELIVERED':
+                if not force and (
+                    (stage == 'POST' and ev.get('cloud_synced') and ev.get('cloud_delivery_state') == 'DELIVERED')
+                    or ev.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'BLOCKED', 'REJECTED', 'DUPLICATE')
+                ):
                     return
+                from app.ocr.validator import is_valid_iso_6346
                 cntr = ev.get('container_number')
-                if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr):
+                if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr) or not is_valid_iso_6346(cntr):
                     return
                 canonical = self.repository.canonical_event_id(event_id)
                 if canonical and canonical != event_id:
@@ -637,7 +652,7 @@ class CloudOutboxDispatcher:
                         event_dir / f"{missing_cam}.png",
                     ] + list(event_dir.glob(f"*{missing_cam}*.jpg")) + list(event_dir.glob(f"*{missing_cam}*.png"))
                     for cand in disk_cands:
-                        if cand.is_file() and not cand.name.endswith('.quality'):
+                        if cand.is_file() and not cand.name.endswith('.quality') and 'crop' not in cand.name.lower() and 'rot180' not in cand.name.lower():
                             cam_snapshots.setdefault(missing_cam, []).append({
                                 'id': f'disk_{missing_cam}',
                                 'camera_id': missing_cam,
@@ -647,6 +662,9 @@ class CloudOutboxDispatcher:
                             break
 
             best_by_camera = {}
+            event_ts = event_record.get('timestamp')
+            from app.database.repositories.gate import is_distinct_container, datetime_diff_seconds
+
             for cam_id, snaps in cam_snapshots.items():
                 best_snap = None
                 best_data = None
@@ -655,16 +673,47 @@ class CloudOutboxDispatcher:
                     try:
                         snap_cam = snap.get('camera_id')
                         snap_ts = snap.get('timestamp')
-                        from app.database.repositories.gate import is_distinct_container, datetime_diff_seconds
+
+                        snap_img_path = str(snap.get('image_path') or '').replace('\\', '/')
+                        is_native = bool(
+                            str(snap.get('event_id') or '') == event_id_str
+                            or (snap_img_path and event_id_str and event_id_str in snap_img_path)
+                        )
+
+                        # 1. Passage window check:
+                        # Strictly cap at 25s from the event passage timestamp to prevent mixing separate truck visits.
+                        max_gap = 25.0
+                        if event_ts and snap_ts and datetime_diff_seconds(event_ts, snap_ts) > max_gap:
+                            continue
+
+                        # 2. Strict container number isolation in image path / directory:
+                        # Extract any 11-char container code in the snapshot path; reject if distinct from this container
+                        path_containers = re.findall(r'[A-Z]{4}[0-9]{7}', snap_img_path)
+                        if path_containers and any(is_distinct_container(cntr1, pc) for pc in path_containers):
+                            log.warning('prosper_snapshot_skipped_foreign_container_folder', extra={
+                                'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1, 'found_container': path_containers
+                            })
+                            continue
+
+                        # 3. Provenance metadata check
+                        prov = snap.get('provenance') or {}
+                        prov_cntr = prov.get('container_number')
+                        if prov_cntr and is_distinct_container(cntr1, prov_cntr):
+                            log.warning('prosper_snapshot_skipped_provenance_container_mismatch', extra={
+                                'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1, 'prov_container': prov_cntr
+                            })
+                            continue
+
+                        # 4. Detection & OCR conflict check
                         is_mismatched = False
                         for det in event_record.get('detections', []):
                             if det.get('camera_id') == snap_cam:
                                 det_ts = det.get('timestamp')
-                                if det_ts and snap_ts and datetime_diff_seconds(det_ts, snap_ts) <= 2.5:
+                                if det_ts and snap_ts and datetime_diff_seconds(det_ts, snap_ts) <= 10.0:
                                     for ocr in event_record.get('ocr_results', []):
                                         if ocr.get('detection_id') == det.get('id'):
                                             ocr_text = ocr.get('normalized_text')
-                                            if ocr_text and ocr.get('valid_check_digit') and is_distinct_container(cntr1, ocr_text):
+                                            if ocr_text and is_distinct_container(cntr1, ocr_text):
                                                 is_mismatched = True
                                                 break
                                     if is_mismatched:
@@ -689,10 +738,10 @@ class CloudOutboxDispatcher:
                                 cands += list(event_dir.glob(f"*{camera_id_str}*.jpg"))
                                 cands += list(event_dir.glob(f"*{camera_id_str}*.png"))
                                 cands += list(event_dir.glob(f"*companion_{camera_id_str}.png"))
+                                cands = [c for c in cands if c.is_file() and not c.name.endswith('.quality') and 'crop' not in c.name.lower() and 'rot180' not in c.name.lower()]
                                 for cand in cands:
-                                    if cand.is_file():
-                                        snap_p = cand
-                                        break
+                                    snap_p = cand
+                                    break
                         if not snap_p.is_file():
                             continue
                         data = snap_p.read_bytes()
@@ -710,6 +759,9 @@ class CloudOutboxDispatcher:
                         if not has_container:
                             continue
                         score += 10000.0
+                        # Prefer snapshots that natively belong to this event ID
+                        if snap_img_path.startswith(event_id_str):
+                            score += 2000.0
                         if primary_snap_id and snap.get('id') == primary_snap_id:
                             score += 1000.0
                         if score > best_score:
@@ -832,9 +884,12 @@ class CloudOutboxDispatcher:
                 if self._stop.is_set():
                     break
                 event_id = ev['id']
+                if ev.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'BLOCKED', 'REJECTED', 'DUPLICATE'):
+                    continue
                 cntr = ev.get('container_number')
+                from app.ocr.validator import is_valid_iso_6346
                 import re
-                if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr):
+                if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr) or not is_valid_iso_6346(cntr):
                     self.repository.mark_cloud_synced(event_id)
                     continue
                 cloud_ev_id = ev.get('cloud_event_id')
@@ -886,8 +941,12 @@ class CloudOutboxDispatcher:
                 event_record = self.repository.event(event_id) if self.repository else None
                 if self.repository and event_record:
                     eff_stage = ('PUT' if event_record.get('cloud_event_id') else 'POST') if stage == 'AUTO' else stage
-                    if event_record.get('status') != 'CONFIRMED' or (eff_stage == 'POST' and event_record.get('cloud_synced') and not item.get('force') and event_record.get('cloud_delivery_state') == 'DELIVERED'):
-                        print(f'EXITED AT CHECK 1: status={event_record.get("status")}, eff_stage={eff_stage}, cloud_synced={event_record.get("cloud_synced")}, state={event_record.get("cloud_delivery_state")}')
+                    if event_record.get('status') != 'CONFIRMED' or (
+                        not item.get('force') and (
+                            (eff_stage == 'POST' and event_record.get('cloud_synced') and event_record.get('cloud_delivery_state') == 'DELIVERED')
+                            or event_record.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'BLOCKED', 'REJECTED', 'DUPLICATE')
+                        )
+                    ):
                         self.queue.task_done()
                         continue
                     canonical = self.repository.canonical_event_id(event_id)
@@ -906,9 +965,22 @@ class CloudOutboxDispatcher:
                         continue
 
                 cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
+                from app.ocr.validator import is_valid_iso_6346, recover_visual_confusion, KNOWN_BIC_PREFIXES
+                if cntr1 and not is_valid_iso_6346(cntr1):
+                    fixed = recover_visual_confusion(cntr1)
+                    if fixed and is_valid_iso_6346(fixed):
+                        cntr1 = fixed
+                if cntr1 and is_valid_iso_6346(cntr1) and cntr1[:4] not in KNOWN_BIC_PREFIXES:
+                    fixed = recover_visual_confusion(cntr1)
+                    if fixed and fixed[:4] in KNOWN_BIC_PREFIXES and is_valid_iso_6346(fixed):
+                        cntr1 = fixed
+                        if event_record and self.repository:
+                            try:
+                                self.repository.update_container_number(event_id, fixed)
+                            except Exception:
+                                pass
                 import re
-                if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1):
-                    print(f'EXITED AT OCR CHECK: cntr1={cntr1}')
+                if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1) or not is_valid_iso_6346(cntr1):
                     log.warning('prosper_dispatch_skipped_invalid_ocr', extra={'event_id': event_id, 'container_number': cntr1})
                     if self.repository:
                         self.repository.mark_cloud_synced(event_id)
@@ -936,16 +1008,29 @@ class CloudOutboxDispatcher:
                     cloud_ev_id = event_record.get('cloud_event_id') if event_record else None
                     stage = 'PUT' if cloud_ev_id else 'POST'
 
-                # If stage is POST, wait briefly if active passage session is still accumulating reads
-                # to guarantee that the full character consensus and maximum confidence percentage are used.
+                # STAGE 1 POST: Wait until the container passage has fully finalized and all multi-camera
+                # evidence has been collected. Prioritize 100% accuracy over immediate dispatch:
+                # wait up to 25.0s for passage session finalization and companion camera capture.
                 if stage == 'POST' and not item.get('force'):
                     if self.runtime and getattr(self.runtime, 'passage_sessions', None):
                         sess = self.runtime.passage_sessions.get_session_by_event_id(event_id)
-                        if sess and not getattr(sess, 'finalized', False) and (time.monotonic() - float(item.get('enqueued_at', time.monotonic()))) < 3.0:
-                            item['not_before'] = time.monotonic() + 0.3
-                            self.queue.put(item)
-                            self.queue.task_done()
-                            continue
+                        if sess and not getattr(sess, 'finalized', False):
+                            wait_duration = time.monotonic() - float(item.get('enqueued_at', time.monotonic()))
+                            if wait_duration < 25.0:  # Allow ample time for container to clear the gate
+                                item['not_before'] = time.monotonic() + 0.5
+                                self.queue.put(item)
+                                self.queue.task_done()
+                                continue
+                            else:
+                                log.warning('prosper_post_proceeding_after_session_wait', extra={'event_id': event_id, 'wait_duration': wait_duration})
+
+                    # Refresh event_record to pick up finalized consensus and newly saved snapshots
+                    if self.repository:
+                        fresh = self.repository.event(event_id)
+                        if fresh:
+                            event_record = fresh
+                            if event_record.get('container_number'):
+                                cntr1 = event_record.get('container_number')
 
                 # Common container metadata extraction
                 iso_s1 = str((event_record.get('iso_code_1') if event_record else None) or (getattr(obs.ocr, 'size_type', None) if obs and obs.ocr else None) or '')
@@ -1021,6 +1106,8 @@ class CloudOutboxDispatcher:
                         c1_images, expected_gate_cams, captured_cams = self._build_multi_camera_images(
                             event_record, obs, img, allow_single_fallback=True
                         )
+                        valid_images = [img_item for img_item in c1_images if img_item.get('Image', '').startswith('data:image/')]
+
                         if obs and hasattr(obs, 'detection'):
                             dt_captured = obs.detection.frame_timestamp
                         elif event_record and event_record.get('timestamp'):
@@ -1057,13 +1144,14 @@ class CloudOutboxDispatcher:
                                 'ContainerSize': cs1 or None,
                                 'SizeCode': iso_s1 or None,
                                 'Position': 'SINGLE',
-                                'Images': c1_images
+                                'Images': valid_images if valid_images else c1_images
                             }]
                         }
 
                     from app.ocr.validator import is_valid_iso_6346
                     numbers = [c.get('ContainerNumber') for c in payload.get('Containers', [])]
                     if not numbers or not all(is_valid_iso_6346(n) for n in numbers):
+                        log.warning('prosper_post_blocked_invalid_container', extra={'event_id': event_id, 'numbers': numbers})
                         if self.repository:
                             self.repository.mark_cloud_delivery(event_id, 'BLOCKED', 'Invalid container checksum')
                         self.queue.task_done()
@@ -1085,13 +1173,13 @@ class CloudOutboxDispatcher:
                             )
                         except Exception:
                             log.exception('prosper_alert_failed: %s', event_id)
-                    elif success in ('CONFLICT', 'REJECTED'):
+                    elif success in ('CONFLICT', 'REJECTED', 'SERVER_ERROR'):
                         if self.repository:
                             try:
                                 self.repository.mark_cloud_delivery(
                                     event_id,
                                     success,
-                                    f'Cloud returned {success} (terminal conflict/rejection: container already in yard or invalid state)'
+                                    f'Cloud returned {success} (terminal server-side constraint error or conflict: {success})'
                                 )
                             except Exception:
                                 pass
@@ -1207,6 +1295,10 @@ class CloudOutboxDispatcher:
 
                     # Strict validation: verify images belong to this event and gate cameras
                     orig_cntr = event_record.get('container_number')
+                    if orig_cntr and not is_valid_iso_6346(orig_cntr):
+                        fixed_cntr = recover_visual_confusion(orig_cntr)
+                        if fixed_cntr and is_valid_iso_6346(fixed_cntr):
+                            orig_cntr = fixed_cntr
                     valid_images = [img_item for img_item in c1_images if img_item.get('Image', '').startswith('data:image/')]
                     if not valid_images:
                         log.warning('prosper_put_skipped_no_valid_images', extra={'event_id': event_id, 'cloud_event_id': cloud_ev_id})

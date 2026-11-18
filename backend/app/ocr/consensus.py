@@ -31,19 +31,22 @@ class CharacterConsensus:
             for r in valid:
                 by_id.setdefault(r.normalized_text, []).append(r)
 
+            from app.ocr.validator import KNOWN_BIC_PREFIXES
             scored = []
             for ident, r_list in by_id.items():
                 count = len(r_list)
                 max_conf = max(r.confidence for r in r_list)
                 best_r = max(r_list, key=lambda r: r.confidence)
-                scored.append((count, max_conf, best_r))
+                is_known_bic = 1 if (ident and len(ident) >= 4 and ident[:4] in KNOWN_BIC_PREFIXES) else 0
+                scored.append((is_known_bic, count, max_conf, best_r))
 
-            scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-            winner_count, winner_conf, winner_read = scored[0]
-            runner_up_count, runner_up_conf, runner_up_read = scored[1]
+            scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            winner_known, winner_count, winner_conf, winner_read = scored[0]
+            runner_up_known, runner_up_count, runner_up_conf, runner_up_read = scored[1]
 
-            # Clear winner if strictly more votes, or significantly higher confidence (>=0.15)
-            if winner_count > runner_up_count or (winner_conf - runner_up_conf) >= 0.15:
+            # Clear winner if verified in BIC registry over unverified candidate,
+            # or strictly more votes, or significantly higher confidence (>=0.15)
+            if (winner_known > runner_up_known) or winner_count > runner_up_count or (winner_conf - runner_up_conf) >= 0.15:
                 return replace(winner_read, size_type=winner_read.size_type or size)
 
             # True tie between conflicting valid IDs with equal votes and similar confidence

@@ -57,13 +57,33 @@ def clear_all():
                 continue
             p = snapshots_dir / item
             try:
-                if p.is_dir():
-                    shutil.rmtree(p)
-                else:
+                if p.is_symlink() or not p.is_dir():
                     p.unlink()
+                else:
+                    try:
+                        shutil.rmtree(p)
+                    except OSError:
+                        os.rmdir(p)
             except Exception as e:
                 print(f"Error removing snapshot {p}: {e}")
         print("Cleared backend/snapshots directory")
+
+    # 3b. Clear evidence directory
+    evidence_dir = base_dir / "evidence"
+    if evidence_dir.exists():
+        for gate_folder in ["GATE_IN", "GATE_OUT"]:
+            gf = evidence_dir / gate_folder
+            if gf.exists():
+                for item in os.listdir(gf):
+                    p = gf / item
+                    try:
+                        if p.is_dir():
+                            shutil.rmtree(p)
+                        else:
+                            p.unlink()
+                    except Exception as e:
+                        print(f"Error removing evidence {p}: {e}")
+        print("Cleared backend/evidence directory")
 
     # 4. Clear ocr-spool images directory
     if spool_images_dir.exists():

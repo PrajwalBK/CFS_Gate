@@ -159,3 +159,74 @@ def test_completed_ocr_recovers_after_restart_as_review(settings,repository,snap
     event=repository.event('recovered')
     assert event['container_number']=='CSQU3054383'
     assert event['status']=='NEEDS_REVIEW'
+
+
+def test_three_rapid_reads_one_container_fuses_to_single_confirmed_event(repository, snapshots):
+    """
+    Test scenario: 1 container physical passage with track shifts and multiple OCR reads:
+    1. Early read on cam 1 with prefix confusion: LASU2004222 (serial 200422)
+    2. Chassis/side read on cam 2: FSZU1228227 (track shifts from 21 to 26)
+    3. Final high-confidence consensus read on cam 3: DFSU2004225 (serial 200422, multiple votes)
+    Verify:
+    - PassageSessionManager maintains ONE continuous session across track changes without premature preemption.
+    - Character consensus resolves to authoritative DFSU2004225.
+    - Exactly ONE confirmed event is created in the database.
+    """
+    from datetime import datetime, timezone
+    from app.config.settings import CameraConfig
+    from app.events.passage_session import PassageSessionManager, ContainerPassageSession
+    from app.domain import OCRRead
+    from app.database.models import GateEvent
+    from sqlalchemy import select
+
+    cams = ['gate-in-1', 'gate-in-2', 'gate-in-3']
+    repository.sync_cameras([
+        CameraConfig(id=cid, name=f'Gate In {i+1}', gate_id='lane-in', source_env=f'CAM{i+1}')
+        for i, cid in enumerate(cams)
+    ])
+
+    mgr = PassageSessionManager()
+    t0 = datetime(2026, 11, 18, 7, 4, 23, tzinfo=timezone.utc)
+    rng = np.random.default_rng(777)
+    img = rng.integers(40, 220, (480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: gate-in-1, track 21 - early prefix misread
+    mgr.record_frame('gate-in-1', 'lane-in', 'ENTRY', img, t0,
+                     [Detection('gate-in-1', t0, 'container', 0.9, (10, 10, 300, 300))],
+                     ocr_read=OCRRead("LASU2004222", 0.85), track_id=21)
+
+    # Frame 2: 3.5s later, gate-in-2, track shifts to 26 - side chassis read
+    t2 = t0 + timedelta(seconds=3.5)
+    mgr.record_frame('gate-in-2', 'lane-in', 'ENTRY', img, t2,
+                     [Detection('gate-in-2', t2, 'container', 0.9, (10, 10, 300, 300))],
+                     ocr_read=OCRRead("FSZU1228227", 0.91), track_id=26)
+
+    # Frame 3-7: 5.9s later, gate-in-3, track shifts to 33 - high confidence true reads
+    t3 = t0 + timedelta(seconds=5.9)
+    for i in range(5):
+        mgr.record_frame('gate-in-3', 'lane-in', 'ENTRY', img, t3 + timedelta(milliseconds=i*200),
+                         [Detection('gate-in-3', t3, 'container', 0.95, (10, 10, 300, 300))],
+                         ocr_read=OCRRead("DFSU2004225", 0.99), track_id=33)
+
+    # Verify session was NOT preempted into multiple fragments
+    active = mgr.active_sessions.get('lane-in:CONTAINER_1')
+    assert active is not None, "Session should remain active during passage"
+    num, iso, conf = active.get_consensus_container_number()
+    assert num == "DFSU2004225", f"Consensus should resolve to true container DFSU2004225, got {num}"
+
+    # Vehicle clears gate 7s after t3
+    t_clear = t3 + timedelta(seconds=7.0)
+    ready = mgr.check_and_finalize(t_clear, gate_clear_seconds=6.0)
+    assert len(ready) == 1, f"Expected 1 finalized passage session, got {len(ready)}"
+
+    eid = repository.finalize_passage_session(ready[0], snapshots)
+
+    # Query all events on lane-in
+    with repository.db.sessions() as session:
+        events = session.scalars(select(GateEvent).where(GateEvent.gate_id == 'lane-in')).all()
+        confirmed_events = [e for e in events if e.status == 'CONFIRMED']
+
+        # Must have exactly ONE confirmed event on lane-in with DFSU2004225
+        assert len(confirmed_events) == 1, f"Expected 1 confirmed event, got {len(confirmed_events)}"
+        assert confirmed_events[0].container_number == "DFSU2004225"
+        assert confirmed_events[0].id == eid

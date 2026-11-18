@@ -58,6 +58,9 @@ COMMON_OCR_CONFUSIONS = {
     ('6', 'G'), ('G', '6'), ('6', 'C'), ('C', '6'), ('K', 'R'), ('R', 'K'),
     ('U', 'V'), ('V', 'U'), ('E', 'F'), ('F', 'E'), ('P', 'F'), ('F', 'P'),
     ('P', 'R'), ('R', 'P'), ('C', 'O'), ('O', 'C'), ('A', '4'), ('4', 'A'),
+    ('2', '1'), ('1', '2'), ('6', '0'), ('0', '6'), ('3', '9'), ('9', '3'),
+    ('1', '6'), ('6', '1'), ('D', 'L'), ('L', 'D'), ('F', 'A'), ('A', 'F'),
+    ('Z', 'D'), ('D', 'Z'), ('D', 'O'), ('O', 'D'), ('D', 'U'), ('U', 'D'),
 }
 
 
@@ -75,44 +78,47 @@ def is_distinct_container(num1: str | None, num2: str | None) -> bool:
     if is_valid_iso_6346(s1) and is_valid_iso_6346(s2):
         d1 = ''.join(c for c in s1 if c.isdigit())
         d2 = ''.join(c for c in s2 if c.isdigit())
-        sim = ocr_similarity_score(s1, s2)
         pref1, pref2 = s1[:4], s2[:4]
+        from app.ocr.validator import KNOWN_BIC_PREFIXES
+        p1_known = pref1 in KNOWN_BIC_PREFIXES
+        p2_known = pref2 in KNOWN_BIC_PREFIXES
+
         matching_prefix_letters = sum(1 for a, b in zip(pref1, pref2) if a == b)
         matching_serial_digits = sum(1 for a, b in zip(d1[:6], d2[:6]) if a == b) if len(d1) >= 6 and len(d2) >= 6 else 0
         body_diff_pairs = [(s1[i], s2[i]) for i in range(min(10, len(s1))) if s1[i] != s2[i]]
         all_body_confused = bool(body_diff_pairs and all((a, b) in COMMON_OCR_CONFUSIONS for a, b in body_diff_pairs))
 
-        # 1. 6 serial digits match exactly (e.g. TONU7922656 vs TCNU7922652):
-        # Same physical container if at least 2 prefix letters match or recognized OCR confusions.
-        # Completely different owner codes (e.g. TGHU vs MSCU with coincidental matching digits on twin trailers) are distinct!
+        sim = ocr_similarity_score(s1, s2)
+
+        # 1. 6 serial digits match exactly (e.g. TONU7922656 vs TCNU7922652, or TCLU2446617 vs ZZGU2446617):
+        # Same physical container if at least 2 prefix letters match, or at least one prefix is unverified in BIC registry.
+        # Completely different owner codes where BOTH are verified BIC operators (e.g. TGHU vs MSCU with coincidental matching digits on twin trailers) are distinct!
         if len(d1) >= 6 and len(d2) >= 6 and (d1[:6] == d2[:6] or (len(s1) >= 10 and len(s2) >= 10 and s1[4:10] == s2[4:10])):
-            if matching_prefix_letters >= 2 or all_body_confused:
+            if matching_prefix_letters >= 2 or all_body_confused or (not p1_known or not p2_known) or sim >= 0.65:
                 return False
             return True
 
-        # 2. At least 5 of 6 serial digits match (e.g. DFSU3084122 vs DISU3014120, EGSU8198223 vs EGSU3198220):
-        # Same physical container when 5 serial digits match and prefix has at least 2 matching letters or OCR confusions.
-        if matching_serial_digits >= 5:
-            if matching_prefix_letters >= 2 or all_body_confused:
+        # 2. Shifted digits / substring overlap (e.g. IAAU1762427 vs AAUU7624279: '76242' in both; IAAU1736011 vs AAUU7360113: '736011' in both):
+        if len(d1) >= 5 and len(d2) >= 5:
+            has_sub = any(d1[k:k+5] in d2 for k in range(len(d1) - 4))
+            if has_sub and (sim >= 0.70 or not p1_known or not p2_known):
                 return False
 
-        # 3. Owner prefix matches (first 3 letters): require at least 3 matching serial digits or similarity >= 0.63
-        if len(s1) >= 4 and len(s2) >= 4 and s1[:3] == s2[:3]:
-            if matching_serial_digits >= 3 or sim >= 0.63:
-                return False
-            return True
-
-        # 4. Differing owner prefix with high similarity or OCR character confusion:
-        # Accommodates 1-2 character substitutions plus resulting check-digit change (up to 3 total character differences)
-        char_diffs = sum(1 for a, b in zip(s1, s2) if a != b)
-        if char_diffs <= 3:
-            if matching_prefix_letters >= 2 and sim >= 0.70:
-                return False
-            if all_body_confused:
-                return False
-
-        if matching_prefix_letters >= 3 and sim >= 0.78:
+        # 3. High visual / OCR similarity (e.g. WISU6443771 vs WHSU6464371: sim=0.818):
+        if sim >= 0.78:
             return False
+
+        # 4. Same or similar prefix (at least 3 letters match, e.g. ESLU2222850 vs ESLU2226100, MSMU5386335 vs MSMU5388338, MRKU1751000 vs MRKU7756009, AXIU1960888 vs AXIU9810380):
+        # Serial digits must have at least 4 matching positions, or at least 3 matching positions with high similarity (>= 0.70), or recognized digit confusions:
+        if matching_prefix_letters >= 3:
+            confused_pairs_count = sum(1 for a, b in body_diff_pairs if (a, b) in COMMON_OCR_CONFUSIONS or (b, a) in COMMON_OCR_CONFUSIONS)
+            if matching_serial_digits >= 4 or (matching_serial_digits >= 3 and sim >= 0.70) or (matching_serial_digits >= 2 and confused_pairs_count >= 2):
+                return False
+
+        # 5. Recognized body confusions across prefix and serial:
+        if matching_prefix_letters >= 2 and all_body_confused:
+            return False
+
         return True
     return False
 
@@ -298,16 +304,20 @@ class GateRepository:
 
                 slot_pos = getattr(session, 'container_slot', 'CONTAINER_1') or 'CONTAINER_1'
                 dedup_sec = float(getattr(self, 'dedup_seconds', 35.0) or 35.0)
+                same_window = float(getattr(self, 'same_container_event_window_seconds', 900.0) or 900.0)
                 delta = timedelta(seconds=max(dedup_sec, 60.0))
+                container_delta = timedelta(seconds=max(same_window, 900.0))
 
                 if not existing and slot_pos == 'CONTAINER_1':
-                    # 1. Search for existing event on the same gate with the exact same container number within delta
+                    # 1. Search for existing event on the same gate with the exact same container number within container_delta (15 mins)
                     if container_num:
                         existing = db_session.scalar(select(GateEvent).where(
                             GateEvent.gate_id == session.gate_id,
                             GateEvent.container_number == container_num,
-                            GateEvent.timestamp >= session.created_at - delta,
-                            GateEvent.timestamp <= session.created_at + delta,
+                            (GateEvent.event_type == session.direction) | (GateEvent.event_type == 'UNKNOWN'),
+                            GateEvent.status != 'DUPLICATE',
+                            GateEvent.timestamp >= session.created_at - container_delta,
+                            GateEvent.timestamp <= session.created_at + container_delta,
                         ).order_by(GateEvent.timestamp.desc()))
 
                         # 2. Suffix / serial match (matching 6 serial digits)
@@ -316,17 +326,21 @@ class GateRepository:
                             num_serial = container_num[4:10]
                             cands = db_session.scalars(select(GateEvent).where(
                                 GateEvent.gate_id == session.gate_id,
-                                GateEvent.timestamp >= session.created_at - delta,
-                                GateEvent.timestamp <= session.created_at + delta,
+                                (GateEvent.event_type == session.direction) | (GateEvent.event_type == 'UNKNOWN'),
+                                GateEvent.status != 'DUPLICATE',
+                                GateEvent.timestamp >= session.created_at - container_delta,
+                                GateEvent.timestamp <= session.created_at + container_delta,
                             ).order_by(GateEvent.timestamp.desc())).all()
                             for c in cands:
                                 c1 = c.container_number or ''
                                 if len(c1) == 11 and c1[4:].isdigit():
-                                    if c1[4:] == suffix or (c1[4:10] == num_serial and not is_distinct_container(container_num, c1)):
+                                    time_gap = abs(datetime_diff_seconds(c.timestamp, session.created_at))
+                                    if c1[4:] == suffix or (c1[4:10] == num_serial and (time_gap <= 45.0 or not is_distinct_container(container_num, c1))):
                                         existing = c
                                         break
 
                     # 3. Absorb any unconfirmed / in-flight draft event created on the lane during this passage
+                    # Unconfirmed drafts on the lane (NEEDS_REVIEW, cloud_synced=False) within delta belong to this transit
                     if not existing and slot_pos == 'CONTAINER_1':
                         draft_cand = db_session.scalars(select(GateEvent).where(
                             GateEvent.gate_id == session.gate_id,
@@ -336,13 +350,21 @@ class GateRepository:
                             GateEvent.timestamp <= session.created_at + delta,
                         ).order_by(GateEvent.timestamp.desc())).first()
                         if draft_cand:
-                            d_num = draft_cand.container_number or ''
-                            if not d_num or not is_valid_iso_6346(d_num) or (container_num and ocr_similarity_score(container_num, d_num) >= 0.40):
-                                existing = draft_cand
+                            existing = draft_cand
+
+                    # 4. If container_num is missing, never merge into a previously confirmed event of another container.
+                    # An unconfirmed detection must remain independent to prevent polluting previous container's evidence.
 
                 target_event_id = existing.id if existing else session.event_id
 
-                if existing and existing.id != session.event_id and snapshots and hasattr(snapshots, 'evidence_manager'):
+                # Only merge folders if both have verified container numbers that match
+                # NEVER merge if container numbers are distinct or if merging an unconfirmed draft into a confirmed container
+                should_merge_folders = (
+                    existing and existing.id != session.event_id and snapshots and hasattr(snapshots, 'evidence_manager')
+                    and existing.container_number and container_num
+                    and not is_distinct_container(existing.container_number, container_num)
+                )
+                if should_merge_folders:
                     snapshots.evidence_manager.merge_event_folders(session.event_id, target_event_id, container_number=container_num)
                 elif snapshots and hasattr(snapshots, 'evidence_manager') and container_num:
                     snapshots.evidence_manager.update_container_number(target_event_id, container_num)
@@ -541,6 +563,35 @@ class GateRepository:
                     }
                 ))
 
+                if container_num and is_valid_iso_6346(container_num):
+                    recent_lane_duplicates = db_session.scalars(select(GateEvent).where(
+                        GateEvent.gate_id == session.gate_id,
+                        GateEvent.id != target_event_id,
+                        GateEvent.status == 'NEEDS_REVIEW',
+                        GateEvent.cloud_synced == False,
+                        GateEvent.timestamp >= session.created_at - delta,
+                        GateEvent.timestamp <= session.created_at + delta,
+                    )).all()
+                    for o_draft in recent_lane_duplicates:
+                        d_cntr = o_draft.container_number or ''
+                        time_gap = abs(datetime_diff_seconds(o_draft.timestamp, session.created_at))
+                        d_digits = ''.join(c for c in d_cntr if c.isdigit())
+                        c_digits = ''.join(c for c in container_num if c.isdigit())
+                        same_serial = bool(len(d_digits) >= 6 and len(c_digits) >= 6 and d_digits[:6] == c_digits[:6])
+                        # Strictly require: draft must match container number or matching serial digits.
+                        # Distinct verified containers must NEVER have their snapshots absorbed!
+                        if not is_distinct_container(container_num, d_cntr) or same_serial:
+                            o_draft.status = 'DUPLICATE'
+                            o_draft.cloud_delivery_state = 'DUPLICATE'
+                            o_draft.cloud_synced = True
+                            dup_snaps = db_session.scalars(select(Snapshot).where(Snapshot.event_id == o_draft.id)).all()
+                            for dsnap in dup_snaps:
+                                if time_gap <= 25.0:
+                                    dsnap.event_id = target_event_id
+                            db_session.execute(
+                                update(DetectionRecord).where(DetectionRecord.event_id == o_draft.id).values(event_id=target_event_id)
+                            )
+
             if snapshots:
                 ev_data = self.event(target_event_id)
                 if ev_data:
@@ -646,20 +697,21 @@ class GateRepository:
                                     break
                     # Dwell/queue recovery: a different camera or a restarted
                     # tracker can produce a new origin several minutes after
-                    # the first read.  If the same validated container is still
+                    # the first read. If the same validated container is still
                     # in the same lane and travelling in the same direction,
                     # bind it to the oldest event instead of creating a second
-                    # cloud visit.  This intentionally does not broaden normal
-                    # (non-dwell) repeat-visit deduplication.
-                    if not existing and obs.origin_key.startswith('dwell:'):
-                        long_delta = timedelta(seconds=max(float(same_container_window_seconds or 0), dedup_seconds))
+                    # cloud visit.
+                    if not existing and obs.origin_key.startswith(('dwell:', 'session:')):
+                        dwell_window = max(float(same_container_window_seconds or 0), dedup_seconds)
+                        long_delta = timedelta(seconds=dwell_window)
                         existing = session.scalar(select(GateEvent).where(
                             GateEvent.gate_id == obs.gate_id,
                             GateEvent.container_number == number,
                             direction_match,
                             GateEvent.status.in_(['CONFIRMED', 'NEEDS_REVIEW']),
+                            func.coalesce(GateEvent.cloud_delivery_state, 'PENDING') != 'DUPLICATE',
                             GateEvent.timestamp >= obs.detection.frame_timestamp - long_delta,
-                            GateEvent.timestamp <= obs.detection.frame_timestamp,
+                            GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
                         ).order_by(GateEvent.timestamp.asc()))
                         if not existing and len(number) == 11 and number[4:].isdigit():
                             suffix = number[4:]
@@ -669,7 +721,7 @@ class GateRepository:
                                 direction_match,
                                 GateEvent.status.in_(['CONFIRMED', 'NEEDS_REVIEW']),
                                 GateEvent.timestamp >= obs.detection.frame_timestamp - long_delta,
-                                GateEvent.timestamp <= obs.detection.frame_timestamp,
+                                GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
                             ).order_by(GateEvent.timestamp.asc())).all()
                             for cand in candidates:
                                 c1 = cand.container_number or ''
@@ -694,7 +746,8 @@ class GateRepository:
                         for cand in recent_candidates:
                             time_diff = datetime_diff_seconds(cand.timestamp, obs.detection.frame_timestamp)
                             c_num = cand.container_number or ''
-                            ocr_sim = ocr_similarity_score(number, c_num)
+                            eff_num = number or (obs.ocr.normalized_text if obs.ocr else None)
+                            ocr_sim = ocr_similarity_score(eff_num, c_num)
                             match_found = False
 
                             # Distinct verified container numbers must NEVER be merged as duplicates by static camera background similarity.
@@ -703,8 +756,8 @@ class GateRepository:
                                     continue  # Distinct physical containers! NEVER merge!
 
                             # 1. Matching serial digits (e.g. AXU1960888 vs AXIU1960888: both have 1960888)
-                            if number and c_num:
-                                num_digits = ''.join(c for c in number if c.isdigit())
+                            if eff_num and c_num:
+                                num_digits = ''.join(c for c in eff_num if c.isdigit())
                                 cand_digits = ''.join(c for c in c_num if c.isdigit())
                                 if len(num_digits) >= 5 and len(cand_digits) >= 5:
                                     if num_digits[:6] == cand_digits[:6] or num_digits[-6:] == cand_digits[-6:] or (len(num_digits) >= 6 and num_digits[:6] in cand_digits):
@@ -755,7 +808,10 @@ class GateRepository:
 
                                 if cand_img_path:
                                     sim = SnapshotManager.compute_similarity(obs.image, cand_img_path)
-                                    if sim >= 0.82 or (time_diff <= 15.0 and sim >= 0.72):
+                                    if cand.container_number and cand.status == 'CONFIRMED':
+                                        if time_diff <= 8.0 and sim >= 0.88:
+                                            match_found = True
+                                    elif sim >= 0.85 or (time_diff <= 8.0 and sim >= 0.78):
                                         match_found = True
 
                             # 3. Check OCR fuzzy overlap + short timestamp gap
@@ -772,7 +828,7 @@ class GateRepository:
                                         DetectionRecord.camera_id == obs.detection.camera_id,
                                         DetectionRecord.track_id == obs.track_id
                                     ).limit(1)))
-                                if same_track or ocr_sim >= 0.45 or (not number and time_diff <= 3.0):
+                                if same_track or ocr_sim >= 0.45 or (not number and time_diff <= 3.0) or (cand.status == 'NEEDS_REVIEW' and not cand.container_number and time_diff <= 25.0):
                                     match_found = True
 
                             if match_found:
@@ -863,9 +919,10 @@ class GateRepository:
                         num_digits in ex_digits
                     ))
                     is_same_container = bool(
-                        time_diff <= 35.0 and (
+                        time_diff <= max(dedup_seconds, 35.0) and (
                             (number and number == existing.container_number) or
                             digits_match or
+                            (number and existing.container_number and not is_distinct_container(number, existing.container_number)) or
                             (number and existing.container_number and ocr_similarity_score(number, existing.container_number) >= 0.55)
                         )
                     )
@@ -902,6 +959,7 @@ class GateRepository:
                                     DetectionRecord.origin_key != obs.origin_key))
                                 if prior_view:
                                     existing = None  # New cleared passage, not time-window fusion.
+                                    was_cleared_passage = True
 
                 if (existing and number and existing.container_number and
                         number != existing.container_number):
@@ -931,7 +989,15 @@ class GateRepository:
                             # Same physical container, OCR read improved or varied!
                             ex_is_valid = bool(existing.container_number and is_valid_iso_6346(existing.container_number))
                             obs_is_valid = bool(number and is_valid_iso_6346(number))
+                            from app.ocr.validator import KNOWN_BIC_PREFIXES
+                            ex_pref_known = bool(existing.container_number and existing.container_number[:4] in KNOWN_BIC_PREFIXES)
+                            obs_pref_known = bool(number and number[:4] in KNOWN_BIC_PREFIXES)
                             if not ex_is_valid and obs_is_valid:
+                                existing.container_number = number
+                                if obs.confirmed:
+                                    existing.status = 'CONFIRMED'
+                            elif obs_is_valid and obs_pref_known and not ex_pref_known:
+                                # Upgrade unverified prefix to registered BIC operator prefix!
                                 existing.container_number = number
                                 if obs.confirmed:
                                     existing.status = 'CONFIRMED'
@@ -1148,8 +1214,11 @@ class GateRepository:
     def events(self, limit=50, offset=0, container=None, camera_id=None, event_type=None, status=None, start_date=None, end_date=None):
         with self.db.sessions() as session:
             query = select(GateEvent)
-            # Only hide events that have NO containers detected at all
-            query = query.where(GateEvent.status != 'DUPLICATE')
+            # Filter out duplicate rows from UI lists
+            query = query.where(
+                GateEvent.status != 'DUPLICATE',
+                func.coalesce(GateEvent.cloud_delivery_state, 'PENDING') != 'DUPLICATE'
+            )
             if container:
                 query = query.where((GateEvent.container_number == container.upper()) | (GateEvent.container_number_2 == container.upper()))
             if camera_id:
@@ -1371,7 +1440,8 @@ class GateRepository:
     def mark_cloud_delivery(self, event_id: str, state: str, error: str | None = None):
         valid_states = (
             'PENDING', 'OFFLINE', 'REJECTED', 'CONFLICT', 'BLOCKED', 'DUPLICATE',
-            'EVENT_CREATED', 'POST_PENDING', 'PUT_PENDING', 'PUT_FAILED', 'DELIVERED', 'NOT_FOUND'
+            'EVENT_CREATED', 'POST_PENDING', 'PUT_PENDING', 'PUT_FAILED', 'DELIVERED', 'NOT_FOUND',
+            'SERVER_ERROR'
         )
         if state not in valid_states:
             raise ValueError(f'Invalid cloud delivery state: {state}')
@@ -1383,6 +1453,10 @@ class GateRepository:
                 ev.cloud_delivery_state = state
                 ev.cloud_delivery_error = error[:256] if error else None
                 if state == 'DELIVERED':
+                    ev.cloud_synced = True
+                    ev.cloud_synced_at = utcnow()
+                elif state in ('CONFLICT', 'SERVER_ERROR', 'BLOCKED', 'REJECTED', 'DUPLICATE'):
+                    # Terminal non-retryable state: mark cloud_synced=True so sweeps and filters ignore it
                     ev.cloud_synced = True
                     ev.cloud_synced_at = utcnow()
                 else:
@@ -1408,13 +1482,37 @@ class GateRepository:
             primary = session.get(GateEvent, primary_id)
             if not duplicate or not primary or duplicate.id == primary.id:
                 return False
-            session.execute(update(DetectionRecord).where(DetectionRecord.event_id == duplicate.id).values(event_id=primary.id))
-            session.execute(update(Snapshot).where(Snapshot.event_id == duplicate.id).values(event_id=primary.id))
-            session.execute(update(SystemLog).where(SystemLog.event_id == duplicate.id).values(event_id=primary.id))
+            c_dup = duplicate.container_number or ''
+            c_pri = primary.container_number or ''
+            if c_dup and c_pri and is_distinct_container(c_pri, c_dup):
+                log.warning('mark_duplicate_rejected_distinct_containers', extra={
+                    'primary_id': primary.id, 'primary_container': c_pri,
+                    'duplicate_id': duplicate.id, 'duplicate_container': c_dup
+                })
+                return False
+
+            # Strictly re-parent snapshots only if BOTH duplicate and primary have verified matching container numbers
+            # If duplicate has no verified container number, keep snapshots linked to duplicate audit row to prevent image mixing
+            if c_dup and c_pri and not is_distinct_container(c_pri, c_dup):
+                existing_cams = set(session.scalars(select(Snapshot.camera_id).where(Snapshot.event_id == primary.id)).all())
+                dup_snaps = session.scalars(select(Snapshot).where(Snapshot.event_id == duplicate.id)).all()
+                for snap in dup_snaps:
+                    diff = abs(datetime_diff_seconds(snap.timestamp, primary.timestamp))
+                    if diff <= 20.0 and snap.camera_id not in existing_cams:
+                        snap.event_id = primary.id
+                        existing_cams.add(snap.camera_id)
+
+                # Re-parent detections within 20s
+                dup_dets = session.scalars(select(DetectionRecord).where(DetectionRecord.event_id == duplicate.id)).all()
+                for det in dup_dets:
+                    if abs(datetime_diff_seconds(det.timestamp, primary.timestamp)) <= 20.0:
+                        det.event_id = primary.id
+
+                session.execute(update(SystemLog).where(SystemLog.event_id == duplicate.id).values(event_id=primary.id))
             duplicate.status = 'DUPLICATE'
             duplicate.cloud_delivery_state = 'DUPLICATE'
-            duplicate.cloud_synced = False
-            duplicate.cloud_synced_at = None
+            duplicate.cloud_synced = True
+            duplicate.cloud_synced_at = utcnow()
             return True
 
     def reset_cloud_failures(self):
@@ -1478,7 +1576,7 @@ class GateRepository:
                 .where(
                     GateEvent.status == 'CONFIRMED',
                     func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_([
-                        'PENDING', 'OFFLINE', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
+                        'PENDING', 'OFFLINE', 'CONFLICT', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
                     ]),
                     (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
                     (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
@@ -1633,8 +1731,15 @@ class GateRepository:
 
                     if is_match:
                         # ev2 is duplicate of ev1
-                        session.execute(update(DetectionRecord).where(DetectionRecord.event_id == ev2.id).values(event_id=ev1.id))
-                        session.execute(update(Snapshot).where(Snapshot.event_id == ev2.id).values(event_id=ev1.id))
+                        existing_cams = set(session.scalars(select(Snapshot.camera_id).where(Snapshot.event_id == ev1.id)).all())
+                        for snap in session.scalars(select(Snapshot).where(Snapshot.event_id == ev2.id)).all():
+                            if abs(datetime_diff_seconds(snap.timestamp, ev1.timestamp)) <= 20.0 and snap.camera_id not in existing_cams:
+                                snap.event_id = ev1.id
+                                existing_cams.add(snap.camera_id)
+                            else:
+                                session.delete(snap)
+                        for det in session.scalars(select(DetectionRecord).where(DetectionRecord.event_id == ev2.id)).all():
+                            det.event_id = ev1.id
                         session.execute(update(SystemLog).where(SystemLog.event_id == ev2.id).values(event_id=ev1.id))
                         if c2 and len(c2) == 11 and (not c1 or len(c1) != 11):
                             ev1.container_number = c2
@@ -1702,8 +1807,8 @@ class GateRepository:
                     if not (time_diff <= 45.0 and (ocr_sim >= 0.70 or serial_match)):
                         continue
 
-                # Image comparison across matching cameras
-                if snap_mgr and hasattr(snap_mgr, 'path'):
+                # Image comparison across matching cameras strictly within short passage window (<= 25s)
+                if time_diff <= 25.0 and snap_mgr and hasattr(snap_mgr, 'path'):
                     for cam_id in ['gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-in-4', 'gate-out-1', 'gate-out-2', 'gate-out-3', 'gate-out-4']:
                         try:
                             p_ev = snap_mgr.path(f"{event.id}/{cam_id}.jpg")

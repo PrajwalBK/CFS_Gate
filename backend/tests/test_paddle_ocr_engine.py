@@ -72,3 +72,33 @@ def test_paddle_worker_reads_saved_container_snapshot():
         engine.close()
     assert 'MSMU' in result.raw_text
     assert result.confidence > 0
+
+
+def test_paddle_ocr_stale_response_discarded_prevents_desync():
+    """
+    Verify that if an earlier request timed out, its stale response in the queue
+    is safely discarded without causing 'unexpected response' errors on subsequent frames.
+    """
+    import queue
+    import threading
+    engine = PaddleOCREngine.__new__(PaddleOCREngine)
+    engine._lock = threading.Lock()
+    engine._sequence = 5
+    engine._requests = queue.Queue(maxsize=1)
+    engine._responses = queue.Queue(maxsize=5)
+    mock_proc = Mock()
+    mock_proc.is_alive.return_value = True
+    engine._process = mock_proc
+
+    # Simulate worker responding with late stale response #4 first, then fresh response #6
+    def mock_put(req, timeout=5):
+        engine._responses.put(('result', 4, 'STALE_TEXT', 0.5, None))
+        engine._responses.put(('result', req[0], 'FRESH_PRSU1563121', 0.98, None))
+    engine._requests.put = mock_put
+
+    test_img = np.zeros((100, 100, 3), dtype=np.uint8)
+    res = engine.read(test_img)
+
+    assert res.raw_text == 'FRESH_PRSU1563121'
+    assert res.confidence == 0.98
+

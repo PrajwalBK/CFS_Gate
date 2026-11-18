@@ -729,6 +729,9 @@ class GateRuntime:
             ]
             has_cntr_number = any(d.class_name == 'container_number' for d in container_dets)
             active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_1')
+            if not active_slot_session:
+                active_slot_session = self.passage_sessions.get_active_session(camera.gate_id, container_slot='CONTAINER_2')
+            target_slot = active_slot_session.container_slot if active_slot_session else 'CONTAINER_1'
 
             # Record if there is an active session, OR if container_number is directly visible
             if container_dets and (active_slot_session or has_cntr_number):
@@ -736,7 +739,7 @@ class GateRuntime:
                     camera.id, camera.gate_id, camera.direction,
                     frame.image, frame.timestamp, detections,
                     gate_cameras=gate_cams, camera_role=camera.role,
-                    container_slot='CONTAINER_1',
+                    container_slot=target_slot,
                     track_id=tracks[0].id if tracks else 1, source_id=frame.source_id, frame_sequence=frame.sequence
                 )
             else:
@@ -1376,7 +1379,7 @@ class GateRuntime:
                             latest_f = w.latest()
                             if latest_f and getattr(latest_f, 'image', None) is not None:
                                 time_delta = abs((latest_f.timestamp - job.frame.timestamp).total_seconds())
-                                if time_delta <= 2.0:
+                                if time_delta <= 1.2:
                                     prev = self._preview_detections.get(c.id)
                                     prev_dets = prev[2] if prev and len(prev) >= 3 else ()
                                     has_cntr = any(
@@ -1556,7 +1559,7 @@ class GateRuntime:
                 stage = 'PUT' if event.get('cloud_event_id') else 'POST'
                 self.dispatcher.enqueue(None, event_id, stage=stage)
                 self.metrics.increment('passage_sessions_finalized')
-                if session.direction in ('EXIT', 'OUT', 'GATE_OUT'):
+                if event_id == session.event_id and session.direction in ('EXIT', 'OUT', 'GATE_OUT'):
                     try:
                         self.emit_alert(
                             alert_type='GATE_OUT',

@@ -182,9 +182,7 @@ class CameraWorker:
                             backoff = self.settings.reconnect_initial_seconds
                             self._stop.wait(max(0.005, 1 / (self.config.capture_fps * 1.5)))
                         else:
-                            if started >= next_publish:
-                                self._publish(image)
-                                next_publish = started + 1 / self.config.capture_fps
+                            self._publish(image)
                             self._set_status('ONLINE', 'receiving')
                             backoff = self.settings.reconnect_initial_seconds
                 except Exception as exc:

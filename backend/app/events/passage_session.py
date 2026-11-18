@@ -253,9 +253,8 @@ class ContainerPassageSession:
             detections = [d for d in detections if d.camera_id == camera_id and d.frame_timestamp == timestamp]
             if not any(d.class_name in ('container', 'container_object') for d in detections):
                 return None
-            # If we already have a confirmed container number, verify that incoming OCR
-            # does not belong to a different physical container
-            if ocr_read and self.confirmed_container_number:
+            # Update confirmed container number if incoming OCR has higher confidence or valid consensus
+            if ocr_read:
                 val = ocr_read if isinstance(ocr_read, Validation) else ContainerValidator().validate(ocr_read)
                 if not val.valid_check_digit and hasattr(ocr_read, 'raw_text') and ocr_read.raw_text:
                     vis_text = recover_visual_confusion(ocr_read.raw_text)
@@ -268,18 +267,11 @@ class ContainerPassageSession:
                 val_text = val.normalized_text
                 import re
                 if val_text and len(val_text) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', val_text):
-                    if val_text != self.confirmed_container_number:
-                        val_conf = getattr(val, 'confidence', 0.0)
-                        same_prefix = (val_text[:4] == self.confirmed_container_number[:4])
-                        if val_conf > self.confirmed_confidence:
-                            self.confirmed_container_number = val_text
-                            self.confirmed_confidence = val_conf
-                            self.identity_conflict = False
-                        elif not same_prefix and is_valid_iso_6346(val_text) and abs(self.confirmed_confidence - val_conf) < 0.15:
-                            # Genuine conflict only if 6 serial digits also differ
-                            if val_text[4:10] != self.confirmed_container_number[4:10]:
-                                self.identity_conflict = True
-                                return None
+                    val_conf = getattr(val, 'confidence', 0.0)
+                    if val.valid_check_digit and val_conf > self.confirmed_confidence:
+                        self.confirmed_container_number = val_text
+                        self.confirmed_confidence = val_conf
+                        self.identity_conflict = False
 
             self.last_seen = max(self.last_seen, timestamp)
             self.clear_since = None
@@ -354,10 +346,12 @@ class ContainerPassageSession:
             conf = getattr(read, 'confidence', 0.8)
             val = validator.validate(OCRRead(raw_text=str(raw), confidence=float(conf)))
 
-        if not val.valid_check_digit and hasattr(read, 'raw_text') and read.raw_text:
-            zero_text = recover_zero_o_confusion(read.raw_text)
-            if zero_text != read.raw_text:
-                val = validator.validate(OCRRead(raw_text=zero_text, confidence=getattr(val, 'confidence', 0.8)))
+        if not val.valid_check_digit:
+            raw_t = str(getattr(read, 'raw_text', '') or getattr(val, 'raw_text', '') or getattr(val, 'normalized_text', ''))
+            if raw_t:
+                recovered = recover_visual_confusion(raw_t) or recover_zero_o_confusion(raw_t)
+                if recovered and recovered != raw_t:
+                    val = validator.validate(OCRRead(raw_text=recovered, confidence=getattr(val, 'confidence', 0.8)))
 
         if not val or not val.normalized_text or val.confidence < self.min_ocr_confidence:
             return
@@ -423,14 +417,25 @@ class ContainerPassageSession:
             for cam_id in all_cams:
                 frames = self.captured_frames.get(cam_id, [])
                 if frames:
-                    best = max(frames, key=lambda f: (self._identity_read_matches(f), f.quality_score))
-                    if best.quality_score > 0.0:
-                        has_container = any(
-                            getattr(d, 'class_name', '').lower() in ('container', 'cointainer', 'container_object', 'container_number', 'iso_code')
-                            for d in (best.detections or [])
-                        )
-                        if has_container:
-                            best_by_camera[cam_id] = best
+                    # Strict container isolation: exclude any frame candidate with an OCR read belonging to a distinct container
+                    from app.database.repositories.gate import is_distinct_container
+                    valid_frames = []
+                    for f in frames:
+                        if self.confirmed_container_number and f.ocr_read:
+                            val = f.ocr_read if isinstance(f.ocr_read, Validation) else ContainerValidator().validate(f.ocr_read)
+                            txt = getattr(val, 'normalized_text', '') or ''
+                            if txt and len(txt) == 11 and is_distinct_container(self.confirmed_container_number, txt):
+                                continue
+                        valid_frames.append(f)
+                    if valid_frames:
+                        best = max(valid_frames, key=lambda f: (self._identity_read_matches(f), f.quality_score))
+                        if best.quality_score > 0.0:
+                            has_container = any(
+                                getattr(d, 'class_name', '').lower() in ('container', 'cointainer', 'container_object', 'container_number', 'iso_code')
+                                for d in (best.detections or [])
+                            )
+                            if has_container:
+                                best_by_camera[cam_id] = best
             return best_by_camera
 
     def _identity_read_matches(self, candidate) -> bool:
@@ -550,15 +555,21 @@ class PassageSessionManager:
             if session is not None and not session.finalized:
                 # Check if this incoming frame represents a NEW physical container:
                 # 1. Camera track change: If this specific camera already saw a different track ID
-                #    and the session has had some duration (>= 1.5s) or has confirmed OCR/frames.
+                #    A new track signals a new container ONLY IF:
+                #    - The lane has explicitly cleared (session.clear_since is set for >= 2.0s), OR
+                #    - The session has been idle without frames for at least 8.0s, OR
+                #    - Minimum physical vehicle headway (duration >= 20.0s) has passed and lane cleared/idle.
+                #    Tracker ID shifts during active continuous transit (while vehicle is passing) are common ByteTrack jitter and must NOT prematurely chop the session!
                 new_track_on_camera = False
                 if camera_id and track_id is not None:
                     seen_tracks = session.tracks_by_camera.get(camera_id, set())
                     if seen_tracks and track_id not in seen_tracks:
                         duration = abs((timestamp - session.created_at).total_seconds())
+                        idle_from_last = abs((timestamp - session.last_seen).total_seconds())
                         all_cams_captured = bool(session.cameras) and all(bool(session.captured_frames.get(c)) for c in session.cameras)
-                        # A new track signals a new container if lane cleared, or all prior cameras already captured, or confirmed OCR exists with duration >= 1.5s
-                        if session.clear_since is not None or duration >= 6.0 or all_cams_captured or (session.confirmed_container_number and duration >= 1.5):
+                        if (session.clear_since is not None and abs((timestamp - session.clear_since).total_seconds()) >= 2.0) or \
+                           (idle_from_last >= 8.0) or \
+                           (duration >= 20.0 and (all_cams_captured or idle_from_last >= 4.0)):
                             new_track_on_camera = True
                         else:
                             session.record_camera_track(camera_id, track_id)
@@ -567,8 +578,11 @@ class PassageSessionManager:
                 new_session_track = False
                 if not camera_id and track_id is not None and session.track_id is not None and track_id != session.track_id:
                     duration = abs((timestamp - session.created_at).total_seconds())
+                    idle_from_last = abs((timestamp - session.last_seen).total_seconds())
                     all_cams_captured = bool(session.cameras) and all(bool(session.captured_frames.get(c)) for c in session.cameras)
-                    if session.clear_since is not None or duration >= 6.0 or all_cams_captured or (session.confirmed_container_number and duration >= 1.5):
+                    if (session.clear_since is not None and abs((timestamp - session.clear_since).total_seconds()) >= 2.0) or \
+                       (idle_from_last >= 8.0) or \
+                       (duration >= 20.0 and (all_cams_captured or idle_from_last >= 4.0)):
                         new_session_track = True
 
                 # 3. Session clearance timeout

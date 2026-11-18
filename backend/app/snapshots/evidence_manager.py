@@ -246,6 +246,20 @@ class EvidenceFolderManager:
         if not source_folder or not source_folder.is_dir() or source_folder == target_folder:
             return target_folder
 
+        # Strict container isolation guard: NEVER merge if folders represent distinct containers!
+        try:
+            import re
+            from app.database.repositories.gate import is_distinct_container
+            s_nums = re.findall(r'[A-Z]{4}[0-9]{7}', source_folder.name)
+            t_nums = re.findall(r'[A-Z]{4}[0-9]{7}', target_folder.name)
+            if s_nums and t_nums and is_distinct_container(t_nums[0], s_nums[0]):
+                log.warning('evidence_merge_blocked_distinct_containers', extra={
+                    'source_folder': source_folder.name, 'target_folder': target_folder.name
+                })
+                return target_folder
+        except Exception:
+            pass
+
         try:
             for item in list(source_folder.iterdir()):
                 target_item = target_folder / item.name

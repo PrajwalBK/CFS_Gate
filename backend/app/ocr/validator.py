@@ -161,15 +161,61 @@ def recover_zero_o_confusion(raw_text: str) -> str:
     return raw_text
 
 
+# Common registered BIC owner prefixes for container fleet operators
+KNOWN_BIC_PREFIXES = {
+    'MGPU', 'MSCU', 'MEDU', 'MSDU', 'MSMU', 'MSNU', 'MSOU', 'MSBU', 'MIEU',
+    'CSNU', 'CSZU', 'CSQU', 'CMAU', 'MSKU', 'MRKU', 'MRSU', 'EMCU', 'GESU',
+    'KOCU', 'TGHU', 'HLXU', 'ONEU', 'YMLU', 'ZIMU', 'CAIU', 'FCIU', 'FCLU',
+    'TCNU', 'TIIU', 'TONU', 'AIPU', 'FANU', 'FINU', 'FLKU', 'FLRU', 'EGLU',
+    'COSU', 'OOCU', 'PCIU', 'TCLU', 'TEMU', 'VMLU', 'WHSU', 'GXYU', 'HMCU',
+    'HMMU', 'HDMU', 'KKFU', 'MAGU', 'MOLU', 'NYKU', 'PONU', 'PRSU', 'SCZU',
+    'SITU', 'SKLU', 'TCKU', 'TLLU', 'TRHU', 'WHPU', 'XINU', 'BEAU', 'BMOU',
+    'BSIU', 'CAAU', 'CNEU', 'DFSU', 'DISU', 'EBUU', 'EGSU', 'EITU', 'ESLU',
+    'GCXU', 'IAAU', 'ITUU', 'SEGU', 'SUDU', 'TEXU', 'TRLU', 'TTNU', 'UACU',
+    'HAMU', 'AXIU', 'ADMU', 'ABCU',
+}
+
+PREFIX_LETTER_CONFUSIONS = {
+    'N': ['M'],
+    'M': ['N'],
+    'Z': ['N'],
+    'V': ['U'],
+    'U': ['V'],
+    'D': ['O'],
+    'O': ['D', '0'],
+    'Q': ['O'],
+    'I': ['1', 'T', 'L'],
+    'L': ['I', '1'],
+    'B': ['8'],
+    'S': ['5'],
+}
+
+
 def recover_visual_confusion(raw_text: str) -> str:
     """
-    Recover common OCR visual confusions (1/I, 0/O, 8/B, 5/S, 2/Z, etc.) in container codes.
+    Recover common OCR visual confusions (1/I, 0/O, 8/B, 5/S, 2/Z, N/M, etc.) in container codes.
     Only replaces if the candidate strictly satisfies ISO 6346 Modulo-11 check digit verification.
     """
     if not raw_text:
         return raw_text
     char_to_letter = {'0': 'O', '1': 'I', '8': 'B', '5': 'S', '2': 'Z'}
     letter_to_digit = {'O': '0', 'I': '1', 'L': '1', 'B': '8', 'S': '5', 'Z': '2', 'G': '6'}
+
+    def _resolve_candidate(cand_str: str) -> str:
+        if not cand_str or len(cand_str) != 11:
+            return cand_str
+        pref = cand_str[:4]
+        # If prefix is not in known BIC registry, check single-letter prefix confusions
+        if pref not in KNOWN_BIC_PREFIXES:
+            for idx in range(3):
+                orig_ch = pref[idx]
+                for alt_ch in PREFIX_LETTER_CONFUSIONS.get(orig_ch, []):
+                    test_pref = pref[:idx] + alt_ch + pref[idx+1:]
+                    if test_pref in KNOWN_BIC_PREFIXES:
+                        test_cand = test_pref + cand_str[4:]
+                        if is_valid_iso_6346(test_cand):
+                            return test_cand
+        return cand_str
 
     m = re.search(r'(?<![A-Z0-9])([A-Z0-9]{3}[UJZ0-9])[\s\-.:/|\[\]()]*((?:[0-9A-Z][\s\-.:/|\[\]()]*){6,7})(?![0-9A-Z])', raw_text.upper())
     if m:
@@ -184,6 +230,7 @@ def recover_visual_confusion(raw_text: str) -> str:
         digits = [letter_to_digit.get(ch, ch) for ch in digits_raw]
         if len(digits) == 7:
             candidate = ''.join(pref) + ''.join(digits)
+            candidate = _resolve_candidate(candidate)
             if is_valid_iso_6346(candidate):
                 return raw_text[:m.start()] + candidate + raw_text[m.end():]
         elif len(digits) == 6:
@@ -191,6 +238,7 @@ def recover_visual_confusion(raw_text: str) -> str:
             try:
                 cd = check_digit(prefix10)
                 candidate = f"{prefix10}{cd}"
+                candidate = _resolve_candidate(candidate)
                 if is_valid_iso_6346(candidate):
                     return raw_text[:m.start()] + candidate + raw_text[m.end():]
             except Exception:
@@ -208,6 +256,7 @@ def recover_visual_confusion(raw_text: str) -> str:
         digits = [letter_to_digit.get(ch, ch) for ch in cleaned[4:]]
         if len(digits) == 7:
             cand = ''.join(pref) + ''.join(digits)
+            cand = _resolve_candidate(cand)
             if is_valid_iso_6346(cand):
                 return cand
         elif len(digits) == 6:
@@ -215,6 +264,7 @@ def recover_visual_confusion(raw_text: str) -> str:
             try:
                 cd = check_digit(prefix10)
                 cand = f"{prefix10}{cd}"
+                cand = _resolve_candidate(cand)
                 if is_valid_iso_6346(cand):
                     return cand
             except Exception:
@@ -332,6 +382,11 @@ class ContainerValidator:
             normalized = normalize(raw)[:256]
         valid_format = bool(STRUCTURE.fullmatch(normalized))
         valid_digit = is_valid_iso_6346(normalized)
+        if valid_format:
+            resolved = recover_visual_confusion(normalized)
+            if resolved and resolved != normalized and is_valid_iso_6346(resolved):
+                normalized = resolved
+                valid_digit = True
         status = 'VALID' if valid_digit else 'INVALID_CHECK_DIGIT' if valid_format else 'INVALID_FORMAT'
         iso_code, human_size = extract_iso_size_code(raw)
         return Validation(raw, normalized, read.confidence, valid_format, valid_digit, status,
