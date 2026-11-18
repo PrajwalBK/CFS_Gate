@@ -9,14 +9,18 @@ from dataclasses import asdict
 from datetime import datetime
 import json
 import hashlib
+import logging
 import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import time
 from uuid import uuid4
 
 from app.domain import Detection, Frame, Validation
+
+log = logging.getLogger('ocr.job_store')
 
 
 class OCRJobStore:
