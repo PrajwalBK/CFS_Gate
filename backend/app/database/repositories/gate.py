@@ -308,6 +308,28 @@ class GateRepository:
                 delta = timedelta(seconds=max(dedup_sec, 60.0))
                 container_delta = timedelta(seconds=max(same_window, 900.0))
 
+                # 15-minute same-container window check:
+                # If an authoritative event with this exact container number ALREADY exists on this gate
+                # in this direction within same_container_event_window_seconds (15 mins),
+                # this current session represents a re-read, pause, or boom-barrier wait of the SAME vehicle.
+                if slot_pos == 'CONTAINER_1' and container_num:
+                    prior_event = db_session.scalar(select(GateEvent).where(
+                        GateEvent.id != session.event_id,
+                        GateEvent.gate_id == session.gate_id,
+                        GateEvent.container_number == container_num,
+                        (GateEvent.event_type == session.direction) | (GateEvent.event_type == 'UNKNOWN'),
+                        GateEvent.status != 'DUPLICATE',
+                        GateEvent.timestamp >= session.created_at - container_delta,
+                        GateEvent.timestamp <= session.created_at + container_delta,
+                    ).order_by(GateEvent.timestamp.asc()))
+                    if prior_event:
+                        if existing and existing.id != prior_event.id:
+                            existing.status = 'DUPLICATE'
+                            existing.cloud_delivery_state = 'DUPLICATE'
+                            existing.cloud_synced = True
+                        target_event_id = prior_event.id
+                        existing = prior_event
+
                 if not existing and slot_pos == 'CONTAINER_1':
                     # 1. Search for existing event on the same gate with the exact same container number within container_delta (15 mins)
                     if container_num:
@@ -644,7 +666,7 @@ class GateRepository:
 
     def save_observation(self, obs: Observation, snapshots, dedup_seconds: float,
                          additional_frames: dict | None = None, ongoing_event_id=None,
-                         same_container_window_seconds: float = 900):
+                         same_container_window_seconds: float | None = None):
         """One writer per service; DB uniqueness also protects retried track writes."""
         if obs.ocr and not is_valid_iso_6346(obs.ocr.normalized_text):
             from app.ocr.validator import recover_visual_confusion
@@ -695,14 +717,11 @@ class GateRepository:
                                 if c1[4:] == suffix or not is_distinct_container(number, c1):
                                     existing = cand
                                     break
-                    # Dwell/queue recovery: a different camera or a restarted
-                    # tracker can produce a new origin several minutes after
-                    # the first read. If the same validated container is still
-                    # in the same lane and travelling in the same direction,
-                    # bind it to the oldest event instead of creating a second
-                    # cloud visit.
-                    if not existing and obs.origin_key.startswith(('dwell:', 'session:')):
-                        dwell_window = max(float(same_container_window_seconds or 0), dedup_seconds)
+                    # Same container window recovery:
+                    # If the same validated container is seen on the same lane in the same direction
+                    # within same_container_window_seconds (e.g. 15 mins), bind to the existing event instead of creating a second visit!
+                    dwell_window = float(same_container_window_seconds) if same_container_window_seconds is not None else dedup_seconds
+                    if not existing and is_valid_iso_6346(number) and dwell_window > dedup_seconds:
                         long_delta = timedelta(seconds=dwell_window)
                         existing = session.scalar(select(GateEvent).where(
                             GateEvent.gate_id == obs.gate_id,
@@ -711,7 +730,7 @@ class GateRepository:
                             GateEvent.status.in_(['CONFIRMED', 'NEEDS_REVIEW']),
                             func.coalesce(GateEvent.cloud_delivery_state, 'PENDING') != 'DUPLICATE',
                             GateEvent.timestamp >= obs.detection.frame_timestamp - long_delta,
-                            GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
+                            GateEvent.timestamp <= obs.detection.frame_timestamp + long_delta,
                         ).order_by(GateEvent.timestamp.asc()))
                         if not existing and len(number) == 11 and number[4:].isdigit():
                             suffix = number[4:]
