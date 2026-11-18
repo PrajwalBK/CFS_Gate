@@ -134,6 +134,29 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
                                 text, confidence = rot_text, rot_conf
                         except Exception:
                             pass
+
+                    # Night / Low-light enhancement: adaptive contrast equalization (CLAHE)
+                    if not has_iso or confidence < 0.85:
+                        try:
+                            import cv2
+                            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+                            if len(image.shape) == 3:
+                                lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+                                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+                                enh_img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+                            else:
+                                enh_img = clahe.apply(image)
+                            enh_out = list(engine.predict(enh_img))
+                            enh_payload = enh_out[0].json if enh_out else {}
+                            enh_text, enh_conf = _paddle_text(enh_payload)
+                            enh_has_iso = bool(re.search(r'[A-Z]{3}[UJZ][\s-]*(?:[0-9][\s-]*){6,7}', enh_text.upper()) or
+                                               re.search(r'[1-4LMN][0-9][GVRHBUTP][0-9A-Z]', enh_text.upper()))
+                            if enh_has_iso and (not has_iso or enh_conf > confidence):
+                                text, confidence, has_iso = enh_text, enh_conf, True
+                            elif not has_iso and enh_conf > confidence:
+                                text, confidence = enh_text, enh_conf
+                        except Exception:
+                            pass
                 responses.put(('result', request_id, text, confidence, None))
             except BaseException as exc:
                 responses.put(('result', request_id, '', 0.0, f'{type(exc).__name__}: {exc}'))

@@ -253,3 +253,52 @@ def set_camera_exposure(camera_id: str, body: ExposureSetting, request: Request)
     if not client:
         raise HTTPException(400, 'Exposure control not supported for this camera')
     return client.set_shutter_speed(body.shutter, mode=body.mode)
+
+
+class NightClaritySetting(BaseModel):
+    day_night_mode: Literal['Auto', 'Color', 'BlackWhite', 'Brightness'] = 'Auto'
+    hlc: bool = True
+    max_shutter_ms: float = 8.0
+    gain_max: int = 85
+
+
+@router.get('/{camera_id}/night')
+def camera_night_status(camera_id: str, request: Request):
+    from app.camera.lens_control import get_lens_client_for_camera
+    client = get_lens_client_for_camera(request.app.state.runtime, camera_id)
+    if not client:
+        return {'supported': False, 'message': 'Not an IP camera with Dahua JSON-RPC API'}
+    return client.get_night_status()
+
+
+@router.post('/{camera_id}/night/tune')
+def tune_camera_night_clarity(camera_id: str, body: NightClaritySetting, request: Request):
+    from app.camera.lens_control import get_lens_client_for_camera
+    client = get_lens_client_for_camera(request.app.state.runtime, camera_id)
+    if not client:
+        raise HTTPException(400, 'Night clarity control not supported for this camera')
+    return client.configure_night_clarity(
+        daynight=body.day_night_mode,
+        hlc=body.hlc,
+        max_shutter_ms=body.max_shutter_ms,
+        gain_max=body.gain_max
+    )
+
+
+@router.post('/night/tune-all')
+def tune_all_cameras_night_clarity(request: Request, body: NightClaritySetting = NightClaritySetting()):
+    from app.camera.lens_control import get_lens_client_for_camera
+    runtime = request.app.state.runtime
+    results = {}
+    for c in runtime.cameras:
+        client = get_lens_client_for_camera(runtime, c.id)
+        if client:
+            results[c.id] = client.configure_night_clarity(
+                daynight=body.day_night_mode,
+                hlc=body.hlc,
+                max_shutter_ms=body.max_shutter_ms,
+                gain_max=body.gain_max
+            )
+        else:
+            results[c.id] = {'supported': False}
+    return results

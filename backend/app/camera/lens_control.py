@@ -391,6 +391,160 @@ class DahuaLensClient:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
+    def get_night_status(self) -> dict:
+        """Fetch current DayNight, Backlight HLC, Lighting, and Exposure status."""
+        with self._lock:
+            if not self._ensure_connected():
+                return {"supported": False, "error": "Camera offline"}
+            try:
+                self._req_id += 1
+                dn_res = self._rpc('/cpapi2', {
+                    "method": "configManager.getConfig",
+                    "params": {"name": "VideoInDayNight[0]"},
+                    "id": self._req_id, "session": self.session
+                })
+                dn_mode = dn_res.get('params', {}).get('table', [{}])[0].get('Mode', 'Unknown')
+
+                self._req_id += 1
+                bl_res = self._rpc('/cpapi2', {
+                    "method": "configManager.getConfig",
+                    "params": {"name": "VideoInBacklight[0]"},
+                    "id": self._req_id, "session": self.session
+                })
+                bl_first = bl_res.get('params', {}).get('table', [{}])[0]
+                bl_mode = bl_first.get('Mode', 'Off')
+                glare = bl_first.get('GlareInhibition', 0)
+
+                self._req_id += 1
+                exp_res = self._rpc('/cpapi2', {
+                    "method": "configManager.getConfig",
+                    "params": {"name": "VideoInExposure[0]"},
+                    "id": self._req_id, "session": self.session
+                })
+                exp_first = exp_res.get('params', {}).get('table', [{}])[0]
+                exp_mode = exp_first.get('Mode', 0)
+                shutter_val2 = exp_first.get('Value2', 40)
+                gain_max = exp_first.get('GainMax', 50)
+
+                self._req_id += 1
+                lt_res = self._rpc('/cpapi2', {
+                    "method": "configManager.getConfig",
+                    "params": {"name": "Lighting[0]"},
+                    "id": self._req_id, "session": self.session
+                })
+                lt_mode = lt_res.get('params', {}).get('table', [{}])[0].get('Mode', 'Unknown')
+
+                return {
+                    "supported": True,
+                    "day_night_mode": dn_mode,
+                    "backlight_mode": bl_mode,
+                    "glare_inhibition": glare,
+                    "exposure_mode": exp_mode,
+                    "shutter_ms": shutter_val2,
+                    "gain_max": gain_max,
+                    "lighting_mode": lt_mode,
+                }
+            except Exception as e:
+                return {"supported": False, "error": str(e)}
+
+    def configure_night_clarity(self, daynight: str = "Auto", hlc: bool = True, max_shutter_ms: float = 8.0, gain_max: int = 85) -> dict:
+        """
+        Configure camera for maximum night vision clarity while preserving 100% daytime quality.
+        - daynight='Auto': Mechanical IR-cut filter retracts automatically in darkness and switches to IR B&W.
+        - hlc=True: Highlight Compensation suppresses truck headlights and glare.
+        - max_shutter_ms=8.0 (1/125s): Eliminates motion blur on moving containers at night.
+        - gain_max=85: Sufficient sensor amplification for low-light conditions.
+        """
+        with self._lock:
+            if not self._ensure_connected():
+                return {"success": False, "error": "Camera offline"}
+            try:
+                # 1. DayNight -> Auto
+                self._req_id += 1
+                dn_res = self._rpc('/cpapi2', {
+                    "method": "configManager.getConfig",
+                    "params": {"name": "VideoInDayNight[0]"},
+                    "id": self._req_id, "session": self.session
+                })
+                dn_table = dn_res.get('params', {}).get('table', [])
+                for p in dn_table:
+                    p['Mode'] = daynight
+                    p['Sensitivity'] = 2
+                    p['Delay'] = 6
+                self._req_id += 1
+                set_dn = self._rpc('/cpapi2', {
+                    "method": "configManager.setConfig",
+                    "params": {"name": "VideoInDayNight[0]", "table": dn_table},
+                    "id": self._req_id, "session": self.session
+                })
+
+                # 2. Backlight -> GlareInhibition (HLC)
+                self._req_id += 1
+                bl_res = self._rpc('/cpapi2', {
+                    "method": "configManager.getConfig",
+                    "params": {"name": "VideoInBacklight[0]"},
+                    "id": self._req_id, "session": self.session
+                })
+                bl_table = bl_res.get('params', {}).get('table', [])
+                for p in bl_table:
+                    p['Mode'] = 'GlareInhibition' if hlc else 'Off'
+                    p['GlareInhibition'] = 60 if hlc else 50
+                self._req_id += 1
+                set_bl = self._rpc('/cpapi2', {
+                    "method": "configManager.setConfig",
+                    "params": {"name": "VideoInBacklight[0]", "table": bl_table},
+                    "id": self._req_id, "session": self.session
+                })
+
+                # 3. Exposure -> Mode 8, bounded shutter, boosted gain ceiling
+                self._req_id += 1
+                exp_res = self._rpc('/cpapi2', {
+                    "method": "configManager.getConfig",
+                    "params": {"name": "VideoInExposure[0]"},
+                    "id": self._req_id, "session": self.session
+                })
+                exp_table = exp_res.get('params', {}).get('table', [])
+                for p in exp_table:
+                    p['Mode'] = 8
+                    p['Value1'] = 0.1
+                    p['Value2'] = float(max_shutter_ms)
+                    p['GainMax'] = int(gain_max)
+                self._req_id += 1
+                set_exp = self._rpc('/cpapi2', {
+                    "method": "configManager.setConfig",
+                    "params": {"name": "VideoInExposure[0]", "table": exp_table},
+                    "id": self._req_id, "session": self.session
+                })
+
+                # 4. Lighting -> Auto
+                self._req_id += 1
+                lt_res = self._rpc('/cpapi2', {
+                    "method": "configManager.getConfig",
+                    "params": {"name": "Lighting[0]"},
+                    "id": self._req_id, "session": self.session
+                })
+                lt_table = lt_res.get('params', {}).get('table', [])
+                for p in lt_table:
+                    p['Mode'] = 'Auto'
+                    p['Correction'] = 50
+                self._req_id += 1
+                set_lt = self._rpc('/cpapi2', {
+                    "method": "configManager.setConfig",
+                    "params": {"name": "Lighting[0]", "table": lt_table},
+                    "id": self._req_id, "session": self.session
+                })
+
+                ok = bool(set_dn.get('result') and set_bl.get('result') and set_exp.get('result') and set_lt.get('result'))
+                return {
+                    "success": ok,
+                    "day_night": daynight,
+                    "hlc": hlc,
+                    "max_shutter_ms": max_shutter_ms,
+                    "gain_max": gain_max
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
 
 # Global cache of DahuaLensClients per host
 _lens_clients: dict[str, DahuaLensClient] = {}
