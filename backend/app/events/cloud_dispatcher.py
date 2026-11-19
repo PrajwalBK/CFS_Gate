@@ -1336,6 +1336,9 @@ class CloudOutboxDispatcher:
                     put_payload = {
                         'EventId': cloud_ev_id,
                         'VisitId': str(cloud_visit_id),
+                        'ContainerNumber': orig_cntr,
+                        'ContainerNumberConfidence': round(conf_1, 2),
+                        'Size': size_1,
                         'Containers': [
                             {
                                 'ContainerNumber': orig_cntr,

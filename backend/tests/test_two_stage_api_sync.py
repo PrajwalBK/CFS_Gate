@@ -140,6 +140,9 @@ def test_two_stage_normal_container_passage(gate_setup, repository, snapshots, m
         put_payload = mock_put.call_args[0][1]
         assert put_payload.get('EventId') == "0e7d4fac-5f22-48a4-be37-0bc58a948eff"
         assert put_payload.get('VisitId') == "VISIT-38727D97"
+        assert put_payload.get('ContainerNumber') == 'MEDU9988770'
+        assert put_payload.get('ContainerNumberConfidence') == 0.97
+        assert put_payload.get('Size') == '40'
         assert len(put_payload['Containers']) == 1
         container_data = put_payload['Containers'][0]
         assert container_data['ContainerNumber'] == 'MEDU9988770'
