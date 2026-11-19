@@ -94,15 +94,15 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
                 return
             request_id, image = request
             try:
-                # Upscale tiny crops so PaddleOCR does not crash on PIR/oneDNN array attributes
+                # Upscale tiny crops with bicubic interpolation so PaddleOCR does not crash and small characters remain sharp
                 if hasattr(image, 'shape') and len(image.shape) >= 2:
                     h, w = image.shape[:2]
                     if min(h, w) < 32:
                         import cv2
-                        scale = 32.0 / max(1, min(h, w))
-                        new_w = max(32, int(w * scale))
-                        new_h = max(32, int(h * scale))
-                        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                        scale = 36.0 / max(1, min(h, w))
+                        new_w = max(36, int(w * scale))
+                        new_h = max(36, int(h * scale))
+                        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
                 output = list(engine.predict(image))
                 payload = output[0].json if output else {}
                 text, confidence = _paddle_text(payload)
@@ -135,7 +135,7 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
                         except Exception:
                             pass
 
-                    # Night / Low-light enhancement: adaptive contrast equalization (CLAHE)
+                    # Night / Low-light enhancement: adaptive contrast equalization (CLAHE) + edge sharpening
                     if not has_iso or confidence < 0.85:
                         try:
                             import cv2
@@ -146,7 +146,10 @@ def _paddle_worker(requests, responses, use_gpu: bool, detection_model: str, rec
                                 enh_img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
                             else:
                                 enh_img = clahe.apply(image)
-                            enh_out = list(engine.predict(enh_img))
+                            # Edge sharpening to clearly separate stencil letters from shadows and corrugations
+                            blurred = cv2.GaussianBlur(enh_img, (0, 0), 2.0)
+                            sharp_img = cv2.addWeighted(enh_img, 1.4, blurred, -0.4, 0)
+                            enh_out = list(engine.predict(sharp_img))
                             enh_payload = enh_out[0].json if enh_out else {}
                             enh_text, enh_conf = _paddle_text(enh_payload)
                             enh_has_iso = bool(re.search(r'[A-Z]{3}[UJZ][\s-]*(?:[0-9][\s-]*){6,7}', enh_text.upper()) or

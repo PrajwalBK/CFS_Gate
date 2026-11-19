@@ -69,17 +69,20 @@ class EventManager:
 
         # A dwell track can end before the configured vote count is reached
         # (camera handoff, truck leaving the ROI, or a short queue passage).
-        # If at least two samples were processed and one high-confidence,
-        # check-digit-valid read exists, preserve it as the event identity
-        # rather than silently dropping the completed track.
+        # If at least two samples were processed and consistent or high-confidence,
+        # check-digit-valid reads exist, preserve it as the event identity
+        # rather than silently dropping the completed track. Never confirm on
+        # a single low-confidence (<0.85) optical misread.
         dwell_end_fallback = (
             job.origin_key.startswith('dwell:') and
             getattr(job, 'entrance_complete', False) and
-            len(evidence.reads) >= 2 and (count >= 1 or (consensus_val and consensus_val.valid_check_digit)) and not tied
+            len(evidence.reads) >= 2 and
+            (count >= 2 or (consensus_val and consensus_val.valid_check_digit and consensus_val.confidence >= 0.85)) and
+            not tied
         )
         if dwell_end_fallback:
             confirmed = True
-        if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and (count >= 1 or (consensus_val and consensus_val.valid_check_digit)) and not tied:
+        if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and (count >= 2 or (consensus_val and consensus_val.valid_check_digit and consensus_val.confidence >= 0.85)) and not tied:
             confirmed = True
         if not confirmed:
             # While attempts remain, do not prematurely publish an unconfirmed / NEEDS_REVIEW row.
@@ -170,16 +173,28 @@ class EventManager:
         # The authoritative passage session finalization in runtime._commit_passage_session() will dispatch
         # the single 100% consensus container event with clean multi-camera proof.
         has_active_passage_session = False
+        recent_lane_finalized = False
+        slot_name = getattr(obs, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
         if self.runtime and getattr(self.runtime, 'passage_sessions', None):
-            slot_name = getattr(obs, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
             act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id, container_slot=slot_name)
             if act_sess and not getattr(act_sess, 'finalized', False):
                 has_active_passage_session = True
 
+        if self.runtime and getattr(self.runtime, '_active_lane_events', None):
+            active_lane = (self.runtime._active_lane_events.get(f"{obs.gate_id}:{slot_name}")
+                           or self.runtime._active_lane_events.get(obs.gate_id))
+            if active_lane and active_lane.get('finalized_at'):
+                if (time.monotonic() - active_lane['finalized_at']) <= max(getattr(self.settings, 'dedup_seconds', 35.0), 35.0):
+                    recent_lane_finalized = True
+
         is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
+        min_dispatch_conf = getattr(self.settings, 'min_cloud_dispatch_confidence', 0.85)
+        is_conf_sufficient = bool(obs.ocr and obs.ocr.confidence >= min_dispatch_conf)
+
         should_dispatch_post = (
-            obs.confirmed and is_ocr_valid
+            obs.confirmed and is_ocr_valid and is_conf_sufficient
             and not has_active_passage_session
+            and not recent_lane_finalized
             and (event_id not in self._dispatched_events)
         )
         if self.dispatcher and should_dispatch_post:

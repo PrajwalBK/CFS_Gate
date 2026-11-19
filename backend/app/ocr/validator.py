@@ -151,27 +151,32 @@ def recover_zero_o_confusion(raw_text: str) -> str:
             return raw_text[:m.start()] + candidate + raw_text[m.end():]
     elif len(digits) == 6:
         prefix10 = ''.join(pref) + digits
-        try:
-            cd = check_digit(prefix10)
-            candidate = f"{prefix10}{cd}"
-            if is_valid_iso_6346(candidate):
-                return raw_text[:m.start()] + candidate + raw_text[m.end():]
-        except Exception:
-            pass
+        if prefix10[:4] in KNOWN_BIC_PREFIXES:
+            try:
+                cd = check_digit(prefix10)
+                candidate = f"{prefix10}{cd}"
+                if is_valid_iso_6346(candidate):
+                    return raw_text[:m.start()] + candidate + raw_text[m.end():]
+            except Exception:
+                pass
     return raw_text
 
 
 # Common registered BIC owner prefixes for container fleet operators
 KNOWN_BIC_PREFIXES = {
-    'MGPU', 'MSCU', 'MEDU', 'MSDU', 'MSMU', 'MSNU', 'MSOU', 'MSBU', 'MIEU',
-    'CSNU', 'CSZU', 'CSQU', 'CMAU', 'MSKU', 'MRKU', 'MRSU', 'EMCU', 'GESU',
-    'KOCU', 'TGHU', 'HLXU', 'ONEU', 'YMLU', 'ZIMU', 'CAIU', 'FCIU', 'FCLU',
-    'TCNU', 'TIIU', 'TONU', 'AIPU', 'FANU', 'FINU', 'FLKU', 'FLRU', 'EGLU',
-    'COSU', 'OOCU', 'PCIU', 'TCLU', 'TEMU', 'VMLU', 'WHSU', 'GXYU', 'HMCU',
-    'HMMU', 'HDMU', 'KKFU', 'MAGU', 'MOLU', 'NYKU', 'PONU', 'PRSU', 'SCZU',
-    'SITU', 'SKLU', 'TCKU', 'TLLU', 'TRHU', 'WHPU', 'XINU', 'BEAU', 'BMOU',
-    'BSIU', 'CAAU', 'CNEU', 'DFSU', 'DISU', 'EBUU', 'EGSU', 'EITU', 'ESLU',
-    'GCXU', 'IAAU', 'ITUU', 'SEGU', 'SUDU', 'TEXU', 'TRLU', 'TTNU', 'UACU',
+    'MGPU', 'MSCU', 'MEDU', 'MSDU', 'MSMU', 'MSNU', 'MSOU', 'MSBU', 'MIEU', 'MCXU',
+    'CSNU', 'CSZU', 'CSQU', 'CMAU', 'CGMU', 'ANLU', 'APLU', 'DELU',
+    'MSKU', 'MRKU', 'MRSU', 'SUDU', 'HASU', 'MMAU', 'MLLU', 'PONU',
+    'EMCU', 'EGLU', 'EISU', 'UGMU', 'GESU', 'GLCU', 'ILCU',
+    'KOCU', 'TGHU', 'TGBU', 'HLXU', 'HLCU', 'CPSU', 'UASC', 'UACU',
+    'ONEU', 'NYKU', 'MOLU', 'KKFU', 'KLFU',
+    'YMLU', 'YMMU', 'ZIMU', 'ZCSU',
+    'CAIU', 'FCIU', 'FCLU', 'TCNU', 'TIIU', 'TONU', 'AIPU', 'FANU', 'FINU', 'FLKU', 'FLRU',
+    'COSU', 'OOCU', 'OOLU', 'CBHU', 'CCLU',
+    'PCIU', 'PDLU', 'PILU', 'TCLU', 'TEMU', 'VMLU', 'WHSU', 'WHPU', 'GXYU', 'HMCU',
+    'HMMU', 'HDMU', 'MAGU', 'PRSU', 'SCZU', 'SITU', 'SKLU', 'TCKU', 'TLLU', 'TRHU',
+    'XINU', 'BEAU', 'BMOU', 'BSIU', 'CAAU', 'CNEU', 'DFSU', 'DISU', 'EBUU', 'EGSU',
+    'EITU', 'ESLU', 'GCXU', 'IAAU', 'ITUU', 'SEGU', 'TEXU', 'TRLU', 'TTNU',
     'HAMU', 'AXIU', 'ADMU', 'ABCU',
 }
 
@@ -182,11 +187,14 @@ PREFIX_LETTER_CONFUSIONS = {
     'V': ['U'],
     'U': ['V'],
     'D': ['O'],
-    'O': ['D', '0'],
+    'O': ['D', '0', 'Q', 'C'],
     'Q': ['O'],
-    'I': ['1', 'T', 'L'],
+    'I': ['C', '1', 'T', 'L'],
+    'C': ['I', 'G', 'O', 'L'],
+    'G': ['C', '6', 'O'],
     'L': ['I', '1'],
     'B': ['8'],
+    'P': ['R', 'F', 'B'],
     'S': ['5'],
 }
 
@@ -235,14 +243,15 @@ def recover_visual_confusion(raw_text: str) -> str:
                 return raw_text[:m.start()] + candidate + raw_text[m.end():]
         elif len(digits) == 6:
             prefix10 = ''.join(pref) + ''.join(digits)
-            try:
-                cd = check_digit(prefix10)
-                candidate = f"{prefix10}{cd}"
-                candidate = _resolve_candidate(candidate)
-                if is_valid_iso_6346(candidate):
-                    return raw_text[:m.start()] + candidate + raw_text[m.end():]
-            except Exception:
-                pass
+            if prefix10[:4] in KNOWN_BIC_PREFIXES:
+                try:
+                    cd = check_digit(prefix10)
+                    candidate = f"{prefix10}{cd}"
+                    candidate = _resolve_candidate(candidate)
+                    if is_valid_iso_6346(candidate):
+                        return raw_text[:m.start()] + candidate + raw_text[m.end():]
+                except Exception:
+                    pass
 
     cleaned = re.sub(r'[^A-Z0-9]', '', raw_text.upper())
     if len(cleaned) in (10, 11):
@@ -261,14 +270,15 @@ def recover_visual_confusion(raw_text: str) -> str:
                 return cand
         elif len(digits) == 6:
             prefix10 = ''.join(pref) + ''.join(digits)
-            try:
-                cd = check_digit(prefix10)
-                cand = f"{prefix10}{cd}"
-                cand = _resolve_candidate(cand)
-                if is_valid_iso_6346(cand):
-                    return cand
-            except Exception:
-                pass
+            if prefix10[:4] in KNOWN_BIC_PREFIXES:
+                try:
+                    cd = check_digit(prefix10)
+                    cand = f"{prefix10}{cd}"
+                    cand = _resolve_candidate(cand)
+                    if is_valid_iso_6346(cand):
+                        return cand
+                except Exception:
+                    pass
     return raw_text
 
 
