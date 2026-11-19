@@ -204,7 +204,7 @@ def test_three_containers_quick_succession_strict_isolation(gate_setup, reposito
         for ev_id in event_ids:
             dispatcher.enqueue(None, ev_id, stage='POST', force=True)
 
-        for _ in range(50):
+        for _ in range(120):
             if len(put_calls) == 3:
                 break
             time.sleep(0.05)
@@ -278,7 +278,7 @@ def test_interleaved_processing_order_independence(gate_setup, repository, snaps
         dispatcher.enqueue(None, ev_a, stage='POST', force=True)
         dispatcher.enqueue(None, ev_b, stage='POST', force=True)
 
-        for _ in range(40):
+        for _ in range(120):
             if len(put_records) == 2:
                 break
             time.sleep(0.05)

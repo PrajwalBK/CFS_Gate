@@ -1,6 +1,7 @@
 import difflib
 import hashlib
 import logging
+import re
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,7 +13,7 @@ from sqlalchemy import func, select, update
 from app.database.models import Camera, DetectionRecord, GateEvent, OCRResult, Snapshot, SystemLog
 from app.domain import Observation, Validation, utcnow
 from app.snapshots.snapshot_manager import SnapshotManager
-from app.ocr.validator import is_valid_iso_6346
+from app.ocr.validator import is_valid_iso_6346, KNOWN_BIC_PREFIXES
 from app.ocr.consensus import CharacterConsensus
 
 log = logging.getLogger('gate')
@@ -865,12 +866,50 @@ class GateRepository:
                         if existing.event_type == 'UNKNOWN' and obs.direction != 'UNKNOWN':
                             existing.event_type = obs.direction
                 else:
-                    existing = session.scalar(select(GateEvent).where(
+                    raw_text = (getattr(obs.ocr, 'raw_text', '') or getattr(obs.ocr, 'normalized_text', '') or '').strip().upper()
+                    m_pref = re.search(r'[A-Z]{4}', raw_text)
+                    raw_pref = m_pref.group(0) if m_pref else None
+
+                    all_candidates = session.scalars(select(GateEvent).where(
                         GateEvent.gate_id == obs.gate_id,
                         direction_match,
+                        GateEvent.status != 'DUPLICATE',
+                        func.coalesce(GateEvent.cloud_delivery_state, 'PENDING') != 'DUPLICATE',
                         GateEvent.timestamp >= obs.detection.frame_timestamp - delta,
                         GateEvent.timestamp <= obs.detection.frame_timestamp + delta,
-                    ).order_by(GateEvent.timestamp.desc()))
+                    )).all()
+
+                    valid_candidates = []
+                    for cand in all_candidates:
+                        time_gap = abs(datetime_diff_seconds(cand.timestamp, obs.detection.frame_timestamp))
+                        # 1. Reject forward time jump: a frame cannot belong to a container that arrives > 3.0s in the future
+                        if cand.timestamp > obs.detection.frame_timestamp:
+                            forward_gap = datetime_diff_seconds(cand.timestamp, obs.detection.frame_timestamp)
+                            if forward_gap > 3.0 and cand.container_number:
+                                continue
+
+                        # 2. Reject prefix conflict: if raw frame has a 4-letter container prefix that completely conflicts with confirmed container
+                        c_num = cand.container_number or ''
+                        if raw_pref and c_num and len(c_num) >= 4:
+                            cand_pref = c_num[:4]
+                            is_raw_container = bool(raw_pref in KNOWN_BIC_PREFIXES or (len(raw_pref) == 4 and raw_pref.endswith(('U', 'J', 'Z'))))
+                            if is_raw_container:
+                                owner_matching = sum(1 for a, b in zip(raw_pref[:3], cand_pref[:3]) if a == b)
+                                if owner_matching == 0:
+                                    continue
+
+                        # 3. If candidate already has confirmed container, do not associate if time_gap > 20.0s
+                        if cand.status == 'CONFIRMED' and time_gap > 20.0:
+                            continue
+
+                        valid_candidates.append((time_gap, cand))
+
+                    if valid_candidates:
+                        valid_candidates.sort(key=lambda x: x[0])  # Minimum time gap!
+                        existing = valid_candidates[0][1]
+                    else:
+                        existing = None
+
                     if not existing and obs.origin_key.startswith('dwell:') and snapshots and getattr(obs, 'image', None) is not None:
                         long_delta = timedelta(seconds=max(float(same_container_window_seconds or 0), 600.0))
                         unconfirmed_candidates = session.scalars(select(GateEvent).where(
@@ -913,7 +952,13 @@ class GateRepository:
                 if not existing and getattr(obs, 'event_id', None):
                     active = session.get(GateEvent, obs.event_id)
                     if active and active.gate_id == obs.gate_id:
-                        if not is_second_slot and is_distinct_container(active.container_number, number):
+                        act_num = active.container_number or ''
+                        raw_t = (getattr(obs.ocr, 'raw_text', '') or '').strip().upper()
+                        m_raw_pref = re.search(r'[A-Z]{4}', raw_t)
+                        r_pref = m_raw_pref.group(0) if m_raw_pref else None
+                        is_r_container = bool(r_pref in KNOWN_BIC_PREFIXES or (r_pref and len(r_pref) == 4 and r_pref.endswith(('U', 'J', 'Z'))))
+                        pref_conflict = bool(r_pref and act_num and len(act_num) >= 4 and is_r_container and sum(1 for a, b in zip(r_pref[:3], act_num[:3]) if a == b) == 0)
+                        if not is_second_slot and (is_distinct_container(active.container_number, number) or pref_conflict):
                             pass  # Distinct containers! Never merge!
                         else:
                             time_diff = datetime_diff_seconds(active.timestamp, obs.detection.frame_timestamp)
@@ -923,7 +968,13 @@ class GateRepository:
                 if ongoing_event_id and not existing:
                     active = session.get(GateEvent, ongoing_event_id)
                     if active and active.gate_id == obs.gate_id:
-                        if not is_second_slot and is_distinct_container(active.container_number, number):
+                        act_num = active.container_number or ''
+                        raw_t = (getattr(obs.ocr, 'raw_text', '') or '').strip().upper()
+                        m_raw_pref = re.search(r'[A-Z]{4}', raw_t)
+                        r_pref = m_raw_pref.group(0) if m_raw_pref else None
+                        is_r_container = bool(r_pref in KNOWN_BIC_PREFIXES or (r_pref and len(r_pref) == 4 and r_pref.endswith(('U', 'J', 'Z'))))
+                        pref_conflict = bool(r_pref and act_num and len(act_num) >= 4 and is_r_container and sum(1 for a, b in zip(r_pref[:3], act_num[:3]) if a == b) == 0)
+                        if not is_second_slot and (is_distinct_container(active.container_number, number) or pref_conflict):
                             pass  # Distinct containers! Never merge!
                         else:
                             time_diff = datetime_diff_seconds(active.timestamp, obs.detection.frame_timestamp)
@@ -1010,7 +1061,6 @@ class GateRepository:
                             # Same physical container, OCR read improved or varied!
                             ex_is_valid = bool(existing.container_number and is_valid_iso_6346(existing.container_number))
                             obs_is_valid = bool(number and is_valid_iso_6346(number))
-                            from app.ocr.validator import KNOWN_BIC_PREFIXES
                             ex_pref_known = bool(existing.container_number and existing.container_number[:4] in KNOWN_BIC_PREFIXES)
                             obs_pref_known = bool(number and number[:4] in KNOWN_BIC_PREFIXES)
                             if not ex_is_valid and obs_is_valid:
