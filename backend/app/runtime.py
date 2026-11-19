@@ -1370,7 +1370,7 @@ class GateRuntime:
                 target_session = self.passage_sessions.get_session_by_event_id(job.event_id)
             if not target_session and hasattr(self, 'passage_sessions'):
                 cand_sess = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
-                if cand_sess and abs((job.frame.timestamp - cand_sess.created_at).total_seconds()) <= 25.0:
+                if cand_sess and abs((job.frame.timestamp - cand_sess.created_at).total_seconds()) <= 5.0:
                     target_session = cand_sess
             active_session = target_session
 
@@ -1434,15 +1434,15 @@ class GateRuntime:
                             val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
                             from app.database.repositories.gate import is_distinct_container
                             if lane_num and val_num and is_distinct_container(lane_num, val_num):
+                                ongoing = None
+                            else:
                                 lane_ts = active_lane.get('last_seen')
                                 frame_ts = getattr(getattr(job, 'frame', None), 'timestamp', None)
                                 time_diff = abs((frame_ts - lane_ts).total_seconds()) if (lane_ts and frame_ts) else 999.0
-                                if time_diff <= 25.0:
+                                if time_diff <= 5.0:
                                     ongoing = active_lane.get('event_id')
                                 else:
                                     ongoing = None
-                            else:
-                                ongoing = active_lane.get('event_id')
             result = self.events.observe(job, validation, additional_frames=additional,
                                          proof_job=proof, ongoing_event_id=ongoing)
             self.ocr_store.complete(job_id, result[0] if result else None)

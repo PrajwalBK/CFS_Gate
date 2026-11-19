@@ -130,8 +130,8 @@ class Settings(BaseSettings):
     dedup_seconds: float = Field(default=30, gt=0)
     # A tracker can be re-created when a queued truck remains in view.  Keep
     # one persisted event for the same confirmed container/lane/direction for
-    # this long, while leaving normal (unidentified) passage dedup unchanged.
-    same_container_event_window_seconds: float = Field(default=900, ge=60, le=3600)
+    # this long (45 minutes default), while leaving normal (unidentified) passage dedup unchanged.
+    same_container_event_window_seconds: float = Field(default=2700, ge=60, le=7200)
     track_ttl_seconds: float = Field(default=5, gt=0)
     snapshot_directory: Path = Path('snapshots')
     upload_directory: Path = Path('uploads')

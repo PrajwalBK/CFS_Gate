@@ -111,15 +111,15 @@ class EventManager:
                             val_num = validation.normalized_text if (validation and validation.valid_check_digit) else None
                             from app.database.repositories.gate import is_distinct_container
                             if lane_num and val_num and is_distinct_container(lane_num, val_num):
+                                ongoing_event_id = None
+                            else:
                                 lane_ts = active_lane.get('last_seen')
                                 frame_ts = getattr(getattr(job, 'frame', None), 'timestamp', None)
                                 time_diff = abs((frame_ts - lane_ts).total_seconds()) if (lane_ts and frame_ts) else 999.0
-                                if time_diff <= 25.0:
+                                if time_diff <= 5.0:
                                     ongoing_event_id = active_lane.get('event_id')
                                 else:
                                     ongoing_event_id = None
-                            else:
-                                ongoing_event_id = active_lane.get('event_id')
 
             # If all attempts yielded no readable text, flag for review with an alert rather than silently dropping
             if not any(getattr(r, 'raw_text', None) for r in evidence.reads if r):

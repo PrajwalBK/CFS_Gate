@@ -304,13 +304,13 @@ class GateRepository:
 
                 slot_pos = getattr(session, 'container_slot', 'CONTAINER_1') or 'CONTAINER_1'
                 dedup_sec = float(getattr(self, 'dedup_seconds', 35.0) or 35.0)
-                same_window = float(getattr(self, 'same_container_event_window_seconds', 900.0) or 900.0)
+                same_window = float(getattr(self, 'same_container_event_window_seconds', 2700.0) or 2700.0)
                 delta = timedelta(seconds=max(dedup_sec, 60.0))
-                container_delta = timedelta(seconds=max(same_window, 900.0))
+                container_delta = timedelta(seconds=max(same_window, 2700.0))
 
-                # 15-minute same-container window check:
+                # 45-minute same-container window check:
                 # If an authoritative event with this exact container number ALREADY exists on this gate
-                # in this direction within same_container_event_window_seconds (15 mins),
+                # in this direction within same_container_event_window_seconds (45 mins),
                 # this current session represents a re-read, pause, or boom-barrier wait of the SAME vehicle.
                 if slot_pos == 'CONTAINER_1' and container_num:
                     prior_event = db_session.scalar(select(GateEvent).where(
@@ -1770,7 +1770,7 @@ class GateRepository:
 
             return merged_count
 
-    def canonical_event_id(self, event_id: str, max_gap_seconds: int = 900, snapshots=None):
+    def canonical_event_id(self, event_id: str, max_gap_seconds: int = 2700, snapshots=None):
         """Return the oldest confirmed event for a duplicate dwell identity, comparing
         exact container numbers, capture timestamps, and snapshot image similarity."""
         with self.db.sessions() as session:

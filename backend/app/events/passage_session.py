@@ -426,6 +426,15 @@ class ContainerPassageSession:
                             txt = getattr(val, 'normalized_text', '') or ''
                             if txt and len(txt) == 11 and is_distinct_container(self.confirmed_container_number, txt):
                                 continue
+                        # Strict temporal coherence: reject frame candidates whose timestamp falls outside this container's transit/dwell window
+                        if getattr(f, 'timestamp', None) and self.created_at:
+                            time_before = (self.created_at - f.timestamp).total_seconds()
+                            if time_before > 4.0:
+                                continue
+                        if getattr(f, 'timestamp', None) and self.last_seen:
+                            time_after = (f.timestamp - self.last_seen).total_seconds()
+                            if time_after > 4.0:
+                                continue
                         # Strict track isolation: reject frame candidates belonging to a different container track
                         if self.track_id is not None and getattr(f, 'track_id', None) is not None and f.track_id != self.track_id:
                             continue
