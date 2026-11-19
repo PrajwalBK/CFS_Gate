@@ -983,3 +983,154 @@ def test_noisy_preliminary_reads_dispatch_only_final_consensus_post(gate_setup, 
     assert 'FSZU1228227' not in [p['Containers'][0]['ContainerNumber'] for p in post_calls]
 
 
+# -------------------------------------------------------------------------------------
+# Test J: Early Incorrect POST corrected by High-Confidence Multi-Camera PUT
+# -------------------------------------------------------------------------------------
+def test_two_stage_early_incorrect_post_corrected_by_high_confidence_put(gate_setup, repository, snapshots, mock_cloud_settings):
+    """
+    Test E2E:
+    1. Early distant frame reads an incorrect but coincidentally ISO-valid number (MRSU3147856 at 77%),
+       immediately dispatching POST.
+    2. Cloud returns EventId and VisitId.
+    3. Vehicle dwells at gate; subsequent frames across multiple cameras read the true container
+       (MRSU9147869 at 99.8% max confidence) along with all camera angles.
+    4. Passage finalizes and triggers Stage 2 PUT.
+    5. Verify PUT sends the corrected container (MRSU9147869), max percentage (1.0),
+       all multi-camera images, and all required update fields.
+    """
+    cams = [c for c in gate_setup if c.gate_id == 'LANE-IN']
+    cam_ids = [c.id for c in cams]
+
+    # Step 1: Early observation with MRSU3147856 at 77% confidence
+    t1 = datetime.now(timezone.utc)
+    frame1 = _create_sharp_test_frame("early_MRSU3147856")
+    det1 = Detection(cams[0].id, t1, 'container', 0.95, (10, 10, 300, 200))
+    obs1 = Observation(
+        origin_key='dwell:gate-in-cam-1:track_1',
+        gate_id='LANE-IN',
+        track_id=1,
+        detection=det1,
+        ocr=Validation(
+            raw_text='MRSU3147856',
+            normalized_text='MRSU3147856',
+            confidence=0.77,
+            valid_format=True,
+            valid_check_digit=True,
+            validation_status='VALID'
+        ),
+        direction='ENTRY',
+        image=frame1,
+        started_at=t1,
+        confirmed=True
+    )
+    event_id, created = repository.save_observation(obs1, snapshots, 35.0)
+    assert created is True
+
+    dispatcher = CloudOutboxDispatcher(mock_cloud_settings, repository=repository, snapshots=snapshots)
+
+    post_calls = []
+    put_calls = []
+
+    def mock_post(payload):
+        post_calls.append(payload)
+        return {
+            "visitDatabaseId": "vdb-mrsu-test-uuid",
+            "visitId": "VISIT-MRSU-TEST-01",
+            "eventId": "CLOUD-MRSU-EVENT-01",
+            "eventType": "GATE_IN"
+        }
+
+    def mock_put(cloud_id, payload):
+        put_calls.append((cloud_id, payload))
+        return True
+
+    with patch.object(dispatcher.session, 'post_gate_event', side_effect=mock_post), \
+         patch.object(dispatcher.session, 'put_gate_event_images', side_effect=mock_put):
+
+        dispatcher.start()
+
+        # Dispatch early POST
+        dispatcher.enqueue(obs1, event_id, stage='POST', force=True)
+
+        for _ in range(60):
+            if len(post_calls) >= 1:
+                break
+            time.sleep(0.05)
+
+        assert len(post_calls) == 1, "Expected Stage 1 POST to be dispatched"
+        post_data = post_calls[0]
+        # Assert initial POST had the early read MRSU3147856 at 77%
+        assert post_data['containerNumber'] == 'MRSU3147856'
+        assert post_data['Containers'][0]['ContainerNumber'] == 'MRSU3147856'
+        assert post_data['Containers'][0]['ContainerNumberConfidence'] == 0.77
+
+        # Step 2: Vehicle gets close to barrier; all cameras capture crisp images
+        # OCR reads correct container MRSU9147869 at 99.8% (0.998)
+        t2 = t1 + timedelta(seconds=2)
+        for cam in cams:
+            cam_frame = _create_sharp_test_frame(f"closeup_{cam.id}_MRSU9147869")
+            det2 = Detection(cam.id, t2, 'container', 0.98, (10, 10, 300, 200))
+            obs2 = Observation(
+                origin_key=f'dwell:{cam.id}:track_1',
+                gate_id='LANE-IN',
+                track_id=1,
+                detection=det2,
+                ocr=Validation(
+                    raw_text='MRSU9147869',
+                    normalized_text='MRSU9147869',
+                    confidence=0.998,
+                    valid_format=True,
+                    valid_check_digit=True,
+                    validation_status='VALID'
+                ),
+                direction='ENTRY',
+                image=cam_frame,
+                started_at=t2,
+                confirmed=True,
+                event_id=event_id
+            )
+            repository.save_observation(obs2, snapshots, 35.0, ongoing_event_id=event_id)
+
+        # Verify DB upgraded event to true container MRSU9147869
+        db_ev = repository.event(event_id)
+        assert db_ev['container_number'] == 'MRSU9147869', f"Expected MRSU9147869 in DB, got {db_ev['container_number']}"
+
+        # Step 3: Trigger Stage 2 PUT
+        dispatcher.enqueue(None, event_id, stage='PUT', force=True)
+
+        for _ in range(80):
+            if len(put_calls) >= 1:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+    assert len(put_calls) == 1, "Expected Stage 2 PUT to be dispatched"
+    target_cloud_id, put_payload = put_calls[0]
+
+    # Verify PUT targeted the EXACT cloud eventId and visitId from POST
+    assert target_cloud_id == "CLOUD-MRSU-EVENT-01"
+    assert put_payload['EventId'] == "CLOUD-MRSU-EVENT-01"
+    assert put_payload['VisitId'] == "VISIT-MRSU-TEST-01"
+
+    # Verify PUT corrected the container number to MRSU9147869
+    assert put_payload['ContainerNumber'] == "MRSU9147869"
+    assert put_payload['Containers'][0]['ContainerNumber'] == "MRSU9147869"
+
+    # Verify PUT sent the MAX confidence percentage (1.0 / 100%)
+    assert put_payload['ContainerNumberConfidence'] == 1.0
+    assert put_payload['Containers'][0]['ContainerNumberConfidence'] == 1.0
+
+    # Verify Size
+    assert put_payload['Size'] == '40'
+    assert put_payload['Containers'][0]['Size'] == '40'
+
+    # Verify multi-camera images are included
+    put_images = put_payload['Containers'][0]['Images']
+    assert len(put_images) == 3, f"Expected 3 camera images, got {len(put_images)}"
+    cams_in_put = {img['CameraId'] for img in put_images}
+    assert cams_in_put == {'gate-in-cam-1', 'gate-in-cam-2', 'gate-in-cam-3'}
+    for img in put_images:
+        assert img['Image'].startswith('data:image/jpeg;base64,')
+
+

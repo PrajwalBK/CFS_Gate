@@ -1072,8 +1072,11 @@ class GateRepository:
                                 existing.container_number = number
                                 if obs.confirmed:
                                     existing.status = 'CONFIRMED'
-                            elif not ex_is_valid and obs_conf >= prior_best_conf:
+                            elif obs_is_valid and (not ex_is_valid or obs_conf > prior_best_conf):
+                                # Upgrade to higher-confidence verified read (e.g. 99% close-up over 77% distant read)
                                 existing.container_number = number
+                                if obs.confirmed:
+                                    existing.status = 'CONFIRMED'
                             else:
                                 number = existing.container_number or number
                         else:
