@@ -320,6 +320,7 @@ class GateRepository:
                         GateEvent.container_number == container_num,
                         (GateEvent.event_type == session.direction) | (GateEvent.event_type == 'UNKNOWN'),
                         GateEvent.status != 'DUPLICATE',
+                        func.coalesce(GateEvent.cloud_delivery_state, 'PENDING') != 'DUPLICATE',
                         GateEvent.timestamp >= session.created_at - container_delta,
                         GateEvent.timestamp <= session.created_at + container_delta,
                     ).order_by(GateEvent.timestamp.asc()))
@@ -327,11 +328,22 @@ class GateRepository:
                         if existing and existing.id != prior_event.id:
                             ex_num = existing.container_number or ''
                             if not ex_num or not is_distinct_container(ex_num, prior_event.container_number):
-                                existing.status = 'DUPLICATE'
-                                existing.cloud_delivery_state = 'DUPLICATE'
-                                existing.cloud_synced = True
-                        target_event_id = prior_event.id
-                        existing = prior_event
+                                # Protect cloud-delivered events: never demote an event already acknowledged by cloud
+                                if existing.cloud_event_id or existing.cloud_delivery_state == 'DELIVERED':
+                                    if not prior_event.cloud_event_id and prior_event.cloud_delivery_state != 'DELIVERED':
+                                        prior_event.status = 'DUPLICATE'
+                                        prior_event.cloud_delivery_state = 'DUPLICATE'
+                                        prior_event.cloud_synced = True
+                                    target_event_id = existing.id
+                                else:
+                                    existing.status = 'DUPLICATE'
+                                    existing.cloud_delivery_state = 'DUPLICATE'
+                                    existing.cloud_synced = True
+                                    target_event_id = prior_event.id
+                                    existing = prior_event
+                        else:
+                            target_event_id = prior_event.id
+                            existing = prior_event
 
                 if not existing and slot_pos == 'CONTAINER_1':
                     # 1. Search for existing event on the same gate with the exact same container number within container_delta (15 mins)
@@ -341,6 +353,7 @@ class GateRepository:
                             GateEvent.container_number == container_num,
                             (GateEvent.event_type == session.direction) | (GateEvent.event_type == 'UNKNOWN'),
                             GateEvent.status != 'DUPLICATE',
+                            func.coalesce(GateEvent.cloud_delivery_state, 'PENDING') != 'DUPLICATE',
                             GateEvent.timestamp >= session.created_at - container_delta,
                             GateEvent.timestamp <= session.created_at + container_delta,
                         ).order_by(GateEvent.timestamp.desc()))
@@ -353,6 +366,7 @@ class GateRepository:
                                 GateEvent.gate_id == session.gate_id,
                                 (GateEvent.event_type == session.direction) | (GateEvent.event_type == 'UNKNOWN'),
                                 GateEvent.status != 'DUPLICATE',
+                                func.coalesce(GateEvent.cloud_delivery_state, 'PENDING') != 'DUPLICATE',
                                 GateEvent.timestamp >= session.created_at - container_delta,
                                 GateEvent.timestamp <= session.created_at + container_delta,
                             ).order_by(GateEvent.timestamp.desc())).all()
@@ -391,6 +405,22 @@ class GateRepository:
                 )
                 if should_merge_folders:
                     snapshots.evidence_manager.merge_event_folders(session.event_id, target_event_id, container_number=container_num)
+                    # Reparent snapshots, detections, and logs in database so primary event retains full multi-camera evidence
+                    db_session.execute(
+                        update(Snapshot)
+                        .where(Snapshot.event_id == session.event_id)
+                        .values(event_id=target_event_id)
+                    )
+                    db_session.execute(
+                        update(DetectionRecord)
+                        .where(DetectionRecord.event_id == session.event_id)
+                        .values(event_id=target_event_id)
+                    )
+                    db_session.execute(
+                        update(SystemLog)
+                        .where(SystemLog.event_id == session.event_id)
+                        .values(event_id=target_event_id)
+                    )
                 elif snapshots and hasattr(snapshots, 'evidence_manager') and container_num:
                     snapshots.evidence_manager.update_container_number(target_event_id, container_num)
 
@@ -1646,7 +1676,7 @@ class GateRepository:
                 .where(
                     GateEvent.status == 'CONFIRMED',
                     func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_([
-                        'PENDING', 'OFFLINE', 'CONFLICT', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
+                        'PENDING', 'OFFLINE', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
                     ]),
                     (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
                     (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))

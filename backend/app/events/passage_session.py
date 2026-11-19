@@ -426,18 +426,21 @@ class ContainerPassageSession:
                             txt = getattr(val, 'normalized_text', '') or ''
                             if txt and len(txt) == 11 and is_distinct_container(self.confirmed_container_number, txt):
                                 continue
-                        # Strict temporal coherence: reject frame candidates whose timestamp falls outside this container's transit/dwell window
+                        # Strict temporal coherence: allow full multi-camera transit/dwell window
+                        max_transit = max(getattr(self, 'max_session_seconds', 60.0) or 60.0, 45.0)
                         if getattr(f, 'timestamp', None) and self.created_at:
                             time_before = (self.created_at - f.timestamp).total_seconds()
-                            if time_before > 4.0:
+                            if time_before > max_transit:
                                 continue
                         if getattr(f, 'timestamp', None) and self.last_seen:
                             time_after = (f.timestamp - self.last_seen).total_seconds()
-                            if time_after > 4.0:
+                            if time_after > max_transit:
                                 continue
-                        # Strict track isolation: reject frame candidates belonging to a different container track
-                        if self.track_id is not None and getattr(f, 'track_id', None) is not None and f.track_id != self.track_id:
-                            continue
+                        # Strict track isolation: apply track check only if candidate is on the same camera that defined this track
+                        primary_c = getattr(self, 'primary_camera', None)
+                        if primary_c and cam_id == primary_c:
+                            if self.track_id is not None and getattr(f, 'track_id', None) is not None and f.track_id != self.track_id:
+                                continue
                         valid_frames.append(f)
                     if valid_frames:
                         best = max(valid_frames, key=lambda f: (self._identity_read_matches(f), f.quality_score))

@@ -642,24 +642,69 @@ class CloudOutboxDispatcher:
                     continue
                 cam_snapshots.setdefault(cam_id, []).append(snap)
 
-            # Check filesystem event directory for any configured camera snapshots
+            # Check filesystem directories (snapshots/ and evidence/) for any configured camera snapshots
+            from pathlib import Path
+            from sqlalchemy import select
             event_id_str = str(event_record.get('id') if event_record else '')
-            event_dir = self.snapshots.root / event_id_str if (self.snapshots and event_id_str) else None
-            if event_dir and event_dir.is_dir():
-                for missing_cam in (expected_gate_cams - set(cam_snapshots.keys())):
+            event_dirs = []
+            if self.snapshots:
+                if event_id_str:
+                    leg_dir = self.snapshots.root / event_id_str
+                    if leg_dir.is_dir():
+                        event_dirs.append(leg_dir)
+                if hasattr(self.snapshots, 'evidence_manager') and self.snapshots.evidence_manager:
+                    try:
+                        ev_folder = self.snapshots.evidence_manager.get_existing_folder(event_id_str)
+                        if ev_folder and ev_folder.is_dir() and ev_folder not in event_dirs:
+                            event_dirs.append(ev_folder)
+                    except Exception:
+                        pass
+
+            # Also check companion sessions in DB if any camera is missing
+            if self.repository and hasattr(self.repository, 'db') and cntr1:
+                try:
+                    with self.repository.db.sessions() as db_sess:
+                        from app.database.models import GateEvent
+                        comp_ids = db_sess.scalars(
+                            select(GateEvent.id).where(
+                                GateEvent.container_number == cntr1,
+                                GateEvent.id != event_id_str
+                            )
+                        ).all()
+                        for comp_id in comp_ids:
+                            if self.snapshots:
+                                c_leg = self.snapshots.root / str(comp_id)
+                                if c_leg.is_dir() and c_leg not in event_dirs:
+                                    event_dirs.append(c_leg)
+                                if hasattr(self.snapshots, 'evidence_manager') and self.snapshots.evidence_manager:
+                                    try:
+                                        c_ev = self.snapshots.evidence_manager.get_existing_folder(str(comp_id))
+                                        if c_ev and c_ev.is_dir() and c_ev not in event_dirs:
+                                            event_dirs.append(c_ev)
+                                    except Exception:
+                                        pass
+                except Exception:
+                    pass
+
+            for missing_cam in (expected_gate_cams - set(cam_snapshots.keys())):
+                found_disk = False
+                for ed in event_dirs:
                     disk_cands = [
-                        event_dir / f"{missing_cam}.jpg",
-                        event_dir / f"{missing_cam}.png",
-                    ] + list(event_dir.glob(f"*{missing_cam}*.jpg")) + list(event_dir.glob(f"*{missing_cam}*.png"))
+                        ed / f"{missing_cam}.jpg",
+                        ed / f"{missing_cam}.png",
+                    ] + list(ed.glob(f"*{missing_cam}*.jpg")) + list(ed.glob(f"*{missing_cam}*.png"))
                     for cand in disk_cands:
                         if cand.is_file() and not cand.name.endswith('.quality') and 'crop' not in cand.name.lower() and 'rot180' not in cand.name.lower():
                             cam_snapshots.setdefault(missing_cam, []).append({
                                 'id': f'disk_{missing_cam}',
                                 'camera_id': missing_cam,
-                                'image_path': f'{event_id_str}/{cand.name}',
+                                'image_path': str(cand),
                                 'timestamp': event_record.get('timestamp')
                             })
+                            found_disk = True
                             break
+                    if found_disk:
+                        break
 
             best_by_camera = {}
             event_ts = event_record.get('timestamp')
@@ -681,8 +726,8 @@ class CloudOutboxDispatcher:
                         )
 
                         # 1. Passage window check:
-                        # Strictly cap at 25s from the event passage timestamp to prevent mixing separate truck visits.
-                        max_gap = 25.0
+                        # Allow normal passage and boom-barrier dwell times (up to configured same-container window)
+                        max_gap = max(float(getattr(self.settings, 'same_container_event_window_seconds', 1800.0) or 1800.0), 300.0)
                         if event_ts and snap_ts and datetime_diff_seconds(event_ts, snap_ts) > max_gap:
                             continue
 
@@ -728,10 +773,10 @@ class CloudOutboxDispatcher:
                                 if det_ts and snap_ts and datetime_diff_seconds(det_ts, snap_ts) <= 10.0:
                                     for ocr in event_record.get('ocr_results', []):
                                         if ocr.get('detection_id') == det.get('id'):
-                                            ocr_text = ocr.get('normalized_text')
-                                            if ocr_text and is_distinct_container(cntr1, ocr_text):
-                                                is_mismatched = True
-                                                break
+                                             ocr_text = ocr.get('normalized_text')
+                                             if ocr_text and is_distinct_container(cntr1, ocr_text):
+                                                 is_mismatched = True
+                                                 break
                                     if is_mismatched:
                                         break
                         if is_mismatched:
@@ -740,23 +785,27 @@ class CloudOutboxDispatcher:
                             })
                             continue
 
-                        snap_p = self.snapshots.path(snap['image_path'])
+                        snap_img_str = str(snap.get('image_path') or '')
+                        if Path(snap_img_str).is_absolute() and Path(snap_img_str).is_file():
+                            snap_p = Path(snap_img_str)
+                        else:
+                            snap_p = self.snapshots.path(snap_img_str)
                         if not snap_p.is_file():
                             camera_id_str = str(snap.get('camera_id') or cam_id)
                             snap_id_str = str(snap.get('id') or '')
-                            if event_dir and event_dir.is_dir():
+                            for ed in event_dirs:
                                 cands = [
-                                    event_dir / f"{camera_id_str}_{snap_id_str}.jpg",
-                                    event_dir / f"{camera_id_str}_{snap_id_str}_rear.jpg",
-                                    event_dir / f"{camera_id_str}.jpg",
-                                    event_dir / f"{camera_id_str}.png",
+                                    ed / f"{camera_id_str}_{snap_id_str}.jpg",
+                                    ed / f"{camera_id_str}_{snap_id_str}_rear.jpg",
+                                    ed / f"{camera_id_str}.jpg",
+                                    ed / f"{camera_id_str}.png",
                                 ]
-                                cands += list(event_dir.glob(f"*{camera_id_str}*.jpg"))
-                                cands += list(event_dir.glob(f"*{camera_id_str}*.png"))
-                                cands += list(event_dir.glob(f"*companion_{camera_id_str}.png"))
+                                cands += list(ed.glob(f"*{camera_id_str}*.jpg"))
+                                cands += list(ed.glob(f"*{camera_id_str}*.png"))
+                                cands += list(ed.glob(f"*companion_{camera_id_str}.png"))
                                 cands = [c for c in cands if c.is_file() and not c.name.endswith('.quality') and 'crop' not in c.name.lower() and 'rot180' not in c.name.lower()]
-                                for cand in cands:
-                                    snap_p = cand
+                                if cands:
+                                    snap_p = cands[0]
                                     break
                         if not snap_p.is_file():
                             continue
@@ -1166,7 +1215,7 @@ class CloudOutboxDispatcher:
                             'Containers': [{
                                 'ContainerNumber': cntr1,
                                 'ContainerNumberConfidence': round(conf_1, 2),
-                                'Size': size_1,
+                                'Size': str(size_1) if size_1 is not None else None,
                                 'ContainerSize': cs1 or None,
                                 'SizeCode': iso_s1 or None,
                                 'Position': 'SINGLE',
@@ -1338,12 +1387,12 @@ class CloudOutboxDispatcher:
                         'VisitId': str(cloud_visit_id),
                         'ContainerNumber': orig_cntr,
                         'ContainerNumberConfidence': round(conf_1, 2),
-                        'Size': size_1,
+                        'Size': str(size_1) if size_1 is not None else None,
                         'Containers': [
                             {
                                 'ContainerNumber': orig_cntr,
                                 'ContainerNumberConfidence': round(conf_1, 2),
-                                'Size': size_1,
+                                'Size': str(size_1) if size_1 is not None else None,
                                 'ContainerSize': cs1 or None,
                                 'SizeCode': iso_s1 or None,
                                 'Position': 'SINGLE',
