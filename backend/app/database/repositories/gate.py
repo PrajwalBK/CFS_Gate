@@ -324,9 +324,11 @@ class GateRepository:
                     ).order_by(GateEvent.timestamp.asc()))
                     if prior_event:
                         if existing and existing.id != prior_event.id:
-                            existing.status = 'DUPLICATE'
-                            existing.cloud_delivery_state = 'DUPLICATE'
-                            existing.cloud_synced = True
+                            ex_num = existing.container_number or ''
+                            if not ex_num or not is_distinct_container(ex_num, prior_event.container_number):
+                                existing.status = 'DUPLICATE'
+                                existing.cloud_delivery_state = 'DUPLICATE'
+                                existing.cloud_synced = True
                         target_event_id = prior_event.id
                         existing = prior_event
 
@@ -1472,10 +1474,6 @@ class GateRepository:
                 ev.cloud_delivery_state = state
                 ev.cloud_delivery_error = error[:256] if error else None
                 if state == 'DELIVERED':
-                    ev.cloud_synced = True
-                    ev.cloud_synced_at = utcnow()
-                elif state in ('CONFLICT', 'SERVER_ERROR', 'BLOCKED', 'REJECTED', 'DUPLICATE'):
-                    # Terminal non-retryable state: mark cloud_synced=True so sweeps and filters ignore it
                     ev.cloud_synced = True
                     ev.cloud_synced_at = utcnow()
                 else:

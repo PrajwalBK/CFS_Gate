@@ -77,12 +77,12 @@ class EventManager:
             job.origin_key.startswith('dwell:') and
             getattr(job, 'entrance_complete', False) and
             len(evidence.reads) >= 2 and
-            (count >= 2 or (consensus_val and consensus_val.valid_check_digit and consensus_val.confidence >= 0.85)) and
+            (count >= 1 or (consensus_val and consensus_val.valid_check_digit)) and
             not tied
         )
         if dwell_end_fallback:
             confirmed = True
-        if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and (count >= 2 or (consensus_val and consensus_val.valid_check_digit and consensus_val.confidence >= 0.85)) and not tied:
+        if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and (count >= 1 or (consensus_val and consensus_val.valid_check_digit)) and not tied:
             confirmed = True
         if not confirmed:
             # While attempts remain, do not prematurely publish an unconfirmed / NEEDS_REVIEW row.
@@ -188,11 +188,9 @@ class EventManager:
                     recent_lane_finalized = True
 
         is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
-        min_dispatch_conf = getattr(self.settings, 'min_cloud_dispatch_confidence', 0.85)
-        is_conf_sufficient = bool(obs.ocr and obs.ocr.confidence >= min_dispatch_conf)
 
         should_dispatch_post = (
-            obs.confirmed and is_ocr_valid and is_conf_sufficient
+            obs.confirmed and is_ocr_valid
             and not has_active_passage_session
             and not recent_lane_finalized
             and (event_id not in self._dispatched_events)
