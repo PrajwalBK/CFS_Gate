@@ -244,6 +244,28 @@ class ProsperSession:
 
         headers['Content-Type'] = 'application/json'
 
+        # Check requirement: At least minimum 1 evidence proof image is required before sending into POST API
+        containers = payload.get('Containers') or []
+        if containers:
+            has_proof = (
+                any(
+                    isinstance(c, dict) and any(
+                        isinstance(img, dict) and str(img.get('Image', '')).startswith('data:image/')
+                        for img in (c.get('Images') or [])
+                    )
+                    for c in containers
+                )
+                or any(
+                    isinstance(img, dict) and str(img.get('Image', '')).startswith('data:image/')
+                    for img in (payload.get('Images') or [])
+                )
+                or bool(payload.get('imageUrl'))
+            )
+            if not has_proof:
+                log.warning('prosper_post_gate_event_rejected_missing_images: At least minimum 1 evidence proof image is required before sending into POST API',
+                            extra={'event_id': payload.get('id') or payload.get('VisitId')})
+                return 'REJECTED'
+
         # Check whether this is the new /api/v1/gate/events schema or legacy /api/sites/{site_id}/gate-events
         if 'VisitId' in payload or 'Containers' in payload:
             url = self.events_url
@@ -1229,6 +1251,46 @@ class CloudOutboxDispatcher:
                         log.warning('prosper_post_blocked_invalid_container', extra={'event_id': event_id, 'numbers': numbers})
                         if self.repository:
                             self.repository.mark_cloud_delivery(event_id, 'BLOCKED', 'Invalid container checksum')
+                        self.queue.task_done()
+                        continue
+
+                    # Strict Requirement: In POST API, at least minimum 1 evidence proof image is required.
+                    # Otherwise, the data must NOT be sent into the POST API.
+                    containers = payload.get('Containers') or []
+                    has_proof_images = (
+                        any(
+                            isinstance(c, dict) and any(
+                                isinstance(img, dict) and str(img.get('Image', '')).startswith('data:image/')
+                                for img in (c.get('Images') or [])
+                            )
+                            for c in containers
+                        )
+                        or any(
+                            isinstance(img, dict) and str(img.get('Image', '')).startswith('data:image/')
+                            for img in (payload.get('Images') or [])
+                        )
+                        or bool(payload.get('imageUrl'))
+                    )
+
+                    if not has_proof_images:
+                        wait_duration = time.monotonic() - float(item.get('enqueued_at', time.monotonic()))
+                        # Allow up to 25.0 seconds for passage finalization and camera snapshots to save to disk
+                        if wait_duration < 25.0 and not item.get('force'):
+                            item['not_before'] = time.monotonic() + 1.0
+                            self.queue.put(item)
+                            self.queue.task_done()
+                            continue
+
+                        log.warning(
+                            'prosper_post_blocked_missing_evidence_images: At least minimum 1 evidence proof image is required before sending into POST API',
+                            extra={'event_id': event_id, 'container_number': cntr1, 'wait_duration': wait_duration}
+                        )
+                        if self.repository:
+                            self.repository.mark_cloud_delivery(
+                                event_id,
+                                'BLOCKED',
+                                'Missing evidence proof images (at least 1 required for cloud POST)'
+                            )
                         self.queue.task_done()
                         continue
 

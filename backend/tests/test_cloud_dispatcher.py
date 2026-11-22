@@ -319,6 +319,7 @@ def test_missing_cameras_never_replicated_with_duplicate_photos(mock_settings, t
     from datetime import datetime, timezone
     mock_snaps = MagicMock()
     mock_repo = MagicMock()
+    mock_repo.canonical_event_id.return_value = 'evt-max-pct'
     mock_repo.event.return_value = {
         'id': 'evt-single-cam',
         'status': 'CONFIRMED',
@@ -364,6 +365,7 @@ def test_post_gate_event_selects_maximum_percentage_and_consensus_accuracy(mock_
 
     mock_snaps = MagicMock()
     mock_repo = MagicMock()
+    mock_repo.canonical_event_id.return_value = 'evt-max-pct'
     
     # Event has multiple OCR reads: early 0.82, peak sweet-spot 0.99, trailing 0.94
     mock_repo.event.return_value = {
@@ -414,3 +416,42 @@ def test_post_gate_event_selects_maximum_percentage_and_consensus_accuracy(mock_
         assert container['ContainerNumber'] == 'CSQU3054383'
         # Must select the MAXIMUM percentage (0.99 / 99%) across all reads rather than the early 0.82!
         assert container['ContainerNumberConfidence'] == 0.99
+
+
+def test_post_gate_event_blocked_when_zero_evidence_images(mock_settings):
+    """
+    Ensure that in POST API, at least minimum 1 evidence proof image is required.
+    If 0 evidence proof images are available, data must NOT be sent to the POST API.
+    """
+    mock_snaps = MagicMock()
+    mock_repo = MagicMock()
+    mock_repo.canonical_event_id.return_value = 'evt-no-images'
+    mock_repo.event.return_value = {
+        'id': 'evt-no-images',
+        'status': 'CONFIRMED',
+        'container_number': 'MSKU1234565',
+        'snapshots': [],
+        'ocr_results': [{'normalized_text': 'MSKU1234565', 'confidence': 0.95, 'valid_check_digit': True}]
+    }
+
+    dispatcher = CloudOutboxDispatcher(mock_settings, repository=mock_repo, snapshots=mock_snaps)
+
+    with patch.object(dispatcher.session, 'post_gate_event', return_value=True) as mock_post:
+        dispatcher.start()
+        # Enqueue with force=True but no observation image and no snapshots in DB
+        dispatcher.enqueue(None, 'evt-no-images', force=True, stage='POST')
+
+        for _ in range(20):
+            if mock_post.called:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+        # Must NOT call post_gate_event because zero evidence proof images exist
+        assert not mock_post.called
+        mock_repo.mark_cloud_delivery.assert_called_with(
+            'evt-no-images',
+            'BLOCKED',
+            'Missing evidence proof images (at least 1 required for cloud POST)'
+        )

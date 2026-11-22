@@ -374,7 +374,7 @@ class GateRepository:
                                 c1 = c.container_number or ''
                                 if len(c1) == 11 and c1[4:].isdigit():
                                     time_gap = abs(datetime_diff_seconds(c.timestamp, session.created_at))
-                                    if c1[4:] == suffix or (c1[4:10] == num_serial and (time_gap <= 45.0 or not is_distinct_container(container_num, c1))):
+                                    if time_gap <= 45.0 and not is_distinct_container(container_num, c1) and (c1[4:] == suffix or c1[4:10] == num_serial):
                                         existing = c
                                         break
 
@@ -389,7 +389,9 @@ class GateRepository:
                             GateEvent.timestamp <= session.created_at + delta,
                         ).order_by(GateEvent.timestamp.desc())).first()
                         if draft_cand:
-                            existing = draft_cand
+                            d_num = draft_cand.container_number
+                            if not d_num or not container_num or not is_distinct_container(d_num, container_num):
+                                existing = draft_cand
 
                     # 4. If container_num is missing, never merge into a previously confirmed event of another container.
                     # An unconfirmed detection must remain independent to prevent polluting previous container's evidence.
@@ -455,8 +457,8 @@ class GateRepository:
                         session.cloud_visit_id = existing.cloud_visit_id
                     # Determine authoritative multi-frame multi-camera consensus across all reads
                     all_cands = list(session.ocr_candidates or [])
-                    for ocr_rec in db_session.scalars(
-                        select(OCRResult)
+                    for ocr_rec, cam_id in db_session.execute(
+                        select(OCRResult, DetectionRecord.camera_id)
                         .join(DetectionRecord, OCRResult.detection_id == DetectionRecord.id)
                         .where(DetectionRecord.event_id == existing.id)
                     ).all():
@@ -467,17 +469,20 @@ class GateRepository:
                             valid_format=bool(getattr(ocr_rec, 'valid_format', False)),
                             valid_check_digit=bool(getattr(ocr_rec, 'valid_check_digit', False)),
                             validation_status=getattr(ocr_rec, 'validation_status', '') or '',
-                            size_type=getattr(ocr_rec, 'size_type', None)
+                            size_type=getattr(ocr_rec, 'size_type', None),
+                            camera_id=cam_id
                         ))
                     best_c = CharacterConsensus.resolve(all_cands)
                     if best_c and best_c.normalized_text and best_c.valid_check_digit and is_valid_iso_6346(best_c.normalized_text):
-                        existing.container_number = best_c.normalized_text
-                        existing.status = 'CONFIRMED'
-                        if best_c.size_type:
-                            existing.iso_code_1 = best_c.size_type
+                        if not existing.container_number or not is_distinct_container(existing.container_number, best_c.normalized_text):
+                            existing.container_number = best_c.normalized_text
+                            existing.status = 'CONFIRMED'
+                            if best_c.size_type:
+                                existing.iso_code_1 = best_c.size_type
                     elif container_num and is_valid_iso_6346(container_num):
-                        existing.container_number = container_num
-                        existing.status = 'CONFIRMED'
+                        if not existing.container_number or not is_distinct_container(existing.container_number, container_num):
+                            existing.container_number = container_num
+                            existing.status = 'CONFIRMED'
                     elif not existing.container_number and container_num:
                         existing.container_number = container_num
                     if iso_code and not existing.iso_code_1:
@@ -1198,7 +1203,7 @@ class GateRepository:
                     class_name=obs.detection.class_name, confidence=obs.detection.confidence,
                     bbox=list(obs.detection.bbox), timestamp=obs.detection.frame_timestamp,
                 ))
-                ocr_data = {k: v for k, v in asdict(obs.ocr).items() if k != 'size_type'}
+                ocr_data = {k: v for k, v in asdict(obs.ocr).items() if k not in ('size_type', 'camera_id')}
                 session.add(OCRResult(id=str(uuid4()), detection_id=detection_id, **ocr_data))
 
                 # Also save any concurrent detections on this frame (such as Feet!)

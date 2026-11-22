@@ -204,6 +204,7 @@ class ContainerPassageSession:
         self.tracks_by_camera: Dict[str, set[int]] = {}
         self.camera_frame_seq: Dict[str, int] = {}
         self.evidence_manager = evidence_manager
+        self.max_session_seconds: float = 45.0
 
         self.event_id: str = str(uuid4())
         self.finalized: bool = False
@@ -268,7 +269,10 @@ class ContainerPassageSession:
                 import re
                 if val_text and len(val_text) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', val_text):
                     val_conf = getattr(val, 'confidence', 0.0)
-                    if val.valid_check_digit and val_conf > self.confirmed_confidence:
+                    from app.database.repositories.gate import is_distinct_container
+                    if self.confirmed_container_number and is_distinct_container(self.confirmed_container_number, val_text):
+                        self.identity_conflict = True
+                    elif val.valid_check_digit and val_conf > self.confirmed_confidence:
                         self.confirmed_container_number = val_text
                         self.confirmed_confidence = val_conf
                         self.identity_conflict = False
@@ -513,6 +517,11 @@ class ContainerPassageSession:
                 all(bool(self.captured_frames.get(c)) for c in self.cameras)
             )
 
+            # Maximum transit duration guard: a single container passage never spans minutes
+            total_duration = abs((now - self.created_at).total_seconds())
+            if total_duration >= getattr(self, 'max_session_seconds', 45.0):
+                return True
+
             # Zone clearance: all cameras on lane confirmed vehicle cleared
             if self.clear_since is not None:
                 clear_duration = abs((now - self.clear_since).total_seconds())
@@ -546,6 +555,7 @@ class PassageSessionManager:
         self.settings = settings
         self.outbox = outbox
         self.evidence_manager = evidence_manager
+        self.max_session_seconds: float = 45.0
         if target_frames_per_camera is not None:
             self.target_frames_per_camera = target_frames_per_camera
         else:
@@ -610,7 +620,8 @@ class PassageSessionManager:
 
                 source_changed = bool(camera_id and source_id and session.sources_by_camera.get(camera_id)
                                       and session.sources_by_camera[camera_id] != source_id)
-                if new_track_on_camera or new_session_track or is_cleared or source_changed:
+                duration_exceeded = abs((timestamp - session.created_at).total_seconds()) >= getattr(session, 'max_session_seconds', 45.0)
+                if new_track_on_camera or new_session_track or is_cleared or source_changed or duration_exceeded:
                     # Finalize the prior session immediately into its own event!
                     num, iso, conf = session.get_consensus_container_number()
                     if num:

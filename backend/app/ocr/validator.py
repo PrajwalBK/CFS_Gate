@@ -178,6 +178,7 @@ KNOWN_BIC_PREFIXES = {
     'XINU', 'BEAU', 'BMOU', 'BSIU', 'CAAU', 'CNEU', 'DFSU', 'DISU', 'EBUU', 'EGSU',
     'EITU', 'ESLU', 'GCXU', 'IAAU', 'ITUU', 'SEGU', 'TEXU', 'TRLU', 'TTNU',
     'HAMU', 'AXIU', 'ADMU', 'ABCU',
+    'TGCU', 'NPCU', 'SIKU', 'TGBU', 'TGCU', 'TCLU', 'TRIU', 'TTNU', 'TGHU', 'TCNU',
 }
 
 PREFIX_LETTER_CONFUSIONS = {
@@ -211,6 +212,9 @@ def recover_visual_confusion(raw_text: str) -> str:
 
     def _resolve_candidate(cand_str: str) -> str:
         if not cand_str or len(cand_str) != 11:
+            return cand_str
+        # Never mutate an already valid ISO 6346 container number
+        if is_valid_iso_6346(cand_str):
             return cand_str
         pref = cand_str[:4]
         # If prefix is not in known BIC registry, check single-letter prefix confusions

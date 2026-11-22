@@ -41,6 +41,7 @@ class Validation:
     valid_check_digit: bool
     validation_status: str
     size_type: str | None = None
+    camera_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -64,18 +64,31 @@ class CharacterConsensus:
             scored = []
             for ident, r_list in by_id.items():
                 count = len(r_list)
+                cams = {getattr(r, 'camera_id', None) for r in r_list if getattr(r, 'camera_id', None)}
+                cam_count = len(cams)
                 max_conf = max(r.confidence for r in r_list)
+                avg_conf = sum(r.confidence for r in r_list) / count
                 best_r = max(r_list, key=lambda r: r.confidence)
                 is_known_bic = 1 if (ident and len(ident) >= 4 and ident[:4] in KNOWN_BIC_PREFIXES) else 0
-                scored.append((is_known_bic, count, max_conf, best_r))
+                raw_match = 1 if any(getattr(r, 'raw_text', None) and ident in getattr(r, 'raw_text', '').replace(' ', '').replace('-', '').upper() for r in r_list) else 0
 
-            scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-            winner_known, winner_count, winner_conf, winner_read = scored[0]
-            runner_up_known, runner_up_count, runner_up_conf, runner_up_read = scored[1]
+                # Multi-evidence composite score:
+                # 1. Multi-camera agreement (+3.0 per distinct camera): Physical confirmation across angles
+                # 2. Vote frequency (+1.0 per observation)
+                # 3. Peak OCR confidence (+1.5 * max_conf)
+                # 4. Direct raw match (+0.5 if raw OCR text directly matches without synthetic character mutation)
+                # 5. BIC registry tie-breaker (+0.2 bonus)
+                score = (cam_count * 3.0) + count + (max_conf * 1.5) + (raw_match * 0.5) + (is_known_bic * 0.2)
+                scored.append((score, cam_count, count, max_conf, is_known_bic, best_r))
 
-            # Clear winner if verified in BIC registry over unverified candidate,
-            # or strictly more votes, or significantly higher confidence (>=0.15)
-            if (winner_known > runner_up_known) or winner_count > runner_up_count or (winner_conf - runner_up_conf) >= 0.15:
+            scored.sort(key=lambda item: item[0], reverse=True)
+            winner_score, winner_cam, winner_count, winner_conf, winner_known, winner_read = scored[0]
+            runner_up_score, runner_up_cam, runner_up_count, runner_up_conf, runner_up_known, runner_up_read = scored[1]
+
+            # Clear winner if strictly higher composite score, multi-camera agreement, higher votes, or registered BIC tie-breaker
+            if (winner_cam > runner_up_cam) or (winner_count > runner_up_count) or \
+               (winner_score - runner_up_score >= 0.25) or (winner_conf - runner_up_conf >= 0.07) or \
+               (winner_known > runner_up_known and winner_conf >= runner_up_conf - 0.05):
                 return replace(winner_read, size_type=winner_read.size_type or size)
 
             # True tie between conflicting valid IDs with equal votes and similar confidence
