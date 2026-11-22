@@ -178,3 +178,9 @@ def test_recover_visual_confusion():
 
     # 4. Irrelevant text left untouched
     assert recover_visual_confusion('INVALID TEXT') == 'INVALID TEXT'
+
+    # 5. Prefix O -> Q visual confusion: 'GORU 400707 6' -> 'GQRU4007076' (check digit 6 matches GQRU)
+    assert recover_visual_confusion('GORU 400707 6') == 'GQRU4007076'
+    val5 = ContainerValidator().validate(OCRRead('GORU 400707 6', 0.95))
+    assert val5.normalized_text == 'GQRU4007076'
+    assert val5.valid_check_digit is True

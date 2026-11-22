@@ -179,6 +179,7 @@ KNOWN_BIC_PREFIXES = {
     'EITU', 'ESLU', 'GCXU', 'IAAU', 'ITUU', 'SEGU', 'TEXU', 'TRLU', 'TTNU',
     'HAMU', 'AXIU', 'ADMU', 'ABCU',
     'TGCU', 'NPCU', 'SIKU', 'TGBU', 'TGCU', 'TCLU', 'TRIU', 'TTNU', 'TGHU', 'TCNU',
+    'GQRU', 'GATU', 'GVCU',
 }
 
 PREFIX_LETTER_CONFUSIONS = {
@@ -188,11 +189,11 @@ PREFIX_LETTER_CONFUSIONS = {
     'V': ['U'],
     'U': ['V'],
     'D': ['O'],
-    'O': ['D', '0', 'Q', 'C'],
+    'O': ['Q', 'D', '0', 'C'],
     'Q': ['O'],
     'I': ['C', '1', 'T', 'L'],
     'C': ['I', 'G', 'O', 'L'],
-    'G': ['C', '6', 'O'],
+    'G': ['C', '6', 'O', 'Q'],
     'L': ['I', '1'],
     'B': ['8'],
     'P': ['R', 'F', 'B'],
@@ -217,16 +218,15 @@ def recover_visual_confusion(raw_text: str) -> str:
         if is_valid_iso_6346(cand_str):
             return cand_str
         pref = cand_str[:4]
-        # If prefix is not in known BIC registry, check single-letter prefix confusions
-        if pref not in KNOWN_BIC_PREFIXES:
-            for idx in range(3):
-                orig_ch = pref[idx]
-                for alt_ch in PREFIX_LETTER_CONFUSIONS.get(orig_ch, []):
-                    test_pref = pref[:idx] + alt_ch + pref[idx+1:]
-                    if test_pref in KNOWN_BIC_PREFIXES:
-                        test_cand = test_pref + cand_str[4:]
-                        if is_valid_iso_6346(test_cand):
-                            return test_cand
+        # Check single-letter prefix confusions (e.g. O -> Q) to resolve the true ISO-valid container
+        for idx in range(3):
+            orig_ch = pref[idx]
+            for alt_ch in PREFIX_LETTER_CONFUSIONS.get(orig_ch, []):
+                test_pref = pref[:idx] + alt_ch + pref[idx+1:]
+                if test_pref in KNOWN_BIC_PREFIXES or is_valid_iso_6346(test_pref + cand_str[4:]):
+                    test_cand = test_pref + cand_str[4:]
+                    if is_valid_iso_6346(test_cand):
+                        return test_cand
         return cand_str
 
     m = re.search(r'(?<![A-Z0-9])([A-Z0-9]{3}[UJZ0-9])[\s\-.:/|\[\]()]*((?:[0-9A-Z][\s\-.:/|\[\]()]*){6,7})(?![0-9A-Z])', raw_text.upper())
