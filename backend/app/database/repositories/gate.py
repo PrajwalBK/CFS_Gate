@@ -638,9 +638,13 @@ class GateRepository:
                         d_digits = ''.join(c for c in d_cntr if c.isdigit())
                         c_digits = ''.join(c for c in container_num if c.isdigit())
                         same_serial = bool(len(d_digits) >= 6 and len(c_digits) >= 6 and d_digits[:6] == c_digits[:6])
-                        # Strictly require: draft must match container number or matching serial digits.
-                        # Distinct verified containers must NEVER have their snapshots absorbed!
-                        if not is_distinct_container(container_num, d_cntr) or same_serial:
+                        # Strictly require: draft must have matching container number or matching serial digits.
+                        # NEVER absorb snapshots of an unconfirmed/empty draft or distinct container!
+                        is_match = False
+                        if d_cntr and container_num:
+                            if not is_distinct_container(container_num, d_cntr) or same_serial:
+                                is_match = True
+                        if is_match:
                             o_draft.status = 'DUPLICATE'
                             o_draft.cloud_delivery_state = 'DUPLICATE'
                             o_draft.cloud_synced = True

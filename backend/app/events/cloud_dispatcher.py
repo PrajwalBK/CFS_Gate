@@ -687,12 +687,19 @@ class CloudOutboxDispatcher:
                 try:
                     with self.repository.db.sessions() as db_sess:
                         from app.database.models import GateEvent
-                        comp_ids = db_sess.scalars(
-                            select(GateEvent.id).where(
-                                GateEvent.container_number == cntr1,
-                                GateEvent.id != event_id_str
+                        from app.database.repositories.gate import parse_ts
+                        event_dt = parse_ts(event_record.get('timestamp')) if event_record.get('timestamp') else None
+                        stmt = select(GateEvent.id).where(
+                            GateEvent.container_number == cntr1,
+                            GateEvent.id != event_id_str
+                        )
+                        if event_dt:
+                            from datetime import timedelta
+                            stmt = stmt.where(
+                                GateEvent.timestamp >= event_dt - timedelta(seconds=300),
+                                GateEvent.timestamp <= event_dt + timedelta(seconds=300)
                             )
-                        ).all()
+                        comp_ids = db_sess.scalars(stmt).all()
                         for comp_id in comp_ids:
                             if self.snapshots:
                                 c_leg = self.snapshots.root / str(comp_id)
@@ -717,6 +724,11 @@ class CloudOutboxDispatcher:
                     ] + list(ed.glob(f"*{missing_cam}*.jpg")) + list(ed.glob(f"*{missing_cam}*.png"))
                     for cand in disk_cands:
                         if cand.is_file() and not cand.name.endswith('.quality') and 'crop' not in cand.name.lower() and 'rot180' not in cand.name.lower():
+                            # Strict container check: do not pick disk candidate if path belongs to a distinct container
+                            from app.database.repositories.gate import is_distinct_container
+                            cand_containers = re.findall(r'[A-Z]{4}[0-9]{7}', str(cand).replace('\\', '/'))
+                            if cntr1 and cand_containers and any(is_distinct_container(cntr1, cc) for cc in cand_containers):
+                                continue
                             cam_snapshots.setdefault(missing_cam, []).append({
                                 'id': f'disk_{missing_cam}',
                                 'camera_id': missing_cam,

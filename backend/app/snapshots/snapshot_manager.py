@@ -123,13 +123,24 @@ class SnapshotManager:
             if not camera_id or not image_path:
                 continue
             try:
-                import cv2, numpy as np
+                import cv2, numpy as np, re
                 data = self.path(image_path).read_bytes()
                 prov = snap.get('provenance') or {}
                 if prov.get('image_sha256'):
                     import hashlib
                     if hashlib.sha256(data).hexdigest() != prov['image_sha256']:
                         continue
+
+                # Strict container isolation: reject snapshot if provenance or path indicates a distinct container
+                ev_cntr = event_record.get('container_number')
+                prov_cntr = prov.get('container_number')
+                from app.database.repositories.gate import is_distinct_container
+                if ev_cntr and prov_cntr and is_distinct_container(ev_cntr, prov_cntr):
+                    continue
+                path_containers = re.findall(r'[A-Z]{4}[0-9]{7}', str(image_path).replace('\\', '/'))
+                if ev_cntr and path_containers and any(is_distinct_container(ev_cntr, pc) for pc in path_containers):
+                    continue
+
                 decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if decoded is None or decoded.size == 0 or decoded.shape[0] < 240 or decoded.shape[1] < 320:
                     continue

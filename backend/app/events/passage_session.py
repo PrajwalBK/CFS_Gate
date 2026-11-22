@@ -271,7 +271,14 @@ class ContainerPassageSession:
                     val_conf = getattr(val, 'confidence', 0.0)
                     from app.database.repositories.gate import is_distinct_container
                     if self.confirmed_container_number and is_distinct_container(self.confirmed_container_number, val_text):
-                        self.identity_conflict = True
+                        if val.valid_check_digit and val_conf > self.confirmed_confidence:
+                            # Higher confidence upgrade (e.g. true rear container read supersedes early noisy or chassis misread)
+                            self.confirmed_container_number = val_text
+                            self.confirmed_confidence = val_conf
+                            self.identity_conflict = False
+                        else:
+                            self.identity_conflict = True
+                            return None
                     elif val.valid_check_digit and val_conf > self.confirmed_confidence:
                         self.confirmed_container_number = val_text
                         self.confirmed_confidence = val_conf
@@ -423,6 +430,18 @@ class ContainerPassageSession:
                 if frames:
                     # Strict container isolation: exclude any frame candidate with an OCR read belonging to a distinct container
                     from app.database.repositories.gate import is_distinct_container
+
+                    # Find all timestamps where the confirmed container was observed across any camera
+                    confirmed_times = []
+                    if self.confirmed_container_number:
+                        for f_list in self.captured_frames.values():
+                            for cand in f_list:
+                                if cand.ocr_read:
+                                    c_val = cand.ocr_read if isinstance(cand.ocr_read, Validation) else ContainerValidator().validate(cand.ocr_read)
+                                    c_txt = getattr(c_val, 'normalized_text', '') or ''
+                                    if c_txt == self.confirmed_container_number and getattr(cand, 'timestamp', None):
+                                        confirmed_times.append(cand.timestamp)
+
                     valid_frames = []
                     for f in frames:
                         if self.confirmed_container_number and f.ocr_read:
@@ -430,15 +449,19 @@ class ContainerPassageSession:
                             txt = getattr(val, 'normalized_text', '') or ''
                             if txt and len(txt) == 11 and is_distinct_container(self.confirmed_container_number, txt):
                                 continue
+
+                        # Strict temporal proximity to confirmed container observations
+                        if confirmed_times and getattr(f, 'timestamp', None):
+                            min_dt = min(abs((f.timestamp - ct).total_seconds()) for ct in confirmed_times)
+                            if min_dt > 25.0:
+                                continue
+
                         # Strict temporal coherence: allow full multi-camera transit/dwell window
                         max_transit = max(getattr(self, 'max_session_seconds', 60.0) or 60.0, 45.0)
-                        if getattr(f, 'timestamp', None) and self.created_at:
-                            time_before = (self.created_at - f.timestamp).total_seconds()
-                            if time_before > max_transit:
+                        if getattr(f, 'timestamp', None):
+                            if self.created_at and (self.created_at - f.timestamp).total_seconds() > max_transit:
                                 continue
-                        if getattr(f, 'timestamp', None) and self.last_seen:
-                            time_after = (f.timestamp - self.last_seen).total_seconds()
-                            if time_after > max_transit:
+                            if self.last_seen and (f.timestamp - self.last_seen).total_seconds() > max_transit:
                                 continue
                         # Strict track isolation: apply track check only if candidate is on the same camera that defined this track
                         primary_c = getattr(self, 'primary_camera', None)

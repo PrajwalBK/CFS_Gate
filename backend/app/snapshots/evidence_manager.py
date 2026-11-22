@@ -274,13 +274,31 @@ class EvidenceFolderManager:
 
         # Strict container isolation guard: NEVER merge if folders represent distinct containers!
         try:
-            import re
+            import re, json
             from app.database.repositories.gate import is_distinct_container
-            s_nums = re.findall(r'[A-Z]{4}[0-9]{7}', source_folder.name)
-            t_nums = re.findall(r'[A-Z]{4}[0-9]{7}', target_folder.name)
-            if s_nums and t_nums and is_distinct_container(t_nums[0], s_nums[0]):
+
+            def _extract_container(folder: Path, fallback_num: Optional[str] = None) -> Optional[str]:
+                m = re.findall(r'[A-Z]{4}[0-9]{7}', folder.name)
+                if m:
+                    return m[0]
+                for fname in ('event.json', 'evidence.json'):
+                    fpath = folder / fname
+                    if fpath.is_file():
+                        try:
+                            data = json.loads(fpath.read_text(encoding='utf-8', errors='ignore'))
+                            num = data.get('container_number') or data.get('event', {}).get('container_number')
+                            if num and len(str(num)) == 11:
+                                return str(num).upper()
+                        except Exception:
+                            pass
+                return fallback_num
+
+            s_num = _extract_container(source_folder)
+            t_num = _extract_container(target_folder, container_number)
+            if s_num and t_num and is_distinct_container(t_num, s_num):
                 log.warning('evidence_merge_blocked_distinct_containers', extra={
-                    'source_folder': source_folder.name, 'target_folder': target_folder.name
+                    'source_folder': source_folder.name, 'target_folder': target_folder.name,
+                    'source_container': s_num, 'target_container': t_num
                 })
                 return target_folder
         except Exception:
