@@ -183,27 +183,39 @@ KNOWN_BIC_PREFIXES = {
 }
 
 PREFIX_LETTER_CONFUSIONS = {
-    'N': ['M'],
-    'M': ['N'],
-    'Z': ['N'],
-    'V': ['U'],
-    'U': ['V'],
-    'D': ['O'],
-    'O': ['Q', 'D', '0', 'C'],
-    'Q': ['O'],
-    'I': ['C', '1', 'T', 'L'],
-    'C': ['I', 'G', 'O', 'L'],
-    'G': ['C', '6', 'O', 'Q'],
-    'L': ['I', '1'],
-    'B': ['8'],
+    'A': ['4', 'R', 'H'],
+    'B': ['8', 'D', 'P', 'R', '3'],
+    'C': ['G', 'O', 'I', 'L', '0'],
+    'D': ['O', '0', 'B', 'Q'],
+    'E': ['F', 'B'],
+    'F': ['P', 'E', 'T'],
+    'G': ['C', '6', 'O', 'Q', '9'],
+    'H': ['N', 'M', 'A'],
+    'I': ['1', 'L', 'T', 'C'],
+    'J': ['I', 'U', '1'],
+    'K': ['X', 'R'],
+    'L': ['I', '1', 'T', 'C'],
+    'M': ['N', 'W', 'H'],
+    'N': ['M', 'H', 'Z'],
+    'O': ['Q', 'D', '0', 'C', 'G'],
     'P': ['R', 'F', 'B'],
-    'S': ['5'],
+    'Q': ['O', '0', 'G'],
+    'R': ['P', 'B', 'K', 'A'],
+    'S': ['5', '8'],
+    'T': ['I', '1', 'L', '7', 'F'],
+    'U': ['V', 'Y', 'J', '0', 'O'],
+    'V': ['U', 'Y'],
+    'W': ['M'],
+    'X': ['K', 'Y'],
+    'Y': ['V', 'T', 'X'],
+    'Z': ['2', '7', 'N'],
 }
 
 
 def recover_visual_confusion(raw_text: str) -> str:
     """
-    Recover common OCR visual confusions (1/I, 0/O, 8/B, 5/S, 2/Z, N/M, etc.) in container codes.
+    Recover common OCR visual confusions (1/I, 0/O, O/Q, 8/B, 5/S, 2/Z, N/M, etc.) in container codes.
+    Universal recovery for both owner prefix letters and serial digits.
     Only replaces if the candidate strictly satisfies ISO 6346 Modulo-11 check digit verification.
     """
     if not raw_text:
@@ -218,15 +230,28 @@ def recover_visual_confusion(raw_text: str) -> str:
         if is_valid_iso_6346(cand_str):
             return cand_str
         pref = cand_str[:4]
-        # Check single-letter prefix confusions (e.g. O -> Q) to resolve the true ISO-valid container
-        for idx in range(3):
-            orig_ch = pref[idx]
-            for alt_ch in PREFIX_LETTER_CONFUSIONS.get(orig_ch, []):
-                test_pref = pref[:idx] + alt_ch + pref[idx+1:]
+        # If prefix is not in known BIC registry, check single-letter prefix confusions
+        # (e.g. O -> Q as in GORU -> GQRU, C -> G, I -> T, 0 -> O, etc.)
+        if pref not in KNOWN_BIC_PREFIXES:
+            for idx in range(3):
+                orig_ch = pref[idx]
+                for alt_ch in PREFIX_LETTER_CONFUSIONS.get(orig_ch, []):
+                    if alt_ch.isalpha():
+                        test_pref = pref[:idx] + alt_ch + pref[idx+1:]
+                        if test_pref in KNOWN_BIC_PREFIXES or (test_pref[3] in ('U', 'J', 'Z') and is_valid_iso_6346(test_pref + cand_str[4:])):
+                            test_cand = test_pref + cand_str[4:]
+                            if is_valid_iso_6346(test_cand):
+                                return test_cand
+
+        # Category identifier confusion in position 3 (e.g. 0, O, V, 1, 4 -> U, J, Z)
+        if pref[3] not in ('U', 'J', 'Z'):
+            for alt_cat in ('U', 'J', 'Z'):
+                test_pref = pref[:3] + alt_cat
                 if test_pref in KNOWN_BIC_PREFIXES or is_valid_iso_6346(test_pref + cand_str[4:]):
                     test_cand = test_pref + cand_str[4:]
                     if is_valid_iso_6346(test_cand):
                         return test_cand
+
         return cand_str
 
     m = re.search(r'(?<![A-Z0-9])([A-Z0-9]{3}[UJZ0-9])[\s\-.:/|\[\]()]*((?:[0-9A-Z][\s\-.:/|\[\]()]*){6,7})(?![0-9A-Z])', raw_text.upper())

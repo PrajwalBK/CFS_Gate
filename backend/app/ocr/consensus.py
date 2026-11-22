@@ -38,9 +38,15 @@ class CharacterConsensus:
             winner_chars.append(winner_ch)
 
         candidate = ''.join(winner_chars)
-        if STRUCTURE.fullmatch(candidate) and is_valid_iso_6346(candidate):
-            avg_conf = sum(max(pos_votes[i].values()) for i in range(11)) / (11.0 * max(1, len(eligible)))
-            return candidate, avg_conf
+        if STRUCTURE.fullmatch(candidate):
+            from app.ocr.validator import recover_visual_confusion
+            resolved = recover_visual_confusion(candidate)
+            if is_valid_iso_6346(resolved):
+                avg_conf = sum(max(pos_votes[i].values()) for i in range(11)) / (11.0 * max(1, len(eligible)))
+                return resolved, avg_conf
+            if is_valid_iso_6346(candidate):
+                avg_conf = sum(max(pos_votes[i].values()) for i in range(11)) / (11.0 * max(1, len(eligible)))
+                return candidate, avg_conf
         return None
 
     @classmethod
