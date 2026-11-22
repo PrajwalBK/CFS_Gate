@@ -184,3 +184,13 @@ def test_recover_visual_confusion():
     val5 = ContainerValidator().validate(OCRRead('GORU 400707 6', 0.95))
     assert val5.normalized_text == 'GQRU4007076'
     assert val5.valid_check_digit is True
+
+
+def test_split_door_digit_recovery():
+    # Vertical container door locking rod splits digits into clusters: 'HALU 908\n5683' -> 'HALU5683908'
+    raw = 'HALU 908\n5683\nHEUNG-A 45G1'
+    val = ContainerValidator().validate(OCRRead(raw, 0.95))
+    assert val.normalized_text == 'HALU5683908'
+    assert val.valid_check_digit is True
+    assert val.validation_status == 'VALID'
+

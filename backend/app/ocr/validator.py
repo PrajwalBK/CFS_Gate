@@ -179,7 +179,7 @@ KNOWN_BIC_PREFIXES = {
     'EITU', 'ESLU', 'GCXU', 'IAAU', 'ITUU', 'SEGU', 'TEXU', 'TRLU', 'TTNU',
     'HAMU', 'AXIU', 'ADMU', 'ABCU',
     'TGCU', 'NPCU', 'SIKU', 'TGBU', 'TGCU', 'TCLU', 'TRIU', 'TTNU', 'TGHU', 'TCNU',
-    'GQRU', 'GATU', 'GVCU',
+    'GQRU', 'GATU', 'GVCU', 'HALU', 'HAEU', 'KMTU', 'SMLU', 'CKLU', 'DHKU',
 }
 
 PREFIX_LETTER_CONFUSIONS = {
@@ -238,7 +238,7 @@ def recover_visual_confusion(raw_text: str) -> str:
                 for alt_ch in PREFIX_LETTER_CONFUSIONS.get(orig_ch, []):
                     if alt_ch.isalpha():
                         test_pref = pref[:idx] + alt_ch + pref[idx+1:]
-                        if test_pref in KNOWN_BIC_PREFIXES or (test_pref[3] in ('U', 'J', 'Z') and is_valid_iso_6346(test_pref + cand_str[4:])):
+                        if test_pref in KNOWN_BIC_PREFIXES:
                             test_cand = test_pref + cand_str[4:]
                             if is_valid_iso_6346(test_cand):
                                 return test_cand
@@ -393,6 +393,49 @@ def sanitize_ocr_text(text: str) -> str:
     return cleaned.strip()
 
 
+def resolve_split_door_digits(raw_text: str) -> str | None:
+    """
+    Recover ISO 6346 container numbers where the 6 serial digits and check digit
+    are separated or permuted by vertical container door locking rods or line wraps
+    (e.g., 'HALU 908\\n5683' -> 'HALU5683908').
+    Only returns a candidate that strictly satisfies ISO 6346 Modulo-11 check digit verification.
+    """
+    if not raw_text:
+        return None
+    prefixes = re.findall(r'\b([A-Z]{3}[UJZ])\b', raw_text.upper())
+    if not prefixes:
+        return None
+
+    # Prioritize registered BIC prefixes
+    sorted_prefixes = sorted(set(prefixes), key=lambda p: (p in KNOWN_BIC_PREFIXES), reverse=True)
+
+    # Exclude standard 4-character ISO size codes (e.g. 45G1, 22G1) from digit chunks
+    cleaned = re.sub(r'\b[1-4LMN][0-9][GVRHBUTP][0-9A-Z]\b', ' ', raw_text.upper())
+    digit_blocks = [m.group(1) for m in re.finditer(r'\b([0-9]{1,6})\b', cleaned)]
+    if len(digit_blocks) < 2:
+        return None
+
+    for pref in sorted_prefixes:
+        # 2 digit blocks summing to 7 digits (e.g. 4 + 3 or 3 + 4)
+        for i in range(len(digit_blocks)):
+            for j in range(len(digit_blocks)):
+                if i != j and len(digit_blocks[i]) + len(digit_blocks[j]) == 7:
+                    cand = pref + digit_blocks[i] + digit_blocks[j]
+                    if is_valid_iso_6346(cand):
+                        return cand
+
+        # 3 digit blocks summing to 7 digits (e.g. 4 digits + 2 digits + 1 check digit)
+        for i in range(len(digit_blocks)):
+            for j in range(len(digit_blocks)):
+                for k in range(len(digit_blocks)):
+                    if len({i, j, k}) == 3 and len(digit_blocks[i]) + len(digit_blocks[j]) + len(digit_blocks[k]) == 7:
+                        cand = pref + digit_blocks[i] + digit_blocks[j] + digit_blocks[k]
+                        if is_valid_iso_6346(cand):
+                            return cand
+
+    return None
+
+
 class ContainerValidator:
     def validate(self, read: OCRRead) -> Validation:
         raw_input = read.raw_text[:4096] if read and read.raw_text else ''
@@ -425,6 +468,12 @@ class ContainerValidator:
             resolved = recover_visual_confusion(normalized)
             if resolved and resolved != normalized and is_valid_iso_6346(resolved):
                 normalized = resolved
+                valid_digit = True
+        if not valid_digit:
+            split_cand = resolve_split_door_digits(raw)
+            if split_cand and is_valid_iso_6346(split_cand):
+                normalized = split_cand
+                valid_format = True
                 valid_digit = True
         status = 'VALID' if valid_digit else 'INVALID_CHECK_DIGIT' if valid_format else 'INVALID_FORMAT'
         iso_code, human_size = extract_iso_size_code(raw)
