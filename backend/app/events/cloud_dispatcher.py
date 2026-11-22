@@ -277,10 +277,24 @@ class ProsperSession:
 
         try:
             res = self.session.post(url, json=payload, headers=headers, timeout=15)
+            try:
+                self.last_api_response = {
+                    'status_code': res.status_code,
+                    'json': res.json() if res.content else {},
+                    'text': res.text
+                }
+            except Exception:
+                self.last_api_response = {
+                    'status_code': res.status_code,
+                    'json': {},
+                    'text': res.text
+                }
         except requests.exceptions.RequestException as e:
+            self.last_api_response = {'status_code': 0, 'json': {}, 'text': str(e)}
             log.info('prosper_gate_event_network_offline: %s. Dispatch buffered locally in database.', e)
             return 'OFFLINE'
         except Exception as e:
+            self.last_api_response = {'status_code': 0, 'json': {}, 'text': str(e)}
             log.warning('prosper_gate_event_post_exception: %s', e)
             return 'OFFLINE'
 
@@ -1307,6 +1321,25 @@ class CloudOutboxDispatcher:
                         continue
 
                     success = self.session.post_gate_event(payload)
+
+                    # === OUT-GATE ALERT INTEGRATION ===
+                    # Evaluates Container Pass status and triggers USB relay siren for GATE_OUT when pass is not generated
+                    try:
+                        from app.alerts.alert_manager import get_alert_manager
+                        threading.Thread(
+                            target=get_alert_manager().handle_gate_api_response,
+                            kwargs={
+                                'event_id': event_id,
+                                'event_type': payload.get('EventType') or (event_record.get('event_type') if event_record else 'GATE_OUT'),
+                                'container_number': cntr1 or (event_record.get('container_number') if event_record else ''),
+                                'api_result': success,
+                                'raw_response': getattr(self.session, 'last_api_response', None)
+                            },
+                            daemon=True,
+                            name=f"alert-eval-{event_id[:8]}"
+                        ).start()
+                    except Exception as e:
+                        log.exception('out_gate_alert_evaluation_failed: %s', e)
                     if success == 'REJECTED' and self.runtime:
                         try:
                             ev_type = payload.get('EventType', 'GATE_OUT')

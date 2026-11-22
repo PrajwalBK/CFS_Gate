@@ -77,6 +77,35 @@ export interface SystemAlert {
   timestamp: string;
 }
 
+export interface OutGateAlertLog {
+  alert_id: string;
+  event_id: string;
+  container_number: string;
+  gate_type: string;
+  backend_pass_status: string;
+  alert_enabled: boolean;
+  relay_status: string;
+  siren_duration: string;
+  start_time: string;
+  end_time?: string | null;
+  hardware_status: string;
+  final_status: string;
+  error_details?: string | null;
+}
+
+export interface OutGateAlertStatus {
+  master_switch_enabled: boolean;
+  usb_relay_connected: boolean;
+  siren_controlled_by_relay: boolean;
+  relay_state: 'ON' | 'OFF';
+  device_description?: string;
+  device_type?: string;
+  port?: string | null;
+  last_alert_triggered: string | null;
+  last_alert_result: string | null;
+  recent_logs: OutGateAlertLog[];
+}
+
 @Injectable({providedIn: 'root'})
 export class GateApi {
   private http = inject(HttpClient);
@@ -151,5 +180,31 @@ export class GateApi {
 
   retryCloudSync() {
     return this.http.post<{ triggered: boolean; pending: number }>('/api/cloud-sync/retry', {});
+  }
+
+  outGateAlertStatus() {
+    return this.http.get<OutGateAlertStatus>('/api/alerts/out-gate/status').pipe(
+      catchError(() => of({
+        master_switch_enabled: false,
+        usb_relay_connected: false,
+        siren_controlled_by_relay: true,
+        relay_state: 'OFF' as const,
+        last_alert_triggered: null,
+        last_alert_result: null,
+        recent_logs: []
+      }))
+    );
+  }
+
+  toggleOutGateAlert(enabled: boolean) {
+    return this.http.post<OutGateAlertStatus>('/api/alerts/out-gate/toggle', {enabled});
+  }
+
+  testOutGateAlert(duration_seconds: number = 8.0) {
+    return this.http.post<{status: string; duration: number}>('/api/alerts/out-gate/test', {duration_seconds});
+  }
+
+  stopOutGateAlert() {
+    return this.http.post<{status: string}>('/api/alerts/out-gate/siren-off', {});
   }
 }

@@ -601,3 +601,295 @@ footer { display: flex; justify-content: space-between; gap: 12px; padding: 9px 
   0% { box-shadow: 0 2px 8px rgba(221, 107, 32, 0.15); }
   100% { box-shadow: 0 4px 18px rgba(221, 107, 32, 0.35); }
 }
+
+/* =========================================================================
+   OUT-GATE ALERT SYSTEM & USB RELAY SIREN STYLES
+   ========================================================================= */
+.alerts-dashboard-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.alert-master-card {
+  background: #ffffff;
+  border: 1.5px solid #d0d7de;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.04);
+}
+
+.master-switch-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.master-title-area {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.master-icon {
+  font-size: 32px;
+  background: #f1f5f9;
+  border-radius: 10px;
+  padding: 8px 12px;
+  line-height: 1;
+}
+
+.master-title-area h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.master-title-area p {
+  margin: 0;
+  font-size: 13px;
+  color: #64748b;
+  max-width: 650px;
+}
+
+.master-toggle-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.toggle-switch-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.btn-master-toggle {
+  min-width: 90px;
+  padding: 10px 22px;
+  font-size: 14px;
+  font-weight: 750;
+  letter-spacing: 0.8px;
+  border-radius: 25px;
+  border: 2px solid #cbd5e1;
+  background: #94a3b8;
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+}
+
+.btn-master-toggle.active {
+  background: #16a34a;
+  border-color: #15803d;
+  box-shadow: 0 3px 12px rgba(22, 163, 74, 0.35);
+}
+
+.btn-master-toggle:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.toggle-status-label {
+  font-size: 13px;
+  font-weight: 750;
+  color: #64748b;
+  letter-spacing: 0.5px;
+}
+
+.toggle-status-label.active {
+  color: #15803d;
+}
+
+/* Hardware Status Cards */
+.hardware-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-test-siren {
+  background: #d97706;
+  color: white;
+  border: 1px solid #b45309;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 7px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.btn-test-siren:hover:not(:disabled) {
+  background: #b45309;
+}
+
+.btn-stop-siren {
+  background: #dc2626;
+  color: white;
+  border: 1px solid #b91c1c;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 7px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  animation: buzzerPulse 1.2s infinite alternate;
+}
+
+.hw-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.hw-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.2s ease;
+}
+
+.hw-card.online {
+  border-left: 4px solid #16a34a;
+}
+
+.hw-card.offline {
+  border-left: 4px solid #dc2626;
+}
+
+.hw-card.active-relay {
+  border-left: 4px solid #dc2626;
+  background: #fef2f2;
+}
+
+.hw-label {
+  font-size: 10px;
+  font-weight: 750;
+  color: #64748b;
+  letter-spacing: 1px;
+}
+
+.hw-val-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.status-indicator-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot-green {
+  background: #16a34a;
+  box-shadow: 0 0 8px rgba(22, 163, 74, 0.6);
+}
+
+.dot-red {
+  background: #dc2626;
+  box-shadow: 0 0 8px rgba(220, 38, 38, 0.6);
+}
+
+.dot-gray {
+  background: #94a3b8;
+}
+
+/* Alert Execution Logs Table */
+.alert-logs-table-container {
+  overflow-x: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  margin-top: 14px;
+}
+
+.alert-logs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.alert-logs-table th {
+  background: #f1f5f9;
+  color: #475569;
+  font-weight: 700;
+  padding: 10px 14px;
+  border-bottom: 1px solid #cbd5e1;
+  white-space: nowrap;
+}
+
+.alert-logs-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #1e293b;
+}
+
+.alert-logs-table tr:hover {
+  background: #f8fafc;
+}
+
+.row-alert-active {
+  background: #fef2f2 !important;
+}
+
+.badge-mini {
+  background: #e2e8f0;
+  color: #334155;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10.5px;
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.2px;
+}
+
+.pill-pass-ok {
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+}
+
+.pill-pass-bad {
+  background: #fee2e2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  font-weight: 800;
+}
+
+.pill-pass-unknown {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+}
+
+.pill-action-on {
+  background: #fee2e2;
+  color: #dc2626;
+  font-weight: 800;
+  border: 1px solid #fca5a5;
+}
+
+.pill-action-skip {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.empty-cell {
+  padding: 30px !important;
+  color: #94a3b8;
+  font-size: 13px;
+}

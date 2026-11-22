@@ -4,7 +4,7 @@ import { HttpErrorResponse, HttpEventType } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { catchError, exhaustMap, forkJoin, merge, of, Subject, timer, timeout } from 'rxjs';
-import { GateApi, Camera, CameraSource, EventPage, EventDetail, Health, Metrics, UploadState, PlaybackAction, SystemAlert, CloudSyncStatus } from './gate-api.service';
+import { GateApi, Camera, CameraSource, EventPage, EventDetail, Health, Metrics, UploadState, PlaybackAction, SystemAlert, CloudSyncStatus, OutGateAlertStatus } from './gate-api.service';
 import { CameraGridComponent } from './camera-grid.component';
 import { EventTableComponent } from './event-table.component';
 import { EventDetailComponent } from './event-detail.component';
@@ -20,7 +20,9 @@ export class AppComponent {
   private api = inject(GateApi);
   private destroy = inject(DestroyRef);
   private refresh = new Subject<void>();
-  activeTab = signal<'overview' | 'cameras' | 'calibration' | 'events' | 'detail'>('cameras');
+  activeTab = signal<'overview' | 'cameras' | 'calibration' | 'events' | 'detail' | 'alerts'>('cameras');
+  outGateAlert = signal<OutGateAlertStatus | null>(null);
+  alertBusy = signal(false);
   cameras = signal<Camera[]>([]);
   cameraSources = signal<CameraSource[]>([]);
   discovery = signal({state: 'WAITING', found: 0, message: 'Waiting for camera discovery'});
@@ -65,7 +67,8 @@ export class AppComponent {
         metrics: this.api.metrics(),
         alerts: this.api.alerts().pipe(catchError(() => of([]))),
         events: this.api.events(this.offset, this.containerFilter, this.typeFilter).pipe(catchError(() => of(null))),
-        cloudSync: this.api.cloudSyncStatus()
+        cloudSync: this.api.cloudSyncStatus(),
+        outGateAlert: this.api.outGateAlertStatus()
       }).pipe(timeout(15000), catchError(() => of(null)))),
       takeUntilDestroyed(this.destroy)
     ).subscribe(data => {
@@ -75,6 +78,7 @@ export class AppComponent {
       if (!this.selectedCalibrationCameraId() && data.cameras.length) this.selectedCalibrationCameraId.set(data.cameras[0].id);
       this.discovery.set(data.discovery);
       this.cloudSync.set(data.cloudSync || data.health?.cloud_sync || null);
+      if (data.outGateAlert) this.outGateAlert.set(data.outGateAlert);
       if (data.alerts && data.alerts.length > 0) {
         this.alerts.set(data.alerts);
         const top = data.alerts[0];
@@ -100,6 +104,8 @@ export class AppComponent {
       this.activeTab.set('cameras');
     } else if (hash === 'calibration') {
       this.activeTab.set('calibration');
+    } else if (hash === 'alerts') {
+      this.activeTab.set('alerts');
     } else if (hash.startsWith('event-')) {
       const eventId = hash.slice(6);
       if (eventId && (!this.detail() || this.detail()?.id !== eventId)) {
@@ -112,7 +118,7 @@ export class AppComponent {
     }
   }
 
-  setTab(tab: 'overview' | 'cameras' | 'calibration' | 'events' | 'detail') {
+  setTab(tab: 'overview' | 'cameras' | 'calibration' | 'events' | 'detail' | 'alerts') {
     this.activeTab.set(tab);
     if (tab === 'overview') {
       window.location.hash = 'overview';
@@ -122,9 +128,44 @@ export class AppComponent {
       window.location.hash = 'calibration';
     } else if (tab === 'events') {
       window.location.hash = 'events';
+    } else if (tab === 'alerts') {
+      window.location.hash = 'alerts';
     } else if (tab === 'detail' && this.detail()) {
       window.location.hash = `event-${this.detail()!.id}`;
     }
+  }
+
+  toggleAlertMaster(enabled: boolean) {
+    this.alertBusy.set(true);
+    this.api.toggleOutGateAlert(enabled).subscribe({
+      next: (res) => {
+        this.outGateAlert.set(res);
+        this.alertBusy.set(false);
+        this.notice.set(enabled ? 'Out-Gate Alert system ENABLED' : 'Out-Gate Alert system DISABLED');
+      },
+      error: () => this.alertBusy.set(false)
+    });
+  }
+
+  testAlertSiren() {
+    this.alertBusy.set(true);
+    this.api.testOutGateAlert(8.0).subscribe({
+      next: () => {
+        this.alertBusy.set(false);
+        this.notice.set('External siren activated for 8-second test');
+        this.refresh.next();
+      },
+      error: () => this.alertBusy.set(false)
+    });
+  }
+
+  stopAlertSiren() {
+    this.api.stopOutGateAlert().subscribe({
+      next: () => {
+        this.notice.set('External siren stopped');
+        this.refresh.next();
+      }
+    });
   }
 
   filter() { this.offset = 0; this.refresh.next(); }

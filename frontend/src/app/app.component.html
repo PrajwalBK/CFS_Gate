@@ -68,6 +68,7 @@
   <button [class.active]="activeTab() === 'calibration'" (click)="setTab('calibration')"><span>⌗</span>Lane calibration</button>
   <div class="left-nav-divider"></div>
   <button [class.active]="activeTab() === 'events'" (click)="setTab('events')"><span>≡</span>Gate events</button>
+  <button [class.active]="activeTab() === 'alerts'" (click)="setTab('alerts')"><span>🚨</span>Alerts</button>
 </aside>
 
 <main>
@@ -329,5 +330,168 @@
   <footer>
     <span>GateVision · Industrial Gate Module POC</span>
     <span>Site: Panvel CFS · Prosper API Cloud Sync Active · Local time: UTC+05:30</span>
+  <!-- PAGE TAB 4: ALERTS CONFIGURATION & HARDWARE MONITOR -->
+  @if (activeTab() === 'alerts') {
+    <div class="page-view animate-fade">
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">AUTOMATION <span>/</span> OUT-GATE MODULE</div>
+          <h1>Alerts & External Siren</h1>
+          <p>Automated 12V–24V LED Strobe Siren activation via USB 1-Channel Relay for unauthorized Out-Gate passages without valid Container Pass.</p>
+        </div>
+        <div class="connection">
+          <span class="badge" [class.good]="outGateAlert()?.usb_relay_connected" [class.bad]="!outGateAlert()?.usb_relay_connected">
+            {{ outGateAlert()?.usb_relay_connected ? 'RELAY CONNECTED' : 'RELAY DISCONNECTED' }}
+          </span>
+        </div>
+      </div>
+
+      <div class="alerts-dashboard-layout">
+        <!-- MASTER SWITCH PANEL -->
+        <section class="panel alert-master-card">
+          <div class="master-switch-header">
+            <div class="master-title-area">
+              <span class="master-icon">⚡</span>
+              <div>
+                <h2>Alert System Master Switch</h2>
+                <p>When enabled, the USB relay activates the 24V strobe siren for exactly 8 seconds whenever CFS backend confirms <strong>PASS NOT GENERATED</strong> on Gate-Out.</p>
+              </div>
+            </div>
+            <div class="master-toggle-controls">
+              <div class="toggle-switch-wrapper">
+                <button type="button" class="btn-master-toggle" [class.active]="outGateAlert()?.master_switch_enabled" [disabled]="alertBusy()" (click)="toggleAlertMaster(!outGateAlert()?.master_switch_enabled)">
+                  {{ outGateAlert()?.master_switch_enabled ? 'ON' : 'OFF' }}
+                </button>
+                <span class="toggle-status-label" [class.active]="outGateAlert()?.master_switch_enabled">
+                  {{ outGateAlert()?.master_switch_enabled ? 'SYSTEM ENABLED' : 'SYSTEM DISABLED' }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- HARDWARE CONNECTION STATUS -->
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <h2>Hardware Connection Status</h2>
+              <p>Real-time physical USB relay connection and external siren state.</p>
+            </div>
+            <div class="hardware-actions">
+              <button type="button" class="btn-test-siren" [disabled]="alertBusy()" (click)="testAlertSiren()">
+                ▶ Test Siren (8s) 🚨
+              </button>
+              @if (outGateAlert()?.relay_state === 'ON') {
+                <button type="button" class="btn-stop-siren" (click)="stopAlertSiren()">
+                  ⏹ Emergency Stop
+                </button>
+              }
+            </div>
+          </div>
+
+          <div class="hw-status-grid">
+            <article class="hw-card" [class.online]="outGateAlert()?.usb_relay_connected" [class.offline]="!outGateAlert()?.usb_relay_connected">
+              <span class="hw-label">USB 1-CHANNEL RELAY</span>
+              <div class="hw-val-row">
+                <span class="status-indicator-dot" [class.dot-green]="outGateAlert()?.usb_relay_connected" [class.dot-red]="!outGateAlert()?.usb_relay_connected"></span>
+                <strong>{{ outGateAlert()?.usb_relay_connected ? 'Connected' : 'Disconnected' }}</strong>
+              </div>
+              <small>{{ outGateAlert()?.device_description || 'Check USB cable connection' }}</small>
+            </article>
+
+            <article class="hw-card" [class.active-relay]="outGateAlert()?.relay_state === 'ON'">
+              <span class="hw-label">SIREN / STROBE (24V)</span>
+              <div class="hw-val-row">
+                <span class="status-indicator-dot" [class.dot-red]="outGateAlert()?.relay_state === 'ON'" [class.dot-gray]="outGateAlert()?.relay_state !== 'ON'"></span>
+                <strong>{{ outGateAlert()?.relay_state === 'ON' ? 'Active (Energized)' : 'Standby (Muted)' }}</strong>
+              </div>
+              <small>Controlled by Relay (NO Terminal)</small>
+            </article>
+
+            <article class="hw-card">
+              <span class="hw-label">ALERT AUTOMATION</span>
+              <div class="hw-val-row">
+                <span class="status-indicator-dot" [class.dot-green]="outGateAlert()?.master_switch_enabled" [class.dot-gray]="!outGateAlert()?.master_switch_enabled"></span>
+                <strong>{{ outGateAlert()?.master_switch_enabled ? 'Enabled' : 'Disabled' }}</strong>
+              </div>
+              <small>{{ outGateAlert()?.master_switch_enabled ? 'Monitors Gate-Out Pass Status' : 'Siren Suppressed' }}</small>
+            </article>
+
+            <article class="hw-card">
+              <span class="hw-label">LAST ALERT RESULT</span>
+              <div class="hw-val-row">
+                <strong>{{ outGateAlert()?.last_alert_result || 'No alerts recorded' }}</strong>
+              </div>
+              <small>{{ outGateAlert()?.last_alert_triggered ? ('Triggered: ' + (outGateAlert()?.last_alert_triggered | date:'yyyy-MM-dd HH:mm:ss')) : 'Ready' }}</small>
+            </article>
+          </div>
+        </section>
+
+        <!-- ALERT EXECUTION LOGS -->
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <h2>Alert Execution History</h2>
+              <p>Chronological audit log of Out-Gate events, CFS backend pass status, and siren activations.</p>
+            </div>
+            <span class="subtle">{{ outGateAlert()?.recent_logs?.length || 0 }} RECENT EVALUATIONS</span>
+          </div>
+
+          <div class="alert-logs-table-container">
+            <table class="alert-logs-table">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Container</th>
+                  <th>Gate</th>
+                  <th>Backend Pass Status</th>
+                  <th>Alert Switch</th>
+                  <th>Relay Action</th>
+                  <th>Duration</th>
+                  <th>Final Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (log of outGateAlert()?.recent_logs || []; track log.alert_id) {
+                  <tr [class.row-alert-active]="log.relay_status === 'SUCCESS'">
+                    <td><small>{{ log.start_time | date:'yyyy-MM-dd HH:mm:ss' }}</small></td>
+                    <td><strong>{{ log.container_number || 'N/A' }}</strong></td>
+                    <td><span class="badge-mini">{{ log.gate_type }}</span></td>
+                    <td>
+                      <span class="status-pill"
+                            [class.pill-pass-ok]="log.backend_pass_status === 'PASS GENERATED'"
+                            [class.pill-pass-bad]="log.backend_pass_status === 'PASS NOT GENERATED'"
+                            [class.pill-pass-unknown]="log.backend_pass_status !== 'PASS GENERATED' && log.backend_pass_status !== 'PASS NOT GENERATED'">
+                        {{ log.backend_pass_status }}
+                      </span>
+                    </td>
+                    <td>{{ log.alert_enabled ? 'ON' : 'OFF' }}</td>
+                    <td>
+                      <span class="status-pill"
+                            [class.pill-action-on]="log.relay_status === 'SUCCESS'"
+                            [class.pill-action-skip]="log.relay_status === 'SKIPPED' || log.relay_status === 'NOT_REQUIRED'">
+                        {{ log.relay_status }}
+                      </span>
+                    </td>
+                    <td>{{ log.siren_duration }}</td>
+                    <td>
+                      <strong [class.text-danger]="log.final_status === 'COMPLETED' || log.final_status === 'RELAY_FAILED'">
+                        {{ log.final_status }}
+                      </strong>
+                    </td>
+                </tr>
+                } @empty {
+                  <tr>
+                    <td colspan="8" class="text-center empty-cell">No alerts recorded yet. Out-Gate events will be logged here automatically.</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  }
+
   </footer>
 </main>
