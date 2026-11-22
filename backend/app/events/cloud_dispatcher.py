@@ -1093,7 +1093,7 @@ class CloudOutboxDispatcher:
                             except Exception:
                                 pass
                 import re
-                if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1) or not is_valid_iso_6346(cntr1):
+                if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1) or not is_valid_iso_6346(cntr1) or cntr1[:4] not in KNOWN_BIC_PREFIXES:
                     log.warning('prosper_dispatch_skipped_invalid_ocr', extra={'event_id': event_id, 'container_number': cntr1})
                     if self.repository:
                         self.repository.mark_cloud_synced(event_id)

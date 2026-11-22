@@ -300,7 +300,7 @@ class GateRepository:
                     import re
                     val_check = ContainerValidator().validate(OCRRead(raw_text=container_num, confidence=conf))
                 is_valid_format = bool(container_num and len(container_num) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', container_num))
-                is_confirmed = is_valid_format and is_valid_iso_6346(container_num)
+                is_confirmed = is_valid_format and is_valid_iso_6346(container_num) and (container_num[:4] in KNOWN_BIC_PREFIXES)
                 status = 'CONFIRMED' if is_confirmed else 'NEEDS_REVIEW'
 
                 slot_pos = getattr(session, 'container_slot', 'CONTAINER_1') or 'CONTAINER_1'
@@ -479,7 +479,7 @@ class GateRepository:
                             existing.status = 'CONFIRMED'
                             if best_c.size_type:
                                 existing.iso_code_1 = best_c.size_type
-                    elif container_num and is_valid_iso_6346(container_num):
+                    elif container_num and is_valid_iso_6346(container_num) and (container_num[:4] in KNOWN_BIC_PREFIXES):
                         if not existing.container_number or not is_distinct_container(existing.container_number, container_num):
                             existing.container_number = container_num
                             existing.status = 'CONFIRMED'

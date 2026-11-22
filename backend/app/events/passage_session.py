@@ -270,16 +270,17 @@ class ContainerPassageSession:
                 if val_text and len(val_text) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', val_text):
                     val_conf = getattr(val, 'confidence', 0.0)
                     from app.database.repositories.gate import is_distinct_container
+                    from app.ocr.validator import KNOWN_BIC_PREFIXES
+                    val_pref_known = bool(val_text[:4] in KNOWN_BIC_PREFIXES)
                     if self.confirmed_container_number and is_distinct_container(self.confirmed_container_number, val_text):
-                        if val.valid_check_digit and val_conf > self.confirmed_confidence:
+                        if val.valid_check_digit and val_pref_known and val_conf > self.confirmed_confidence:
                             # Higher confidence upgrade (e.g. true rear container read supersedes early noisy or chassis misread)
                             self.confirmed_container_number = val_text
                             self.confirmed_confidence = val_conf
                             self.identity_conflict = False
                         else:
                             self.identity_conflict = True
-                            return None
-                    elif val.valid_check_digit and val_conf > self.confirmed_confidence:
+                    elif val.valid_check_digit and val_pref_known and val_conf > self.confirmed_confidence:
                         self.confirmed_container_number = val_text
                         self.confirmed_confidence = val_conf
                         self.identity_conflict = False

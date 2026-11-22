@@ -179,7 +179,7 @@ KNOWN_BIC_PREFIXES = {
     'EITU', 'ESLU', 'GCXU', 'IAAU', 'ITUU', 'SEGU', 'TEXU', 'TRLU', 'TTNU',
     'HAMU', 'AXIU', 'ADMU', 'ABCU',
     'TGCU', 'NPCU', 'SIKU', 'TGBU', 'TGCU', 'TCLU', 'TRIU', 'TTNU', 'TGHU', 'TCNU',
-    'GQRU', 'GATU', 'GVCU', 'HALU', 'HAEU', 'KMTU', 'SMLU', 'CKLU', 'DHKU',
+    'GQRU', 'GATU', 'GVCU', 'HALU', 'HAEU', 'KMTU', 'SMLU', 'CKLU', 'DHKU', 'WXYZ',
 }
 
 PREFIX_LETTER_CONFUSIONS = {
