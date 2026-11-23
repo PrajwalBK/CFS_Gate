@@ -8,7 +8,7 @@ from pathlib import Path
 from threading import Lock
 from uuid import uuid4
 from typing import Any
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
 from app.database.models import Camera, DetectionRecord, GateEvent, OCRResult, Snapshot, SystemLog
 from app.domain import Observation, Validation, utcnow
@@ -100,9 +100,9 @@ def is_distinct_container(num1: str | None, num2: str | None) -> bool:
             return True
 
         # 2. Shifted digits / substring overlap (e.g. IAAU1762427 vs AAUU7624279: '76242' in both; IAAU1736011 vs AAUU7360113: '736011' in both):
-        if len(d1) >= 5 and len(d2) >= 5:
-            has_sub = any(d1[k:k+5] in d2 for k in range(len(d1) - 4))
-            if has_sub and (sim >= 0.70 or not p1_known or not p2_known):
+        if len(d1) >= 4 and len(d2) >= 4:
+            has_sub = any(d1[k:k+4] in d2 for k in range(len(d1) - 3))
+            if has_sub and (sim >= 0.65 or not p1_known or not p2_known):
                 return False
 
         # 3. High visual / OCR similarity (e.g. WISU6443771 vs WHSU6464371: sim=0.818):
@@ -113,7 +113,7 @@ def is_distinct_container(num1: str | None, num2: str | None) -> bool:
         # Serial digits must have at least 4 matching positions, or at least 3 matching positions with high similarity (>= 0.70), or recognized digit confusions:
         if matching_prefix_letters >= 3:
             confused_pairs_count = sum(1 for a, b in body_diff_pairs if (a, b) in COMMON_OCR_CONFUSIONS or (b, a) in COMMON_OCR_CONFUSIONS)
-            if matching_serial_digits >= 4 or (matching_serial_digits >= 3 and sim >= 0.70) or (matching_serial_digits >= 2 and confused_pairs_count >= 2):
+            if matching_serial_digits >= 4 or (matching_serial_digits >= 3 and (sim >= 0.60 or not p1_known or not p2_known)) or (matching_serial_digits >= 2 and confused_pairs_count >= 2):
                 return False
 
         # 5. Recognized body confusions across prefix and serial:
@@ -474,13 +474,13 @@ class GateRepository:
                         ))
                     best_c = CharacterConsensus.resolve(all_cands)
                     if best_c and best_c.normalized_text and best_c.valid_check_digit and is_valid_iso_6346(best_c.normalized_text):
-                        if not existing.container_number or not is_distinct_container(existing.container_number, best_c.normalized_text):
+                        if not existing.container_number or not is_distinct_container(existing.container_number, best_c.normalized_text) or existing.status == 'NEEDS_REVIEW':
                             existing.container_number = best_c.normalized_text
                             existing.status = 'CONFIRMED'
                             if best_c.size_type:
                                 existing.iso_code_1 = best_c.size_type
-                    elif container_num and is_valid_iso_6346(container_num) and (container_num[:4] in KNOWN_BIC_PREFIXES):
-                        if not existing.container_number or not is_distinct_container(existing.container_number, container_num):
+                    if container_num and is_valid_iso_6346(container_num) and (container_num[:4] in KNOWN_BIC_PREFIXES):
+                        if not existing.container_number or existing.status == 'NEEDS_REVIEW' or not is_distinct_container(existing.container_number, container_num):
                             existing.container_number = container_num
                             existing.status = 'CONFIRMED'
                     elif not existing.container_number and container_num:
@@ -761,8 +761,8 @@ class GateRepository:
                                     break
                     # Same container window recovery:
                     # If the same validated container is seen on the same lane in the same direction
-                    # within same_container_window_seconds (e.g. 15 mins), bind to the existing event instead of creating a second visit!
-                    dwell_window = float(same_container_window_seconds) if same_container_window_seconds is not None else dedup_seconds
+                    # within same_container_window_seconds (default 45 mins), bind to the existing event instead of creating a second visit!
+                    dwell_window = float(same_container_window_seconds or 2700.0)
                     if not existing and is_valid_iso_6346(number) and dwell_window > dedup_seconds:
                         long_delta = timedelta(seconds=dwell_window)
                         existing = session.scalar(select(GateEvent).where(
@@ -1001,7 +1001,8 @@ class GateRepository:
                             pass  # Distinct containers! Never merge!
                         else:
                             time_diff = datetime_diff_seconds(active.timestamp, obs.detection.frame_timestamp)
-                            if not active.cloud_synced and (obs.origin_key.startswith('dwell:') or time_diff <= max(dedup_seconds, 60.0)):
+                            dwell_win = float(same_container_window_seconds or 2700.0)
+                            if obs.origin_key.startswith('dwell:') or time_diff <= max(dwell_win, 60.0):
                                 existing = active
 
                 if ongoing_event_id and not existing:
@@ -1017,7 +1018,8 @@ class GateRepository:
                             pass  # Distinct containers! Never merge!
                         else:
                             time_diff = datetime_diff_seconds(active.timestamp, obs.detection.frame_timestamp)
-                            if not active.cloud_synced and (obs.origin_key.startswith('dwell:') or time_diff <= max(dedup_seconds, 60.0)):
+                            dwell_win = float(same_container_window_seconds or 2700.0)
+                            if obs.origin_key.startswith('dwell:') or time_diff <= max(dwell_win, 60.0):
                                 existing = active
 
                 if obs.origin_key.startswith('dwell:') and existing:
@@ -1128,7 +1130,8 @@ class GateRepository:
                 if created and session.get(GateEvent, event_id):
                     existing_in_db = session.get(GateEvent, event_id)
                     time_diff = datetime_diff_seconds(existing_in_db.timestamp, obs.detection.frame_timestamp)
-                    if existing_in_db.cloud_synced or time_diff > max(dedup_seconds, 60.0) or is_distinct_container(existing_in_db.container_number, number):
+                    dwell_win = float(same_container_window_seconds or 2700.0)
+                    if is_distinct_container(existing_in_db.container_number, number) or time_diff > max(dwell_win, 2700.0):
                         event_id = str(uuid4())
                         existing = None
                     else:
@@ -1645,7 +1648,7 @@ class GateRepository:
                 .where(
                     GateEvent.status == 'CONFIRMED',
                     func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_([
-                        'PENDING', 'OFFLINE', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
+                        'PENDING', 'OFFLINE', 'CONFLICT', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
                     ]),
                     (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
                     (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
@@ -1685,7 +1688,7 @@ class GateRepository:
                 .where(
                     GateEvent.status == 'CONFIRMED',
                     func.coalesce(GateEvent.cloud_delivery_state, 'PENDING').in_([
-                        'PENDING', 'OFFLINE', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
+                        'PENDING', 'OFFLINE', 'CONFLICT', 'EVENT_CREATED', 'PUT_PENDING', 'PUT_FAILED', 'POST_PENDING'
                     ]),
                     (GateEvent.container_number.is_not(None) | GateEvent.container_number_2.is_not(None)),
                     (GateEvent.cloud_synced == False) | (GateEvent.cloud_synced.is_(None))
@@ -1693,12 +1696,23 @@ class GateRepository:
             )
             return int(session.scalar(query) or 0)
 
-    def clean_duplicate_events(self, max_gap_seconds: int = 60, snapshots=None):
+    def clean_duplicate_events(self, max_gap_seconds: int = 2700, snapshots=None):
         """
         Merges and removes duplicate events created for the same container within dwell windows.
         Re-parents detections and snapshots strictly within the passage window, resolving true consensus.
         """
         with self._write_lock, self.db.sessions.begin() as session:
+            # Clean orphan empty DUPLICATE rows with no detections and no snapshots
+            orphan_dups = session.scalars(
+                select(GateEvent)
+                .where(GateEvent.status == 'DUPLICATE')
+            ).all()
+            for o in orphan_dups:
+                dets_count = session.scalar(select(func.count(DetectionRecord.id)).where(DetectionRecord.event_id == o.id)) or 0
+                snaps_count = session.scalar(select(func.count(Snapshot.id)).where(Snapshot.event_id == o.id)) or 0
+                if dets_count == 0 and snaps_count == 0:
+                    session.execute(delete(SystemLog).where(SystemLog.event_id == o.id))
+                    session.delete(o)
             events = session.scalars(
                 select(GateEvent)
                 .where(GateEvent.container_number.is_not(None))
@@ -1733,9 +1747,24 @@ class GateRepository:
                 for cluster in clusters:
                     if len(cluster) <= 1:
                         continue
-                    primary = cluster[0]
+                    # Pick best primary: prefer CONFIRMED / DELIVERED event
+                    confirmed_members = [e for e in cluster if e.status == 'CONFIRMED']
+                    if confirmed_members:
+                        primary = next((e for e in confirmed_members if e.cloud_event_id), confirmed_members[0])
+                    else:
+                        primary = cluster[0]
                     if any(e.status == 'CONFIRMED' for e in cluster):
                         primary.status = 'CONFIRMED'
+
+                    for mem in cluster:
+                        if mem.id != primary.id:
+                            if mem.cloud_event_id and not primary.cloud_event_id:
+                                primary.cloud_event_id = mem.cloud_event_id
+                                primary.cloud_delivery_state = mem.cloud_delivery_state
+                                primary.cloud_synced = mem.cloud_synced
+                                primary.cloud_synced_at = mem.cloud_synced_at
+                            if mem.cloud_visit_id and not primary.cloud_visit_id:
+                                primary.cloud_visit_id = mem.cloud_visit_id
 
                     # Resolve authoritative container number across all reads in cluster via multi-read consensus
                     all_reads = []
@@ -1761,7 +1790,9 @@ class GateRepository:
                         if best_c.size_type:
                             primary.iso_code_1 = best_c.size_type
 
-                    for dup in cluster[1:]:
+                    for dup in cluster:
+                        if dup.id == primary.id:
+                            continue
                         session.execute(
                             update(DetectionRecord)
                             .where(DetectionRecord.event_id == dup.id)
@@ -1769,7 +1800,7 @@ class GateRepository:
                         )
                         # Re-parent only snapshots within the true passage window (<= 25s) to prevent cross-contamination
                         for snap in session.scalars(select(Snapshot).where(Snapshot.event_id == dup.id)).all():
-                            if abs(datetime_diff_seconds(snap.timestamp, primary.timestamp)) <= 25.0:
+                            if abs(datetime_diff_seconds(snap.timestamp, primary.timestamp)) <= 45.0:
                                 snap.event_id = primary.id
                             else:
                                 session.delete(snap)

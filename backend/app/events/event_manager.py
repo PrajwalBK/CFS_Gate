@@ -4,7 +4,7 @@ from datetime import datetime
 import logging
 import time
 from app.domain import Observation
-from app.ocr.validator import is_valid_iso_6346
+from app.ocr.validator import is_valid_iso_6346, KNOWN_BIC_PREFIXES
 
 log = logging.getLogger('gate')
 
@@ -44,17 +44,31 @@ class EventManager:
             evidence.last_sequence = job.frame.sequence
         evidence.reads = evidence.reads[-self.settings.ocr_max_attempts:]
 
-        good = [r for r in evidence.reads if r and r.valid_check_digit and is_valid_iso_6346(r.normalized_text)
-                and getattr(r, 'confidence', 1.0) >= self.settings.ocr_min_confidence]
+        from app.ocr.validator import KNOWN_BIC_PREFIXES
+        good_bic = [
+            r for r in evidence.reads
+            if r and r.valid_check_digit and is_valid_iso_6346(r.normalized_text)
+            and len(r.normalized_text) == 11 and r.normalized_text[:4] in KNOWN_BIC_PREFIXES
+            and getattr(r, 'confidence', 1.0) >= self.settings.ocr_min_confidence
+        ]
+        if good_bic:
+            good = good_bic
+        else:
+            good = [
+                r for r in evidence.reads
+                if r and r.valid_check_digit and is_valid_iso_6346(r.normalized_text)
+                and getattr(r, 'confidence', 1.0) >= self.settings.ocr_min_confidence
+            ]
         votes = Counter(r.normalized_text for r in good)
         best, count = votes.most_common(1)[0] if votes else (None, 0)
         tied = sum(v == count for v in votes.values()) > 1
         min_required = self.settings.ocr_confirmations if ongoing_event_id else max(2, self.settings.ocr_confirmations)
         confirmed = count >= min_required and not tied
 
-        # Early confirmation: If at least 2 distinct observations agree on a valid check-digit code, confirm immediately
+        # Early confirmation: If at least 2 distinct observations agree on a valid check-digit code with verified BIC prefix, confirm immediately
         if not confirmed and count >= 2 and not tied:
-            confirmed = True
+            if best and len(best) == 11 and best[:4] in KNOWN_BIC_PREFIXES:
+                confirmed = True
 
         t_cons0 = time.perf_counter()
         consensus_val = None
@@ -187,7 +201,11 @@ class EventManager:
                 if (time.monotonic() - active_lane['finalized_at']) <= max(getattr(self.settings, 'dedup_seconds', 35.0), 35.0):
                     recent_lane_finalized = True
 
-        is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
+        is_bic_prefix_known = bool(
+            obs.ocr and obs.ocr.normalized_text and len(obs.ocr.normalized_text) == 11
+            and obs.ocr.normalized_text[:4] in KNOWN_BIC_PREFIXES
+        )
+        is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format and is_bic_prefix_known)
 
         should_dispatch_post = (
             obs.confirmed and is_ocr_valid
@@ -251,7 +269,11 @@ class EventManager:
             if act_sess and not getattr(act_sess, 'finalized', False):
                 has_active_passage_session = True
 
-        is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format)
+        is_bic_prefix_known = bool(
+            obs.ocr and obs.ocr.normalized_text and len(obs.ocr.normalized_text) == 11
+            and obs.ocr.normalized_text[:4] in KNOWN_BIC_PREFIXES
+        )
+        is_ocr_valid = bool(obs.ocr and obs.ocr.valid_check_digit and obs.ocr.valid_format and is_bic_prefix_known)
         should_dispatch_post = (
             obs.confirmed and is_ocr_valid
             and not has_active_passage_session

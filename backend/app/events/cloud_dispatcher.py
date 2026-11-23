@@ -1298,7 +1298,7 @@ class CloudOutboxDispatcher:
                         or bool(payload.get('imageUrl'))
                     )
 
-                    if not has_proof_images:
+                    if pre_payload is None and not has_proof_images:
                         wait_duration = time.monotonic() - float(item.get('enqueued_at', time.monotonic()))
                         # Allow up to 25.0 seconds for passage finalization and camera snapshots to save to disk
                         if wait_duration < 25.0 and not item.get('force'):

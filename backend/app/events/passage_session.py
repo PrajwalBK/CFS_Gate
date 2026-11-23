@@ -541,10 +541,12 @@ class ContainerPassageSession:
                 all(bool(self.captured_frames.get(c)) for c in self.cameras)
             )
 
-            # Maximum transit duration guard: a single container passage never spans minutes
+            # Maximum transit duration guard: a single container passage should only finalize if
+            # the lane has actually cleared or no frames have been seen recently.
+            # Never chop an actively visible/dwelling vehicle into multiple sessions!
             total_duration = abs((now - self.created_at).total_seconds())
-            if total_duration >= getattr(self, 'max_session_seconds', 45.0):
-                return True
+            idle_seconds = abs((now - self.last_seen).total_seconds())
+            cross_window = max(getattr(self, 'cross_camera_window', 12.0), 5.0)
 
             # Zone clearance: all cameras on lane confirmed vehicle cleared
             if self.clear_since is not None:
@@ -552,15 +554,17 @@ class ContainerPassageSession:
                 if clear_duration >= gate_clear_seconds:
                     return True
 
-            idle_seconds = abs((now - self.last_seen).total_seconds())
             if all_cams_captured:
                 if idle_seconds >= max(1.5, gate_clear_seconds):
                     return True
                 return False
 
             # If not all cameras have captured frames yet, wait for cross-camera window
-            cross_window = max(getattr(self, 'cross_camera_window', 12.0), 5.0)
             if idle_seconds >= cross_window:
+                return True
+
+            # If session duration exceeds max_session_seconds, only finalize if idle or cleared
+            if total_duration >= getattr(self, 'max_session_seconds', 45.0) and (self.clear_since is not None or idle_seconds >= 3.0):
                 return True
 
             return False
@@ -618,9 +622,7 @@ class PassageSessionManager:
                         all_cams_captured = bool(session.cameras) and all(bool(session.captured_frames.get(c)) for c in session.cameras)
                         has_ocr = bool(session.confirmed_container_number or (session.ocr_candidates and any(c.valid_check_digit for c in session.ocr_candidates)))
                         if (session.clear_since is not None and abs((timestamp - session.clear_since).total_seconds()) >= 2.0) or \
-                           (idle_from_last >= 8.0) or \
-                           (duration >= 20.0 and (all_cams_captured or idle_from_last >= 4.0)) or \
-                           (all_cams_captured and has_ocr):
+                           (idle_from_last >= 8.0):
                             new_track_on_camera = True
                         else:
                             session.record_camera_track(camera_id, track_id)
@@ -630,10 +632,8 @@ class PassageSessionManager:
                 if not camera_id and track_id is not None and session.track_id is not None and track_id != session.track_id:
                     duration = abs((timestamp - session.created_at).total_seconds())
                     idle_from_last = abs((timestamp - session.last_seen).total_seconds())
-                    all_cams_captured = bool(session.cameras) and all(bool(session.captured_frames.get(c)) for c in session.cameras)
                     if (session.clear_since is not None and abs((timestamp - session.clear_since).total_seconds()) >= 2.0) or \
-                       (idle_from_last >= 8.0) or \
-                       (duration >= 20.0 and (all_cams_captured or idle_from_last >= 4.0)):
+                       (idle_from_last >= 8.0):
                         new_session_track = True
 
                 # 3. Session clearance timeout
@@ -644,7 +644,11 @@ class PassageSessionManager:
 
                 source_changed = bool(camera_id and source_id and session.sources_by_camera.get(camera_id)
                                       and session.sources_by_camera[camera_id] != source_id)
-                duration_exceeded = abs((timestamp - session.created_at).total_seconds()) >= getattr(session, 'max_session_seconds', 45.0)
+                idle_from_last = abs((timestamp - session.last_seen).total_seconds())
+                duration_exceeded = (
+                    abs((timestamp - session.created_at).total_seconds()) >= getattr(session, 'max_session_seconds', 45.0)
+                    and (session.clear_since is not None or idle_from_last >= 4.0)
+                )
                 if new_track_on_camera or new_session_track or is_cleared or source_changed or duration_exceeded:
                     # Finalize the prior session immediately into its own event!
                     num, iso, conf = session.get_consensus_container_number()
