@@ -1346,6 +1346,7 @@ class GateRuntime:
 
         self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
         try:
+            expected = validation.normalized_text if validation and validation.valid_check_digit else None
             additional = {}
             slot_pos = job.slot_position or 'CONTAINER_1'
             target_session = None
