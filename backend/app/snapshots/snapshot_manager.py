@@ -192,6 +192,22 @@ class SnapshotManager:
         ids = {item['id'] for item in captures}
         primary = event_record.get('primary_snapshot_id') if event_record.get('primary_snapshot_id') in ids else (captures[0]['id'] if captures else None)
         rear = event_record.get('rear_snapshot_id') if event_record.get('rear_snapshot_id') in ids else next((item['id'] for item in captures if (item.get('image_path') or '').endswith('_rear.jpg')), None)
+
+        # Primary evidence proof must strictly be the first image in captures (index 0)
+        ordered_captures = []
+        if primary:
+            prim_c = next((c for c in captures if c['id'] == primary), None)
+            if prim_c:
+                ordered_captures.append(prim_c)
+        if rear:
+            rear_c = next((c for c in captures if c['id'] == rear and c not in ordered_captures), None)
+            if rear_c:
+                ordered_captures.append(rear_c)
+        for c in captures:
+            if c not in ordered_captures:
+                ordered_captures.append(c)
+        captures = ordered_captures
+
         return {'version': 1, 'event_id': event_record.get('id'), 'captures': captures,
                 'selected_snapshot_ids': [item['id'] for item in captures],
                 'primary_snapshot_id': primary, 'rear_snapshot_id': rear}

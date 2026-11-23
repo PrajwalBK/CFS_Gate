@@ -30,6 +30,13 @@ def event(event_id: str, request: Request):
         result['snapshots'] = manifest_captures
     else:
         result['snapshots'] = all_snaps
+    # Ensure primary snapshot matches index 0 of snapshots list for all consumers
+    if result.get('primary_snapshot_id') and result.get('snapshots'):
+        prim_id = result['primary_snapshot_id']
+        snaps = result['snapshots']
+        prim_idx = next((i for i, s in enumerate(snaps) if s.get('id') == prim_id), -1)
+        if prim_idx > 0:
+            snaps.insert(0, snaps.pop(prim_idx))
     result['ocr_crops'] = request.app.state.runtime.ocr_store.event_crops(event_id)
     return result
 

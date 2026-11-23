@@ -386,3 +386,50 @@ def test_container_a_and_container_b_never_mix_images_or_ocr(repository, snapsho
     assert rec_b["container_number"] == "MEDU9876548"
 
 
+def test_primary_proof_snapshot_strictly_at_index_zero(repository, snapshots):
+    from app.config.settings import CameraConfig
+    from app.domain import Observation, Detection, Validation
+
+    repository.sync_cameras([
+        CameraConfig(id="gate-in-1", name="gate-in-1", gate_id="lane-1", source_env="G1"),
+        CameraConfig(id="gate-in-2", name="gate-in-2", gate_id="lane-1", source_env="G2"),
+    ])
+
+    ts = datetime.now(timezone.utc)
+    frame_left = make_dummy_frame()
+    frame_front = make_dummy_frame()
+
+    # Observation on gate-in-2 (which read CAAU2348993)
+    obs = Observation(
+        origin_key="session:g2",
+        gate_id="lane-1",
+        track_id=1,
+        direction="GATE_IN",
+        detection=Detection("gate-in-2", ts, "container_number", 0.95, (10, 10, 100, 100)),
+        ocr=Validation(raw_text="CAAU 2348993", normalized_text="CAAU2348993", confidence=0.96, valid_format=True, valid_check_digit=True, validation_status="VALID"),
+        image=frame_left,
+        started_at=ts,
+        source_id="g2",
+        frame_sequence=1,
+        confirmed=True
+    )
+    # gate-in-1 companion frame was captured concurrently
+    additional = {"gate-in-1": frame_front}
+
+    event_id, _ = repository.save_observation(obs, snapshots, 35.0, additional_frames=additional)
+
+    # 1. Verify repo.event() orders primary snapshot (gate-in-2) at index 0
+    ev = repository.event(event_id)
+    assert ev["primary_camera_id"] == "gate-in-2"
+    assert len(ev["snapshots"]) >= 2
+    assert ev["snapshots"][0]["id"] == ev["primary_snapshot_id"]
+    assert ev["snapshots"][0]["camera_id"] == "gate-in-2"
+
+    # 2. Verify build_evidence_manifest() orders primary snapshot at index 0
+    manifest = snapshots.build_evidence_manifest(ev)
+    assert manifest["primary_snapshot_id"] == ev["primary_snapshot_id"]
+    assert manifest["captures"][0]["id"] == ev["primary_snapshot_id"]
+    assert manifest["captures"][0]["camera_id"] == "gate-in-2"
+
+
+

@@ -1362,8 +1362,17 @@ class GateRuntime:
                     if c.gate_id == job.gate_id and c.id != job.frame.camera_id and getattr(c, 'enabled', True):
                         # 1. Strictly prefer best frame captured DURING this specific container's passage session
                         if target_session and target_session.captured_frames.get(c.id):
+                            # Strict container isolation: if target session is for a distinct container, skip!
+                            from app.database.repositories.gate import is_distinct_container
+                            if expected and getattr(target_session, 'confirmed_container_number', None):
+                                if is_distinct_container(expected, target_session.confirmed_container_number):
+                                    continue
                             best_c = max(target_session.captured_frames[c.id], key=lambda f: f.quality_score, default=None)
                             if best_c and getattr(best_c, 'image', None) is not None:
+                                if expected and getattr(best_c, 'ocr_read', None):
+                                    c_read = getattr(best_c.ocr_read, 'normalized_text', '') or ''
+                                    if c_read and is_distinct_container(expected, c_read):
+                                        continue
                                 has_cntr = any(
                                     getattr(d, 'class_name', '') in ('container', 'container_object')
                                     for d in (best_c.detections or [])

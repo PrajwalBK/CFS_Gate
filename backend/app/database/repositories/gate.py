@@ -1308,6 +1308,11 @@ class GateRepository:
                                     id=other_snap_id, event_id=event_id, camera_id=other_cam_id,
                                     image_path=other_path, timestamp=obs.detection.frame_timestamp
                                 ))
+                                self._capture_provenance(session, snapshots, other_snap_id,
+                                    event_id, other_cam_id, obs.detection.frame_timestamp, other_path,
+                                    [],
+                                    obs.proof_container_number if obs.proof_container_number is not None else obs.ocr.normalized_text,
+                                    obs.source_id, obs.frame_sequence)
 
                 session.add(SystemLog(id=str(uuid4()), event_id=event_id, level='INFO',
                                       event_name='gate_event_created' if created else 'gate_evidence_associated',
@@ -1461,7 +1466,10 @@ class GateRepository:
                 if not number:
                     return None
                 matching = {o['detection_id'] for o in result['ocr_results']
-                            if o.get('valid_check_digit') and o.get('normalized_text') == number}
+                            if o.get('normalized_text') == number}
+                if not matching:
+                    matching = {o['detection_id'] for o in result['ocr_results']
+                                if o.get('valid_check_digit')}
                 eligible = [d for d in detections if d.id in matching
                             and d.origin_key.endswith(':rear') == rear]
                 if not eligible:
@@ -1487,7 +1495,17 @@ class GateRepository:
             result['primary_camera_id'] = primary_cam
             result['primary_snapshot_id'] = front_snap['id'] if front_snap else None
             result['rear_snapshot_id'] = rear_snap['id'] if rear_snap else None
-            result['snapshots'] = snapshots_list
+
+            # Primary proof snapshot must strictly be index 0 of snapshots list
+            ordered_snapshots = []
+            if front_snap and front_snap in snapshots_list:
+                ordered_snapshots.append(front_snap)
+            if rear_snap and rear_snap in snapshots_list and rear_snap not in ordered_snapshots:
+                ordered_snapshots.append(rear_snap)
+            for s in snapshots_list:
+                if s not in ordered_snapshots:
+                    ordered_snapshots.append(s)
+            result['snapshots'] = ordered_snapshots
 
             # Top-level tracking identification
             track_ids = [d.track_id for d in detections if getattr(d, 'track_id', None) is not None]
@@ -1809,6 +1827,10 @@ class GateRepository:
                         # Re-parent only snapshots within the true passage window (<= 25s) to prevent cross-contamination
                         for snap in session.scalars(select(Snapshot).where(Snapshot.event_id == dup.id)).all():
                             if abs(datetime_diff_seconds(snap.timestamp, primary.timestamp)) <= 45.0:
+                                path_cntrs = re.findall(r'[A-Z]{4}[0-9]{7}', str(snap.image_path).replace('\\', '/'))
+                                if primary.container_number and path_cntrs and any(is_distinct_container(primary.container_number, pc) for pc in path_cntrs):
+                                    session.delete(snap)
+                                    continue
                                 snap.event_id = primary.id
                             else:
                                 session.delete(snap)
