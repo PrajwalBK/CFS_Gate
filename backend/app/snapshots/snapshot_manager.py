@@ -81,7 +81,7 @@ class SnapshotManager:
             if not detections:
                 # If this frame was saved in the event evidence/snapshot folder during container transit,
                 # accept it for multi-camera proof if whole-frame image dimensions and quality are valid.
-                if snapshot.get('id', '').startswith('disk_') or 'frame' in str(snapshot.get('image_path', '')):
+                if snapshot.get('id', '').startswith('disk_') or 'frame' in str(snapshot.get('image_path', '')) or (w >= 320 and h >= 240):
                     return True
                 return False
 

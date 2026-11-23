@@ -566,7 +566,8 @@ class CloudOutboxDispatcher:
                     return
                 if not force and (
                     (stage == 'POST' and ev.get('cloud_synced') and ev.get('cloud_delivery_state') == 'DELIVERED')
-                    or ev.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'BLOCKED', 'REJECTED', 'DUPLICATE')
+                    or ev.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'REJECTED', 'DUPLICATE')
+                    or (ev.get('cloud_delivery_state') == 'BLOCKED' and not self._evidence_ready(event_id, ev))
                 ):
                     return
                 from app.ocr.validator import is_valid_iso_6346
@@ -667,8 +668,8 @@ class CloudOutboxDispatcher:
                 pass
 
         primary_snap_id = event_record.get('primary_snapshot_id') if event_record else None
+        cam_snapshots = {}
         if event_record and event_record.get('snapshots') and self.snapshots:
-            cam_snapshots = {}
             for snap in event_record['snapshots']:
                 cam_id = snap.get('camera_id')
                 if not cam_id:
@@ -678,267 +679,270 @@ class CloudOutboxDispatcher:
                     continue
                 cam_snapshots.setdefault(cam_id, []).append(snap)
 
-            # Check filesystem directories (snapshots/ and evidence/) for any configured camera snapshots
-            from pathlib import Path
-            from sqlalchemy import select
-            event_id_str = str(event_record.get('id') if event_record else '')
-            event_dirs = []
-            if self.snapshots:
-                if event_id_str:
-                    leg_dir = self.snapshots.root / event_id_str
-                    if leg_dir.is_dir():
-                        event_dirs.append(leg_dir)
-                if hasattr(self.snapshots, 'evidence_manager') and self.snapshots.evidence_manager:
-                    try:
-                        ev_folder = self.snapshots.evidence_manager.get_existing_folder(event_id_str)
-                        if ev_folder and ev_folder.is_dir() and ev_folder not in event_dirs:
-                            event_dirs.append(ev_folder)
-                    except Exception:
-                        pass
-
-            # Also check companion sessions in DB if any camera is missing
-            if self.repository and hasattr(self.repository, 'db') and cntr1:
+        # Check filesystem directories (snapshots/ and evidence/) for any configured camera snapshots
+        from pathlib import Path
+        from sqlalchemy import select
+        event_id_str = str(event_record.get('id') if event_record else '')
+        event_dirs = []
+        if self.snapshots:
+            if event_id_str:
+                leg_dir = self.snapshots.root / event_id_str
+                if leg_dir.is_dir():
+                    event_dirs.append(leg_dir)
+            if hasattr(self.snapshots, 'evidence_manager') and self.snapshots.evidence_manager:
                 try:
-                    with self.repository.db.sessions() as db_sess:
-                        from app.database.models import GateEvent
-                        from app.database.repositories.gate import parse_ts
-                        event_dt = parse_ts(event_record.get('timestamp')) if event_record.get('timestamp') else None
-                        stmt = select(GateEvent.id).where(
-                            GateEvent.container_number == cntr1,
-                            GateEvent.id != event_id_str
-                        )
-                        if event_dt:
-                            from datetime import timedelta
-                            stmt = stmt.where(
-                                GateEvent.timestamp >= event_dt - timedelta(seconds=300),
-                                GateEvent.timestamp <= event_dt + timedelta(seconds=300)
-                            )
-                        comp_ids = db_sess.scalars(stmt).all()
-                        for comp_id in comp_ids:
-                            if self.snapshots:
-                                c_leg = self.snapshots.root / str(comp_id)
-                                if c_leg.is_dir() and c_leg not in event_dirs:
-                                    event_dirs.append(c_leg)
-                                if hasattr(self.snapshots, 'evidence_manager') and self.snapshots.evidence_manager:
-                                    try:
-                                        c_ev = self.snapshots.evidence_manager.get_existing_folder(str(comp_id))
-                                        if c_ev and c_ev.is_dir() and c_ev not in event_dirs:
-                                            event_dirs.append(c_ev)
-                                    except Exception:
-                                        pass
+                    ev_folder = self.snapshots.evidence_manager.get_existing_folder(event_id_str)
+                    if ev_folder and ev_folder.is_dir() and ev_folder not in event_dirs:
+                        event_dirs.append(ev_folder)
                 except Exception:
                     pass
 
-            for missing_cam in (expected_gate_cams - set(cam_snapshots.keys())):
-                found_disk = False
-                for ed in event_dirs:
-                    disk_cands = [
-                        ed / f"{missing_cam}.jpg",
-                        ed / f"{missing_cam}.png",
-                    ] + list(ed.glob(f"*{missing_cam}*.jpg")) + list(ed.glob(f"*{missing_cam}*.png"))
-                    for cand in disk_cands:
-                        if cand.is_file() and not cand.name.endswith('.quality') and 'crop' not in cand.name.lower() and 'rot180' not in cand.name.lower():
-                            # Strict container check: do not pick disk candidate if path belongs to a distinct container
-                            from app.database.repositories.gate import is_distinct_container
-                            cand_containers = re.findall(r'[A-Z]{4}[0-9]{7}', str(cand).replace('\\', '/'))
-                            if cntr1 and cand_containers and any(is_distinct_container(cntr1, cc) for cc in cand_containers):
-                                continue
-                            cam_snapshots.setdefault(missing_cam, []).append({
-                                'id': f'disk_{missing_cam}',
-                                'camera_id': missing_cam,
-                                'image_path': str(cand),
-                                'timestamp': event_record.get('timestamp')
-                            })
-                            found_disk = True
-                            break
-                    if found_disk:
-                        break
-
-            best_by_camera = {}
-            event_ts = event_record.get('timestamp')
-            from app.database.repositories.gate import is_distinct_container, datetime_diff_seconds
-
-            for cam_id, snaps in cam_snapshots.items():
-                best_snap = None
-                best_data = None
-                best_score = -1.0
-                for snap in snaps:
-                    try:
-                        snap_cam = snap.get('camera_id')
-                        snap_ts = snap.get('timestamp')
-
-                        snap_img_path = str(snap.get('image_path') or '').replace('\\', '/')
-                        is_native = bool(
-                            str(snap.get('event_id') or '') == event_id_str
-                            or (snap_img_path and event_id_str and event_id_str in snap_img_path)
+        # Also check companion sessions in DB if any camera is missing
+        if self.repository and hasattr(self.repository, 'db') and cntr1:
+            try:
+                with self.repository.db.sessions() as db_sess:
+                    from app.database.models import GateEvent
+                    from app.database.repositories.gate import parse_ts
+                    event_dt = parse_ts(event_record.get('timestamp')) if event_record.get('timestamp') else None
+                    stmt = select(GateEvent.id).where(
+                        GateEvent.container_number == cntr1,
+                        GateEvent.id != event_id_str
+                    )
+                    if event_dt:
+                        from datetime import timedelta
+                        stmt = stmt.where(
+                            GateEvent.timestamp >= event_dt - timedelta(seconds=300),
+                            GateEvent.timestamp <= event_dt + timedelta(seconds=300)
                         )
-
-                        # 1. Passage window check:
-                        # Allow normal passage and boom-barrier dwell times (up to configured same-container window)
-                        max_gap = max(float(getattr(self.settings, 'same_container_event_window_seconds', 1800.0) or 1800.0), 300.0)
-                        if event_ts and snap_ts and datetime_diff_seconds(event_ts, snap_ts) > max_gap:
-                            continue
-
-                        # 2. Strict container number isolation in image path / directory:
-                        # Extract any 11-char container code in the snapshot path; reject if distinct from this container
-                        path_containers = re.findall(r'[A-Z]{4}[0-9]{7}', snap_img_path)
-                        if path_containers and any(is_distinct_container(cntr1, pc) for pc in path_containers):
-                            log.warning('prosper_snapshot_skipped_foreign_container_folder', extra={
-                                'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1, 'found_container': path_containers
-                            })
-                            continue
-
-                        # 2b. Reject any snapshot associated with a distinct event or container
-                        snap_ev_id = str(snap.get('event_id') or '')
-                        if snap_ev_id and event_id_str and snap_ev_id != event_id_str:
-                            if self.repository:
+                    comp_ids = db_sess.scalars(stmt).all()
+                    for comp_id in comp_ids:
+                        if self.snapshots:
+                            c_leg = self.snapshots.root / str(comp_id)
+                            if c_leg.is_dir() and c_leg not in event_dirs:
+                                event_dirs.append(c_leg)
+                            if hasattr(self.snapshots, 'evidence_manager') and self.snapshots.evidence_manager:
                                 try:
-                                    other_ev = self.repository.event(snap_ev_id)
-                                    if other_ev and other_ev.get('container_number'):
-                                        if is_distinct_container(cntr1, other_ev.get('container_number')):
-                                            log.warning('prosper_snapshot_skipped_distinct_container_event', extra={
-                                                'camera_id': cam_id, 'snapshot_id': snap.get('id'),
-                                                'expected_container': cntr1, 'other_container': other_ev.get('container_number')
-                                            })
-                                            continue
+                                    c_ev = self.snapshots.evidence_manager.get_existing_folder(str(comp_id))
+                                    if c_ev and c_ev.is_dir() and c_ev not in event_dirs:
+                                        event_dirs.append(c_ev)
                                 except Exception:
                                     pass
+            except Exception:
+                pass
 
-                        # 3. Provenance metadata check
-                        prov = snap.get('provenance') or {}
-                        prov_cntr = prov.get('container_number')
-                        if prov_cntr and is_distinct_container(cntr1, prov_cntr):
-                            log.warning('prosper_snapshot_skipped_provenance_container_mismatch', extra={
-                                'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1, 'prov_container': prov_cntr
-                            })
+        search_cams = (expected_gate_cams - set(cam_snapshots.keys())) if expected_gate_cams else {'gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-out-1', 'gate-out-2', 'gate-out-3'}
+        for missing_cam in search_cams:
+            found_disk = False
+            for ed in event_dirs:
+                disk_cands = [
+                    ed / f"{missing_cam}.jpg",
+                    ed / f"{missing_cam}.png",
+                ] + list(ed.glob(f"*{missing_cam}*.jpg")) + list(ed.glob(f"*{missing_cam}*.png"))
+                for cand in disk_cands:
+                    if cand.is_file() and not cand.name.endswith('.quality') and 'crop' not in cand.name.lower() and 'rot180' not in cand.name.lower():
+                        # Strict container check: do not pick disk candidate if path belongs to a distinct container
+                        from app.database.repositories.gate import is_distinct_container
+                        cand_containers = re.findall(r'[A-Z]{4}[0-9]{7}', str(cand).replace('\\', '/'))
+                        if cntr1 and cand_containers and any(is_distinct_container(cntr1, cc) for cc in cand_containers):
                             continue
+                        cam_snapshots.setdefault(missing_cam, []).append({
+                            'id': f'disk_{missing_cam}',
+                            'camera_id': missing_cam,
+                            'image_path': str(cand),
+                            'timestamp': event_record.get('timestamp')
+                        })
+                        found_disk = True
+                        break
+                if found_disk:
+                    break
 
-                        # 4. Detection & OCR conflict check
-                        is_mismatched = False
-                        for det in event_record.get('detections', []):
-                            if det.get('camera_id') == snap_cam:
-                                det_ts = det.get('timestamp')
-                                if det_ts and snap_ts and datetime_diff_seconds(det_ts, snap_ts) <= 10.0:
-                                    for ocr in event_record.get('ocr_results', []):
-                                        if ocr.get('detection_id') == det.get('id'):
-                                             ocr_text = ocr.get('normalized_text')
-                                             if ocr_text and is_distinct_container(cntr1, ocr_text):
-                                                 is_mismatched = True
-                                                 break
-                                    if is_mismatched:
-                                        break
-                        if is_mismatched:
-                            log.warning('prosper_snapshot_skipped_conflicting_container', extra={
-                                'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1
-                            })
-                            continue
+        best_by_camera = {}
+        event_ts = event_record.get('timestamp')
+        from app.database.repositories.gate import is_distinct_container, datetime_diff_seconds
 
-                        snap_img_str = str(snap.get('image_path') or '')
-                        if Path(snap_img_str).is_absolute() and Path(snap_img_str).is_file():
-                            snap_p = Path(snap_img_str)
-                        else:
-                            snap_p = self.snapshots.path(snap_img_str)
-                        if not snap_p.is_file():
-                            camera_id_str = str(snap.get('camera_id') or cam_id)
-                            snap_id_str = str(snap.get('id') or '')
-                            for ed in event_dirs:
-                                cands = [
-                                    ed / f"{camera_id_str}_{snap_id_str}.jpg",
-                                    ed / f"{camera_id_str}_{snap_id_str}_rear.jpg",
-                                    ed / f"{camera_id_str}.jpg",
-                                    ed / f"{camera_id_str}.png",
-                                ]
-                                cands += list(ed.glob(f"*{camera_id_str}*.jpg"))
-                                cands += list(ed.glob(f"*{camera_id_str}*.png"))
-                                cands += list(ed.glob(f"*companion_{camera_id_str}.png"))
-                                cands = [c for c in cands if c.is_file() and not c.name.endswith('.quality') and 'crop' not in c.name.lower() and 'rot180' not in c.name.lower()]
-                                if cands:
-                                    snap_p = cands[0]
+        for cam_id, snaps in cam_snapshots.items():
+            best_snap = None
+            best_data = None
+            best_score = -1.0
+            for snap in snaps:
+                try:
+                    snap_cam = snap.get('camera_id')
+                    snap_ts = snap.get('timestamp')
+
+                    snap_img_path = str(snap.get('image_path') or '').replace('\\', '/')
+                    is_native = bool(
+                        str(snap.get('event_id') or '') == event_id_str
+                        or (snap_img_path and event_id_str and event_id_str in snap_img_path)
+                    )
+
+                    # 1. Passage window check:
+                    # Allow normal passage and boom-barrier dwell times (up to configured same-container window)
+                    max_gap = max(float(getattr(self.settings, 'same_container_event_window_seconds', 1800.0) or 1800.0), 300.0)
+                    if event_ts and snap_ts and datetime_diff_seconds(event_ts, snap_ts) > max_gap:
+                        continue
+
+                    # 2. Strict container number isolation in image path / directory:
+                    # Extract any 11-char container code in the snapshot path; reject if distinct from this container
+                    path_containers = re.findall(r'[A-Z]{4}[0-9]{7}', snap_img_path)
+                    if path_containers and any(is_distinct_container(cntr1, pc) for pc in path_containers):
+                        log.warning('prosper_snapshot_skipped_foreign_container_folder', extra={
+                            'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1, 'found_container': path_containers
+                        })
+                        continue
+
+                    # 2b. Reject any snapshot associated with a distinct event or container
+                    snap_ev_id = str(snap.get('event_id') or '')
+                    if snap_ev_id and event_id_str and snap_ev_id != event_id_str:
+                        if self.repository:
+                            try:
+                                other_ev = self.repository.event(snap_ev_id)
+                                if other_ev and other_ev.get('container_number'):
+                                    if is_distinct_container(cntr1, other_ev.get('container_number')):
+                                        log.warning('prosper_snapshot_skipped_distinct_container_event', extra={
+                                            'camera_id': cam_id, 'snapshot_id': snap.get('id'),
+                                            'expected_container': cntr1, 'other_container': other_ev.get('container_number')
+                                        })
+                                        continue
+                            except Exception:
+                                pass
+
+                    # 3. Provenance metadata check
+                    prov = snap.get('provenance') or {}
+                    prov_cntr = prov.get('container_number')
+                    is_event_own_snap = (snap.get('id') == primary_snap_id or str(snap.get('event_id') or '') == event_id_str)
+                    if prov_cntr and is_distinct_container(cntr1, prov_cntr) and not is_event_own_snap:
+                        log.warning('prosper_snapshot_skipped_provenance_container_mismatch', extra={
+                            'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1, 'prov_container': prov_cntr
+                        })
+                        continue
+
+                    # 4. Detection & OCR conflict check
+                    is_mismatched = False
+                    for det in event_record.get('detections', []):
+                        if det.get('camera_id') == snap_cam:
+                            det_ts = det.get('timestamp')
+                            if det_ts and snap_ts and datetime_diff_seconds(det_ts, snap_ts) <= 10.0:
+                                for ocr in event_record.get('ocr_results', []):
+                                    if ocr.get('detection_id') == det.get('id'):
+                                        if ocr.get('valid_check_digit') and ocr.get('valid_format'):
+                                            ocr_text = ocr.get('normalized_text')
+                                            if ocr_text and is_distinct_container(cntr1, ocr_text):
+                                                is_mismatched = True
+                                                break
+                                if is_mismatched:
                                     break
-                        if not snap_p.is_file():
-                            continue
-                        data = snap_p.read_bytes()
-                        decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if decoded is None or decoded.size == 0:
-                            continue
-                        if decoded.shape[0] < 240 or decoded.shape[1] < 320:
-                            continue
-                        quality = self.snapshots.compute_quality(decoded)
-                        if not self._proof_is_usable(decoded, quality):
-                            continue
-                        score = quality
-                        from app.snapshots.snapshot_manager import SnapshotManager
-                        has_container = SnapshotManager._capture_has_visible_container(snap, event_record, decoded)
-                        if not has_container:
-                            continue
-                        score += 10000.0
-                        # Prefer snapshots that natively belong to this event ID
-                        if snap_img_path.startswith(event_id_str):
-                            score += 2000.0
-                        if primary_snap_id and snap.get('id') == primary_snap_id:
-                            score += 1000.0
-                        if score > best_score:
-                            best_score = score
-                            best_snap = snap
-                            best_data = data
-                    except Exception:
-                        pass
-                if best_snap and best_data:
-                    best_by_camera[cam_id] = (best_snap, best_data)
+                    if is_mismatched:
+                        log.warning('prosper_snapshot_skipped_conflicting_container', extra={
+                            'camera_id': cam_id, 'snapshot_id': snap.get('id'), 'expected_container': cntr1
+                        })
+                        continue
 
-            cam_roles = {}
-            if self.runtime and getattr(self.runtime, 'cameras', None):
-                for c in self.runtime.cameras:
+                    snap_img_str = str(snap.get('image_path') or '')
+                    if Path(snap_img_str).is_absolute() and Path(snap_img_str).is_file():
+                        snap_p = Path(snap_img_str)
+                    else:
+                        snap_p = self.snapshots.path(snap_img_str)
+                    if not snap_p.is_file():
+                        camera_id_str = str(snap.get('camera_id') or cam_id)
+                        snap_id_str = str(snap.get('id') or '')
+                        for ed in event_dirs:
+                            cands = [
+                                ed / f"{camera_id_str}_{snap_id_str}.jpg",
+                                ed / f"{camera_id_str}_{snap_id_str}_rear.jpg",
+                                ed / f"{camera_id_str}.jpg",
+                                ed / f"{camera_id_str}.png",
+                            ]
+                            cands += list(ed.glob(f"*{camera_id_str}*.jpg"))
+                            cands += list(ed.glob(f"*{camera_id_str}*.png"))
+                            cands += list(ed.glob(f"*companion_{camera_id_str}.png"))
+                            cands = [c for c in cands if c.is_file() and not c.name.endswith('.quality') and 'crop' not in c.name.lower() and 'rot180' not in c.name.lower()]
+                            if cands:
+                                snap_p = cands[0]
+                                break
+                    if not snap_p.is_file():
+                        continue
+                    data = snap_p.read_bytes()
+                    decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if decoded is None or decoded.size == 0:
+                        continue
+                    if decoded.shape[0] < 240 or decoded.shape[1] < 320:
+                        continue
+                    quality = self.snapshots.compute_quality(decoded)
+                    if not self._proof_is_usable(decoded, quality):
+                        continue
+                    score = quality
+                    from app.snapshots.snapshot_manager import SnapshotManager
+                    has_container = SnapshotManager._capture_has_visible_container(snap, event_record, decoded)
+                    if not has_container:
+                        continue
+                    score += 10000.0
+                    # Prefer snapshots that natively belong to this event ID
+                    if snap_img_path.startswith(event_id_str):
+                        score += 2000.0
+                    if primary_snap_id and snap.get('id') == primary_snap_id:
+                        score += 1000.0
+                    if score > best_score:
+                        best_score = score
+                        best_snap = snap
+                        best_data = data
+                except Exception:
+                    pass
+            if best_snap and best_data:
+                best_by_camera[cam_id] = (best_snap, best_data)
+
+        cam_roles = {}
+        if self.runtime and getattr(self.runtime, 'cameras', None):
+            for c in self.runtime.cameras:
+                cam_roles[c.id.lower()] = getattr(c, 'role', '')
+        elif self.repository and hasattr(self.repository, 'cameras'):
+            try:
+                for c in self.repository.cameras():
                     cam_roles[c.id.lower()] = getattr(c, 'role', '')
-            elif self.repository and hasattr(self.repository, 'cameras'):
-                try:
-                    for c in self.repository.cameras():
-                        cam_roles[c.id.lower()] = getattr(c, 'role', '')
-                except Exception:
-                    pass
-            if not cam_roles and self.settings and hasattr(self.settings, 'cameras'):
-                try:
-                    for c in self.settings.cameras():
-                        cam_roles[c.id.lower()] = getattr(c, 'role', '')
-                except Exception:
-                    pass
+            except Exception:
+                pass
+        if not cam_roles and self.settings and hasattr(self.settings, 'cameras'):
+            try:
+                for c in self.settings.cameras():
+                    cam_roles[c.id.lower()] = getattr(c, 'role', '')
+            except Exception:
+                pass
 
-            has_four_cams = any(c.lower().endswith(('-4', '-8')) or 'rear' in c.lower() for c in best_by_camera.keys())
+        has_four_cams = any(c.lower().endswith(('-4', '-8')) or 'rear' in c.lower() for c in best_by_camera.keys())
 
-            def _cam_image_type(c_id):
-                c = (c_id or '').lower()
-                role = (cam_roles.get(c) or '').upper()
-                if role in ('FRONT_TOP', 'FRONT'):
-                    return 'FRONT'
-                if role in ('LEFT', 'SIDE'):
-                    return 'LEFT'
-                if role in ('RIGHT',):
-                    return 'RIGHT'
-                if role in ('REAR', 'BACK'):
-                    return 'REAR'
-                if any(k in c for k in ('rear', 'back')) or c.endswith('-4') or c.endswith('-8'):
-                    return 'REAR'
-                if any(k in c for k in ('left', 'side')) or c.endswith('-2') or c.endswith('-6'):
-                    return 'LEFT'
-                if any(k in c for k in ('right',)) or c.endswith('-7'):
-                    return 'RIGHT'
-                if c.endswith('-3'):
-                    return 'RIGHT' if has_four_cams else 'REAR'
+        def _cam_image_type(c_id):
+            c = (c_id or '').lower()
+            role = (cam_roles.get(c) or '').upper()
+            if role in ('FRONT_TOP', 'FRONT'):
                 return 'FRONT'
+            if role in ('LEFT', 'SIDE'):
+                return 'LEFT'
+            if role in ('RIGHT',):
+                return 'RIGHT'
+            if role in ('REAR', 'BACK'):
+                return 'REAR'
+            if any(k in c for k in ('rear', 'back')) or c.endswith('-4') or c.endswith('-8'):
+                return 'REAR'
+            if any(k in c for k in ('left', 'side')) or c.endswith('-2') or c.endswith('-6'):
+                return 'LEFT'
+            if any(k in c for k in ('right',)) or c.endswith('-7'):
+                return 'RIGHT'
+            if c.endswith('-3'):
+                return 'RIGHT' if has_four_cams else 'REAR'
+            return 'FRONT'
 
-            def _cam_sort_key(c_id):
-                itype = _cam_image_type(c_id)
-                order = {'FRONT': 0, 'LEFT': 1, 'SIDE': 1, 'RIGHT': 2, 'REAR': 3}
-                return (order.get(itype, 4), c_id.lower())
+        def _cam_sort_key(c_id):
+            itype = _cam_image_type(c_id)
+            order = {'FRONT': 0, 'LEFT': 1, 'SIDE': 1, 'RIGHT': 2, 'REAR': 3}
+            return (order.get(itype, 4), c_id.lower())
 
-            for cam_id in sorted(best_by_camera.keys(), key=_cam_sort_key):
-                snap, data = best_by_camera[cam_id]
-                c1_images.append({
-                    'ImageType': _cam_image_type(cam_id),
-                    'CameraId': cam_id,
-                    'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
-                    'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
-                })
+        for cam_id in sorted(best_by_camera.keys(), key=_cam_sort_key):
+            snap, data = best_by_camera[cam_id]
+            c1_images.append({
+                'ImageType': _cam_image_type(cam_id),
+                'CameraId': cam_id,
+                'CapturedAt': _iso_utc(snap.get('timestamp') or (obs.detection.frame_timestamp if obs else None)),
+                'Image': f"data:image/jpeg;base64,{base64.b64encode(proof_jpeg(data, snap, event_record)).decode('utf-8')}"
+            })
 
         if not c1_images and allow_single_fallback:
             fallback_bytes = img if img is not None else (getattr(obs, 'image', None) if obs else None)
@@ -997,8 +1001,12 @@ class CloudOutboxDispatcher:
                 if self._stop.is_set():
                     break
                 event_id = ev['id']
-                if ev.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'BLOCKED', 'REJECTED', 'DUPLICATE'):
+                if ev.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'REJECTED', 'DUPLICATE'):
                     continue
+                if ev.get('cloud_delivery_state') == 'BLOCKED':
+                    # Allow self-healing retry if evidence proof images are now available
+                    if not self._evidence_ready(event_id, ev):
+                        continue
                 cntr = ev.get('container_number')
                 from app.ocr.validator import is_valid_iso_6346
                 import re
@@ -1057,7 +1065,8 @@ class CloudOutboxDispatcher:
                     if event_record.get('status') != 'CONFIRMED' or (
                         not item.get('force') and (
                             (eff_stage == 'POST' and event_record.get('cloud_synced') and event_record.get('cloud_delivery_state') == 'DELIVERED')
-                            or event_record.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'BLOCKED', 'REJECTED', 'DUPLICATE')
+                            or event_record.get('cloud_delivery_state') in ('CONFLICT', 'SERVER_ERROR', 'REJECTED', 'DUPLICATE')
+                            or (event_record.get('cloud_delivery_state') == 'BLOCKED' and not self._evidence_ready(event_id, event_record))
                         )
                     ):
                         self.queue.task_done()

@@ -155,13 +155,14 @@ class EventManager:
             selected = consensus_val or validation
         proof = proof_job or job
         slot_pos = getattr(job, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+        proof_cntr = selected.normalized_text if selected and getattr(selected, 'valid_check_digit', False) else (validation.normalized_text if validation and validation.valid_check_digit else '')
         obs = Observation(job.origin_key, job.gate_id, job.track_id, proof.detection, selected,
                           job.direction, proof.frame.image, job.started_at, confirmed,
                           all_detections=list(getattr(proof, 'all_detections', [])),
                           slot_position=slot_pos,
                           event_id=getattr(job, 'event_id', None),
                           is_twin=False, source_id=proof.frame.source_id, frame_sequence=proof.frame.sequence,
-                          proof_container_number=validation.normalized_text if validation and validation.valid_check_digit else '')
+                          proof_container_number=proof_cntr)
 
         target_event_id = ongoing_event_id or evidence.event_id or getattr(job, 'event_id', None)
         options = {'ongoing_event_id': target_event_id} if target_event_id else {}
