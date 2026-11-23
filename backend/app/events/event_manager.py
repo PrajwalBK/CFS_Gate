@@ -98,6 +98,8 @@ class EventManager:
             confirmed = True
         if not confirmed and len(evidence.reads) >= self.settings.ocr_max_attempts and (count >= 1 or (consensus_val and consensus_val.valid_check_digit)) and not tied:
             confirmed = True
+        if confirmed and best and job.origin_key.startswith('dwell:') and (best[:4] not in KNOWN_BIC_PREFIXES):
+            confirmed = False
         if not confirmed:
             # While attempts remain, do not prematurely publish an unconfirmed / NEEDS_REVIEW row.
             # Give the system time to read more frames of the passing container.

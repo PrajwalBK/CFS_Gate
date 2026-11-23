@@ -1227,24 +1227,7 @@ class GateRuntime:
                                 )
                             break
 
-            # Try feet candidates if check digit still invalid
-            if validation is None or not validation.valid_check_digit:
-                for d in feet_candidates:
-                    pad = 10
-                    y1 = max(0, int(d.bbox[1]) - pad)
-                    y2 = min(img_h, int(d.bbox[3]) + pad)
-                    x1 = max(0, int(d.bbox[0]) - pad)
-                    x2 = min(img_w, int(d.bbox[2]) + pad)
-                    sub_crop = job.frame.image[y1:y2, x1:x2]
-                    if sub_crop.size > 0:
-                        sub_r = self.ocr.read(sub_crop)
-                        t_val0 = time.perf_counter()
-                        sub_v = self.validator.validate(sub_r)
-                        t_iso_total += (time.perf_counter() - t_val0) * 1000.0
-                        if sub_v.valid_check_digit:
-                            read = sub_r
-                            validation = sub_v
-                            break
+            # (feet_candidates are strictly for ISO size codes, never container numbers)
 
         # 2. FALLBACK TO MAIN CONTAINER CROP
         if (validation is None or not validation.valid_check_digit) and crop is not None:
@@ -1370,7 +1353,7 @@ class GateRuntime:
                 target_session = self.passage_sessions.get_session_by_event_id(job.event_id)
             if not target_session and hasattr(self, 'passage_sessions'):
                 cand_sess = self.passage_sessions.get_active_session(job.gate_id, container_slot=slot_pos)
-                if cand_sess and abs((job.frame.timestamp - cand_sess.created_at).total_seconds()) <= 5.0:
+                if cand_sess and not cand_sess.finalized:
                     target_session = cand_sess
             active_session = target_session
 
@@ -1418,6 +1401,8 @@ class GateRuntime:
             self.passage_sessions.record_ocr_result(job.gate_id, validation,
                 container_slot=slot_pos, event_id=job.event_id, proof_job=job)
             if not ongoing and active_session:
+                if not active_session.event_id:
+                    active_session.event_id = str(uuid4())
                 ongoing = active_session.event_id
             if not ongoing:
                 with self._state_lock:

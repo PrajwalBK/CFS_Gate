@@ -378,32 +378,35 @@ class GateRepository:
                                         existing = c
                                         break
 
-                    # 3. Absorb any unconfirmed / in-flight draft event created on the lane during this passage
-                    # Unconfirmed drafts on the lane (NEEDS_REVIEW, cloud_synced=False) within delta belong to this transit
+                    # 3. Absorb any in-flight / draft / unverified dwell event created on the lane during this passage
                     if not existing and slot_pos == 'CONTAINER_1':
                         draft_cand = db_session.scalars(select(GateEvent).where(
                             GateEvent.gate_id == session.gate_id,
-                            GateEvent.status == 'NEEDS_REVIEW',
-                            GateEvent.cloud_synced == False,
+                            GateEvent.status != 'DUPLICATE',
                             GateEvent.timestamp >= session.created_at - delta,
                             GateEvent.timestamp <= session.created_at + delta,
                         ).order_by(GateEvent.timestamp.desc())).first()
                         if draft_cand:
                             d_num = draft_cand.container_number
-                            if not d_num or not container_num or not is_distinct_container(d_num, container_num):
-                                existing = draft_cand
+                            is_prior_finalized = bool(db_session.scalar(select(SystemLog.id).where(
+                                SystemLog.event_id == draft_cand.id,
+                                SystemLog.event_name == 'multi_camera_passage_finalized'
+                            )))
+                            if not is_prior_finalized:
+                                is_unverified_dwell = bool(d_num and d_num[:4] not in KNOWN_BIC_PREFIXES and is_confirmed)
+                                if not d_num or not container_num or not is_distinct_container(d_num, container_num) or is_unverified_dwell:
+                                    existing = draft_cand
 
                     # 4. If container_num is missing, never merge into a previously confirmed event of another container.
                     # An unconfirmed detection must remain independent to prevent polluting previous container's evidence.
 
                 target_event_id = existing.id if existing else session.event_id
 
-                # Only merge folders if both have verified container numbers that match
-                # NEVER merge if container numbers are distinct or if merging an unconfirmed draft into a confirmed container
+                # Merge folders when existing event is absorbed by this passage session
                 should_merge_folders = (
                     existing and existing.id != session.event_id and snapshots and hasattr(snapshots, 'evidence_manager')
-                    and existing.container_number and container_num
-                    and not is_distinct_container(existing.container_number, container_num)
+                    and container_num
+                    and (not existing.container_number or not is_distinct_container(existing.container_number, container_num) or (existing.container_number[:4] not in KNOWN_BIC_PREFIXES and container_num[:4] in KNOWN_BIC_PREFIXES))
                 )
                 if should_merge_folders:
                     snapshots.evidence_manager.merge_event_folders(session.event_id, target_event_id, container_number=container_num)
@@ -480,7 +483,12 @@ class GateRepository:
                             if best_c.size_type:
                                 existing.iso_code_1 = best_c.size_type
                     if container_num and is_valid_iso_6346(container_num) and (container_num[:4] in KNOWN_BIC_PREFIXES):
-                        if not existing.container_number or existing.status == 'NEEDS_REVIEW' or not is_distinct_container(existing.container_number, container_num):
+                        ex_num = existing.container_number or ''
+                        c_count = db_session.scalar(select(func.count(func.distinct(DetectionRecord.camera_id))).where(DetectionRecord.event_id == existing.id)) or 0
+                        if (not ex_num or existing.status == 'NEEDS_REVIEW' or
+                            not is_distinct_container(ex_num, container_num) or
+                            (ex_num and ex_num[:4] not in KNOWN_BIC_PREFIXES) or
+                            c_count <= 1):
                             existing.container_number = container_num
                             existing.status = 'CONFIRMED'
                     elif not existing.container_number and container_num:
@@ -1844,11 +1852,31 @@ class GateRepository:
                         continue
 
                     c1, c2 = ev1.container_number or '', ev2.container_number or ''
-                    if is_distinct_container(c1, c2):
+                    prov_match = False
+                    if gap <= 20.0 and c1 and c2:
+                        for check_ev, other_c in [(ev1, c2), (ev2, c1)]:
+                            for sn in session.scalars(select(Snapshot).where(Snapshot.event_id == check_ev.id)).all():
+                                if sn.image_path and other_c in sn.image_path:
+                                    prov_match = True
+                                    break
+                    unverified_conflict = bool(
+                        gap <= 20.0 and c1 and c2 and (
+                            (c1[:4] not in KNOWN_BIC_PREFIXES and c2[:4] in KNOWN_BIC_PREFIXES) or
+                            (c2[:4] not in KNOWN_BIC_PREFIXES and c1[:4] in KNOWN_BIC_PREFIXES)
+                        )
+                    )
+                    single_cam_conflict = False
+                    if gap <= 10.0 and c1 and c2 and is_distinct_container(c1, c2):
+                        c1_cams = session.scalar(select(func.count(func.distinct(DetectionRecord.camera_id))).where(DetectionRecord.event_id == ev1.id)) or 0
+                        c2_cams = session.scalar(select(func.count(func.distinct(DetectionRecord.camera_id))).where(DetectionRecord.event_id == ev2.id)) or 0
+                        if (c1_cams <= 1 and c2_cams >= 2) or (c2_cams <= 1 and c1_cams >= 2):
+                            single_cam_conflict = True
+
+                    if is_distinct_container(c1, c2) and not prov_match and not unverified_conflict and not single_cam_conflict:
                         continue
 
                     # Check image similarity
-                    is_match = False
+                    is_match = prov_match or unverified_conflict or single_cam_conflict
                     if snap_mgr and hasattr(snap_mgr, 'path'):
                         for cam_id in ['gate-in-1', 'gate-in-2', 'gate-in-3', 'gate-in-4', 'gate-out-1', 'gate-out-2', 'gate-out-3', 'gate-out-4']:
                             try:
@@ -1881,7 +1909,7 @@ class GateRepository:
                         for det in session.scalars(select(DetectionRecord).where(DetectionRecord.event_id == ev2.id)).all():
                             det.event_id = ev1.id
                         session.execute(update(SystemLog).where(SystemLog.event_id == ev2.id).values(event_id=ev1.id))
-                        if c2 and len(c2) == 11 and (not c1 or len(c1) != 11):
+                        if c2 and len(c2) == 11 and (not c1 or len(c1) != 11 or (c1[:4] not in KNOWN_BIC_PREFIXES and c2[:4] in KNOWN_BIC_PREFIXES)):
                             ev1.container_number = c2
                         if any(e.status == 'CONFIRMED' for e in [ev1, ev2]):
                             ev1.status = 'CONFIRMED'
