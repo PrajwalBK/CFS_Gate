@@ -945,7 +945,12 @@ class CloudOutboxDispatcher:
             })
 
         if not c1_images and allow_single_fallback:
-            fallback_bytes = img if img is not None else (getattr(obs, 'image', None) if obs else None)
+            from app.database.repositories.gate import is_distinct_container
+            obs_cntr = (obs.proof_container_number if obs else '') or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
+            if not (obs_cntr and is_distinct_container(cntr1, obs_cntr)):
+                fallback_bytes = img if img is not None else (getattr(obs, 'image', None) if obs else None)
+            else:
+                fallback_bytes = None
             if fallback_bytes is not None:
                 try:
                     if not isinstance(fallback_bytes, bytes):
@@ -1495,7 +1500,7 @@ class CloudOutboxDispatcher:
                     if not valid_images:
                         log.warning('prosper_put_skipped_no_valid_images', extra={'event_id': event_id, 'cloud_event_id': cloud_ev_id})
                         if self.repository:
-                            self.repository.mark_cloud_synced(event_id, cloud_event_id=cloud_ev_id, cloud_visit_id=str(cloud_visit_id))
+                            self.repository.mark_cloud_delivery(event_id, 'BLOCKED', 'Missing evidence proof images for cloud PUT')
                         self.queue.task_done()
                         continue
 
