@@ -501,7 +501,7 @@ class GateRepository:
                 for cam_id, frame_cand in best_frames.items():
                     # Strictly require container detection on this camera: skip building/people/empty frames
                     has_cntr = any(
-                        getattr(d, 'class_name', '').lower() in ('container', 'cointainer', 'container_object')
+                        getattr(d, 'class_name', '').lower() in ('container', 'cointainer', 'container_object', 'container_number', 'iso_code')
                         for d in (getattr(frame_cand, 'detections', []) or [])
                     )
                     if not has_cntr:
@@ -588,6 +588,72 @@ class GateRepository:
                             bbox=[0.0, 0.0, 1.0, 1.0],
                             timestamp=frame_cand.timestamp
                         ))
+
+                # Multi-camera completeness check: Ensure EVERY camera configured on this gate is represented
+                configured_gate_cams = list(session.cameras) if getattr(session, 'cameras', None) else []
+                saved_cams = {s.camera_id for s in db_session.scalars(select(Snapshot).where(Snapshot.event_id == target_event_id)).all()}
+                for missing_cam in configured_gate_cams:
+                    if missing_cam not in saved_cams:
+                        recov_frame = None
+                        c_frames = getattr(session, 'captured_frames', {}).get(missing_cam, [])
+                        if c_frames:
+                            def _recov_sort(cf):
+                                c_a = 0.0
+                                for cd in (cf.detections or []):
+                                    if getattr(cd, 'class_name', '').lower() in ('container', 'cointainer', 'container_object', 'container_number', 'iso_code'):
+                                        b = getattr(cd, 'bbox', None)
+                                        if b and len(b) == 4:
+                                            c_a = max(c_a, max(0.0, float(b[2] - b[0])) * max(0.0, float(b[3] - b[1])))
+                                return (1 if c_a >= 30000.0 else 0, c_a, cf.quality_score)
+                            recov_candidates = [cf for cf in c_frames if getattr(cf, 'image', None) is not None]
+                            if recov_candidates:
+                                recov_frame = max(recov_candidates, key=_recov_sort)
+
+                        if not recov_frame and hasattr(snapshots, 'evidence_manager'):
+                            try:
+                                folder = snapshots.evidence_manager.get_existing_folder(target_event_id)
+                                if folder and folder.is_dir():
+                                    disk_matches = list(folder.glob(f"*{missing_cam}*frame.png")) + list(folder.glob(f"*{missing_cam}*.jpg"))
+                                    disk_matches = [p for p in disk_matches if p.is_file() and 'crop' not in p.name.lower()]
+                                    if disk_matches:
+                                        rel_path = str(disk_matches[0]).replace('\\', '/')
+                                        if 'snapshots/' in rel_path:
+                                            rel_path = rel_path.split('snapshots/', 1)[1]
+                                        db_session.add(Snapshot(
+                                            id=str(uuid4()),
+                                            event_id=target_event_id,
+                                            camera_id=missing_cam,
+                                            image_path=rel_path,
+                                            timestamp=session.created_at
+                                        ))
+                                        saved_cams.add(missing_cam)
+                            except Exception:
+                                pass
+
+                        if recov_frame:
+                            if hasattr(snapshots, 'evidence_manager'):
+                                rel_b, rel_l = snapshots.evidence_manager.save_best_frame(
+                                    target_event_id, missing_cam, recov_frame.image,
+                                    direction=session.direction,
+                                    container_number=container_num or '',
+                                    quality_score=snapshots.compute_quality(recov_frame.image)
+                                )
+                                r_path = rel_l
+                            else:
+                                r_path = snapshots.save_side_snapshot(
+                                    target_event_id, missing_cam, recov_frame.image,
+                                    direction=session.direction,
+                                    text=container_num or '',
+                                    force=True
+                                )
+                            db_session.add(Snapshot(
+                                id=str(uuid4()),
+                                event_id=target_event_id,
+                                camera_id=missing_cam,
+                                image_path=r_path,
+                                timestamp=recov_frame.timestamp
+                            ))
+                            saved_cams.add(missing_cam)
 
                 # Ensure at least one detection record exists for the primary camera
                 if not primary_det_id:

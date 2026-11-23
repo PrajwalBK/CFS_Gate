@@ -1345,8 +1345,9 @@ class GateRuntime:
             return
 
         self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
+        result = None
         try:
-            expected = validation.normalized_text if validation and validation.valid_check_digit else None
+            expected = getattr(validation, 'normalized_text', None) if (validation and getattr(validation, 'valid_check_digit', False)) else None
             additional = {}
             slot_pos = job.slot_position or 'CONTAINER_1'
             target_session = None
@@ -1363,22 +1364,45 @@ class GateRuntime:
                     if c.gate_id == job.gate_id and c.id != job.frame.camera_id and getattr(c, 'enabled', True):
                         # 1. Strictly prefer best frame captured DURING this specific container's passage session
                         if target_session and target_session.captured_frames.get(c.id):
-                            # Strict container isolation: if target session is for a distinct container, skip!
                             from app.database.repositories.gate import is_distinct_container
-                            if expected and getattr(target_session, 'confirmed_container_number', None):
-                                if is_distinct_container(expected, target_session.confirmed_container_number):
+                            exp_num = expected or getattr(target_session, 'confirmed_container_number', None)
+                            if exp_num and getattr(target_session, 'confirmed_container_number', None):
+                                if is_distinct_container(exp_num, target_session.confirmed_container_number):
                                     continue
-                            best_c = max(target_session.captured_frames[c.id], key=lambda f: f.quality_score, default=None)
-                            if best_c and getattr(best_c, 'image', None) is not None:
-                                if expected and getattr(best_c, 'ocr_read', None):
-                                    c_read = getattr(best_c.ocr_read, 'normalized_text', '') or ''
-                                    if c_read and is_distinct_container(expected, c_read):
+
+                            c_candidates = []
+                            for f in target_session.captured_frames[c.id]:
+                                if getattr(f, 'image', None) is None:
+                                    continue
+                                if exp_num and getattr(f, 'ocr_read', None):
+                                    c_val = f.ocr_read if hasattr(f.ocr_read, 'normalized_text') else getattr(f.ocr_read, 'normalized_text', '')
+                                    c_read = getattr(c_val, 'normalized_text', '') or str(c_val)
+                                    if c_read and len(c_read) == 11 and is_distinct_container(exp_num, c_read):
                                         continue
-                                has_cntr = any(
-                                    getattr(d, 'class_name', '') in ('container', 'container_object')
-                                    for d in (best_c.detections or [])
-                                )
-                                if has_cntr:
+                                c_candidates.append(f)
+
+                            if c_candidates:
+                                def _c_sort_key(cand_f):
+                                    m_id = 0
+                                    if exp_num and getattr(cand_f, 'ocr_read', None):
+                                        r_val = getattr(cand_f.ocr_read, 'normalized_text', '')
+                                        if r_val == exp_num:
+                                            m_id = 1
+                                    c_area = 0.0
+                                    has_c = 0
+                                    for d in (cand_f.detections or []):
+                                        c_name = getattr(d, 'class_name', '').lower()
+                                        if c_name in ('container', 'cointainer', 'container_object', 'container_number', 'iso_code'):
+                                            has_c = 1
+                                            bbox = getattr(d, 'bbox', None)
+                                            if bbox and len(bbox) == 4:
+                                                area = max(0.0, float(bbox[2] - bbox[0])) * max(0.0, float(bbox[3] - bbox[1]))
+                                                c_area = max(c_area, area)
+                                    prominent = 1 if c_area >= 30000.0 else 0
+                                    return (m_id, prominent, has_c, c_area, cand_f.quality_score)
+
+                                best_c = max(c_candidates, key=_c_sort_key)
+                                if any(getattr(d, 'class_name', '').lower() in ('container', 'cointainer', 'container_object', 'container_number', 'iso_code') for d in (best_c.detections or [])):
                                     additional[c.id] = best_c.image
                                     continue
 

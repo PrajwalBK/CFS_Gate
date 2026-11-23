@@ -474,15 +474,18 @@ class ContainerPassageSession:
                         def _frame_sort_key(f):
                             matches_id = 1 if self._identity_read_matches(f) else 0
                             cntr_area = 0.0
+                            has_cntr = 0
                             for d in (f.detections or []):
-                                if getattr(d, 'class_name', '').lower() in ('container', 'cointainer', 'container_object'):
+                                c_name = getattr(d, 'class_name', '').lower()
+                                if c_name in ('container', 'cointainer', 'container_object', 'container_number', 'iso_code'):
+                                    has_cntr = 1
                                     bbox = getattr(d, 'bbox', None)
                                     if bbox and len(bbox) == 4:
                                         area = max(0.0, float(bbox[2] - bbox[0])) * max(0.0, float(bbox[3] - bbox[1]))
                                         cntr_area = max(cntr_area, area)
                             # Significant container presence in frame (area >= 30,000 px)
                             has_prominent_body = 1 if cntr_area >= 30000.0 else 0
-                            return (matches_id, has_prominent_body, cntr_area, f.quality_score)
+                            return (matches_id, has_prominent_body, has_cntr, cntr_area, f.quality_score)
 
                         best = max(valid_frames, key=_frame_sort_key)
                         if best.quality_score > 0.0:
