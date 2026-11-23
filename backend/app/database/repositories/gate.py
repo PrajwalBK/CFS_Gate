@@ -300,7 +300,7 @@ class GateRepository:
                     import re
                     val_check = ContainerValidator().validate(OCRRead(raw_text=container_num, confidence=conf))
                 is_valid_format = bool(container_num and len(container_num) == 11 and re.match(r'^[A-Z]{4}[0-9]{7}$', container_num))
-                is_confirmed = is_valid_format and is_valid_iso_6346(container_num) and (container_num[:4] in KNOWN_BIC_PREFIXES)
+                is_confirmed = is_valid_format and is_valid_iso_6346(container_num)
                 status = 'CONFIRMED' if is_confirmed else 'NEEDS_REVIEW'
 
                 slot_pos = getattr(session, 'container_slot', 'CONTAINER_1') or 'CONTAINER_1'
@@ -482,12 +482,12 @@ class GateRepository:
                             existing.status = 'CONFIRMED'
                             if best_c.size_type:
                                 existing.iso_code_1 = best_c.size_type
-                    if container_num and is_valid_iso_6346(container_num) and (container_num[:4] in KNOWN_BIC_PREFIXES):
+                    if container_num and is_valid_iso_6346(container_num):
                         ex_num = existing.container_number or ''
                         c_count = db_session.scalar(select(func.count(func.distinct(DetectionRecord.camera_id))).where(DetectionRecord.event_id == existing.id)) or 0
                         if (not ex_num or existing.status == 'NEEDS_REVIEW' or
                             not is_distinct_container(ex_num, container_num) or
-                            (ex_num and ex_num[:4] not in KNOWN_BIC_PREFIXES) or
+                            (ex_num and ex_num[:4] not in KNOWN_BIC_PREFIXES and container_num[:4] in KNOWN_BIC_PREFIXES) or
                             c_count <= 1):
                             existing.container_number = container_num
                             existing.status = 'CONFIRMED'

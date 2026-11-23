@@ -1011,7 +1011,8 @@ class CloudOutboxDispatcher:
                 from app.ocr.validator import is_valid_iso_6346
                 import re
                 if not cntr or len(cntr) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr) or not is_valid_iso_6346(cntr):
-                    self.repository.mark_cloud_synced(event_id)
+                    if self.repository:
+                        self.repository.mark_cloud_delivery(event_id, 'REJECTED', 'Invalid container checksum or format')
                     continue
                 cloud_ev_id = ev.get('cloud_event_id')
                 # If cloud_event_id already exists, POST was completed; we only need to PUT the final images!
@@ -1102,10 +1103,10 @@ class CloudOutboxDispatcher:
                             except Exception:
                                 pass
                 import re
-                if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1) or not is_valid_iso_6346(cntr1) or cntr1[:4] not in KNOWN_BIC_PREFIXES:
+                if not cntr1 or len(cntr1) != 11 or not re.match(r'^[A-Z]{4}[0-9]{7}$', cntr1) or not is_valid_iso_6346(cntr1):
                     log.warning('prosper_dispatch_skipped_invalid_ocr', extra={'event_id': event_id, 'container_number': cntr1})
                     if self.repository:
-                        self.repository.mark_cloud_synced(event_id)
+                        self.repository.mark_cloud_delivery(event_id, 'REJECTED', 'Invalid container checksum or format')
                     self.queue.task_done()
                     continue
 
