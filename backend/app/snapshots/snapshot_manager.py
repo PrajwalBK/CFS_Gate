@@ -103,11 +103,11 @@ class SnapshotManager:
                 bw, bh = max(0.0, x2 - x1), max(0.0, y2 - y1)
                 area_ratio = (bw * bh) / float(w * h)
 
-                if cname == 'container_number' and (bw < 30.0 or bh < 10.0 or area_ratio < 0.0003):
+                if cname == 'container_number' and (max(bw, bh) < 30.0 or min(bw, bh) < 8.0 or area_ratio < 0.0003):
                     continue
-                if cname == 'iso_code' and (bw < 15.0 or bh < 8.0 or area_ratio < 0.0001):
+                if cname == 'iso_code' and (max(bw, bh) < 15.0 or min(bw, bh) < 6.0 or area_ratio < 0.0001):
                     continue
-                if cname in ('container', 'cointainer', 'container_object') and (bw < 40.0 or bh < 20.0 or area_ratio < 0.003):
+                if cname in ('container', 'cointainer', 'container_object') and (max(bw, bh) < 40.0 or min(bw, bh) < 20.0 or area_ratio < 0.003):
                     continue
                 candidates.append((area_ratio, bw, bh))
             return bool(candidates) if detections else True

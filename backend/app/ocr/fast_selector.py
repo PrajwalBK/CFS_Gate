@@ -60,12 +60,12 @@ class FastFrameSelector:
                 continue
             bw = max(1.0, float(d.bbox[2] - d.bbox[0]))
             bh = max(1.0, float(d.bbox[3] - d.bbox[1]))
-            # Enforce physical minimum dimensions:
-            # 11-digit container number must be >= 60px wide and >= 18px high
-            if d.class_name == 'container_number' and (bw < 60.0 or bh < 18.0):
+            # Enforce physical minimum dimensions (supporting both horizontal and vertical container markings):
+            # 11-digit container number must be >= 60px on longest dimension and >= 14px on shortest
+            if d.class_name == 'container_number' and (max(bw, bh) < 60.0 or min(bw, bh) < 14.0):
                 continue
-            # 4-digit ISO size code must be >= 24px wide and >= 14px high
-            if d.class_name == 'iso_code' and (bw < 24.0 or bh < 14.0):
+            # 4-digit ISO size code must be >= 24px on longest dimension and >= 12px on shortest
+            if d.class_name == 'iso_code' and (max(bw, bh) < 24.0 or min(bw, bh) < 12.0):
                 continue
             valid_text_boxes.append((d, bw, bh))
 

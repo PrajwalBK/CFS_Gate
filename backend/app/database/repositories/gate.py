@@ -1074,10 +1074,7 @@ class GateRepository:
                         if not is_second_slot and (is_distinct_container(active.container_number, number) or pref_conflict):
                             pass  # Distinct containers! Never merge!
                         else:
-                            time_diff = datetime_diff_seconds(active.timestamp, obs.detection.frame_timestamp)
-                            dwell_win = float(same_container_window_seconds or 2700.0)
-                            if obs.origin_key.startswith('dwell:') or time_diff <= max(dwell_win, 60.0):
-                                existing = active
+                            existing = active
 
                 if ongoing_event_id and not existing:
                     active = session.get(GateEvent, ongoing_event_id)
@@ -1091,10 +1088,7 @@ class GateRepository:
                         if not is_second_slot and (is_distinct_container(active.container_number, number) or pref_conflict):
                             pass  # Distinct containers! Never merge!
                         else:
-                            time_diff = datetime_diff_seconds(active.timestamp, obs.detection.frame_timestamp)
-                            dwell_win = float(same_container_window_seconds or 2700.0)
-                            if obs.origin_key.startswith('dwell:') or time_diff <= max(dwell_win, 60.0):
-                                existing = active
+                            existing = active
 
                 if obs.origin_key.startswith('dwell:') and existing:
                     time_diff = datetime_diff_seconds(existing.timestamp, obs.detection.frame_timestamp)
@@ -1128,7 +1122,10 @@ class GateRepository:
                             not is_distinct_container(existing.container_number, number)
                         )
                         split_threshold = max(float(same_container_window_seconds or 0), dedup_seconds, 600.0) if is_confused_same_container else max(dedup_seconds, 35.0)
-                        if is_distinct_read or time_diff > split_threshold:
+                        if is_distinct_read:
+                            existing = None
+                            was_cleared_passage = True
+                        elif time_diff > split_threshold:
                             is_same_stationary_scene = False
                             if not number and not existing.container_number and snapshots and getattr(obs, 'image', None) is not None:
                                 try:
