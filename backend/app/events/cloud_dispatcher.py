@@ -641,9 +641,10 @@ class CloudOutboxDispatcher:
         Build isolated, validated multi-camera evidence images for this container event.
         Guarantees strict container-to-image association, gate isolation, and camera angle preservation.
         """
-        cntr1 = (event_record.get('container_number') if event_record else None) or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
+        event_record = event_record or {}
+        cntr1 = event_record.get('container_number') or (obs.ocr.normalized_text if (obs and obs.ocr) else '')
         c1_images = []
-        gate_id_for_event = (event_record.get('gate_id') if event_record else None) or (obs.gate_id if obs else None)
+        gate_id_for_event = event_record.get('gate_id') or (obs.gate_id if obs else None)
         expected_gate_cams = set()
         if self.runtime and getattr(self.runtime, 'cameras', None):
             expected_gate_cams = {

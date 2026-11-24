@@ -50,17 +50,12 @@ class SnapshotManager:
         return math.log1p(variance) * exposure
 
     @staticmethod
-    def _capture_has_visible_container(snapshot: dict, event_record: dict, image) -> bool:
-        """Require a meaningful YOLO container-number box for proof images.
-
-        Whole-frame sharpness is not sufficient proof quality: a sharp frame can
-        contain only a tiny sliver of the truck/container.  Match detections by
-        camera and capture time and reject boxes that are too small or clipped.
-        """
+    def _evaluate_container_visibility(snapshot: dict, event_record: dict, image) -> tuple[bool, float]:
+        """Check if frame contains a physical container or number bbox and return (is_visible, max_area_ratio)."""
         try:
             h, w = image.shape[:2]
             if h <= 0 or w <= 0:
-                return False
+                return False, 0.0
             snap_ts = snapshot.get('timestamp')
             def parse(value):
                 if not value:
@@ -74,9 +69,9 @@ class SnapshotManager:
             camera = snapshot.get('camera_id')
             all_dets = event_record.get('detections')
             if all_dets is None:
-                return True
+                return True, 0.5
             if isinstance(all_dets, (list, tuple)) and len(all_dets) == 0:
-                return False
+                return False, 0.0
             prov = snapshot.get('provenance') or {}
             prov_dets = prov.get('container_detections') or []
             detections = [d for d in all_dets if d.get('camera_id') == camera] or prov_dets
@@ -84,8 +79,8 @@ class SnapshotManager:
                 # If this frame was saved in the event evidence/snapshot folder during container transit,
                 # accept it for multi-camera proof if whole-frame image dimensions and quality are valid.
                 if snapshot.get('id', '').startswith('disk_') or 'frame' in str(snapshot.get('image_path', '')) or (w >= 320 and h >= 240):
-                    return True
-                return False
+                    return True, 0.1
+                return False, 0.0
 
             candidates = []
             for detection in detections:
@@ -94,7 +89,7 @@ class SnapshotManager:
                     continue
                 det_dt = parse(detection.get('timestamp') if isinstance(detection, dict) else getattr(detection, 'frame_timestamp', None))
                 if snap_dt and det_dt:
-                    if abs((snap_dt - det_dt).total_seconds()) > 35.0:
+                    if abs((snap_dt - det_dt).total_seconds()) > 3.0:
                         continue
                 bbox = detection.get('bbox') if isinstance(detection, dict) else getattr(detection, 'bbox', [])
                 if len(bbox) != 4:
@@ -112,9 +107,20 @@ class SnapshotManager:
                 if cname in ('container', 'cointainer', 'container_object') and (max(bw, bh) < 40.0 or min(bw, bh) < 20.0 or area_ratio < 0.003):
                     continue
                 candidates.append((area_ratio, bw, bh))
-            return bool(candidates) if detections else True
+            if not detections:
+                return True, 0.1
+            if not candidates:
+                return False, 0.0
+            max_area = max(c[0] for c in candidates)
+            return True, max_area
         except Exception:
-            return False
+            return False, 0.0
+
+    @staticmethod
+    def _capture_has_visible_container(snapshot: dict, event_record: dict, image) -> bool:
+        """Heuristic check: does the frame contain a physical container or container number bbox?"""
+        visible, _ = SnapshotManager._evaluate_container_visibility(snapshot, event_record, image)
+        return visible
 
     def build_evidence_manifest(self, event_record: dict, min_quality: float = 2.5) -> dict:
         """Select one usable camera capture per event/camera for UI and cloud."""
@@ -168,9 +174,14 @@ class SnapshotManager:
                 quality = self.compute_quality(decoded)
                 if float(gray.std()) < 8.0 or quality < min_quality:
                     continue
-                if not self._capture_has_visible_container(snap, event_record, decoded):
+                is_vis, max_area = self._evaluate_container_visibility(snap, event_record, decoded)
+                if not is_vis:
                     continue
-                by_camera.setdefault(camera_id, []).append({**snap, 'quality_score': round(float(quality), 3)})
+                by_camera.setdefault(camera_id, []).append({
+                    **snap,
+                    'quality_score': round(float(quality), 3),
+                    'container_area_ratio': max_area
+                })
             except Exception:
                 continue
         # The event writer may have already selected a frame because it produced
@@ -188,7 +199,12 @@ class SnapshotManager:
         for items in by_camera.values():
             preferred = [item for item in items if item.get('id') in preferred_ids]
             captures.append(preferred[0] if preferred else max(
-                items, key=lambda item: (item['quality_score'], item.get('timestamp') or '')
+                items, key=lambda item: (
+                    1 if item.get('container_area_ratio', 0.0) >= 0.05 else 0,
+                    min(item.get('container_area_ratio', 0.0), 0.60),
+                    item['quality_score'],
+                    item.get('timestamp') or ''
+                )
             ))
         captures.sort(key=lambda item: (item.get('camera_id') or '', item.get('timestamp') or ''))
         ids = {item['id'] for item in captures}

@@ -1122,7 +1122,7 @@ class GateRepository:
                             not is_distinct_container(existing.container_number, number)
                         )
                         split_threshold = max(float(same_container_window_seconds or 0), dedup_seconds, 600.0) if is_confused_same_container else max(dedup_seconds, 35.0)
-                        if is_distinct_read:
+                        if is_distinct_read and not is_second_slot:
                             existing = None
                             was_cleared_passage = True
                         elif time_diff > split_threshold:

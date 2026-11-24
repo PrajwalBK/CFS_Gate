@@ -94,8 +94,12 @@ class YoloDetector:
                 elif name == 'container_number':
                     if w < 20.0 or h < 8.0 or (w * h) < 180.0:
                         continue
+                    if is_boundary_clipped and (w < 35.0 or confidence < 0.35):
+                        continue
                 elif name == 'iso_code':
                     if w < 12.0 or h < 6.0 or (w * h) < 100.0:
+                        continue
+                    if is_boundary_clipped and (w < 25.0 or confidence < 0.35):
                         continue
 
                 bbox = (max(0., x1), max(0., y1), min(float(width), x2), min(float(height), y2))
