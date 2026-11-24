@@ -504,15 +504,23 @@ class CloudOutboxDispatcher:
 
     def status(self) -> dict:
         pending_count = 0
-        if self.repository and hasattr(self.repository, 'count_unsynced_confirmed_events'):
-            try:
-                pending_count = self.repository.count_unsynced_confirmed_events()
-            except Exception:
-                pass
+        delivery_counts = {}
+        if self.repository:
+            if hasattr(self.repository, 'count_unsynced_confirmed_events'):
+                try:
+                    pending_count = self.repository.count_unsynced_confirmed_events()
+                except Exception:
+                    pass
+            if hasattr(self.repository, 'cloud_delivery_counts'):
+                try:
+                    delivery_counts = self.repository.cloud_delivery_counts()
+                except Exception:
+                    pass
         return {
             'enabled': self.enabled,
             'is_online': self._is_online if self.enabled else False,
             'pending_count': pending_count,
+            'delivery_counts': delivery_counts,
             'queue_depth': self.queue.qsize(),
             'last_sync_time': self._last_sync_time,
             'last_error': self._last_error,

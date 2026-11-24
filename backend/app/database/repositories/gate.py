@@ -120,6 +120,14 @@ def is_distinct_container(num1: str | None, num2: str | None) -> bool:
         if matching_prefix_letters >= 2 and all_body_confused:
             return False
 
+        # 6. Unverified BIC prefix versus registered BIC prefix (e.g. IHUU3290561 vs WHSU6532590):
+        # When one candidate has a verified registered shipping line prefix (e.g. WHSU - Wan Hai)
+        # and the other has an unverified prefix (e.g. IHUU), and they share letters or high digit similarity,
+        # the unverified read is an OCR artifact/distortion of the same container, not a distinct container.
+        digit_ratio = difflib.SequenceMatcher(None, d1, d2).ratio() if d1 and d2 else 0.0
+        if (p1_known != p2_known) and (matching_prefix_letters >= 2 or sim >= 0.45 or digit_ratio >= 0.45):
+            return False
+
         return True
     return False
 
@@ -701,23 +709,24 @@ class GateRepository:
                     recent_lane_duplicates = db_session.scalars(select(GateEvent).where(
                         GateEvent.gate_id == session.gate_id,
                         GateEvent.id != target_event_id,
-                        GateEvent.status == 'NEEDS_REVIEW',
+                        GateEvent.status != 'DUPLICATE',
                         GateEvent.cloud_synced == False,
                         GateEvent.timestamp >= session.created_at - delta,
                         GateEvent.timestamp <= session.created_at + delta,
                     )).all()
                     for o_draft in recent_lane_duplicates:
+                        # Never absorb distinct physical containers or front/rear slots of a twin container passage
+                        if session.container_slot in ('CONTAINER_2', 'CONTAINER_3') or getattr(o_draft, 'is_twin', False):
+                            continue
                         d_cntr = o_draft.container_number or ''
+                        if not d_cntr or is_distinct_container(container_num, d_cntr):
+                            continue
                         time_gap = abs(datetime_diff_seconds(o_draft.timestamp, session.created_at))
                         d_digits = ''.join(c for c in d_cntr if c.isdigit())
                         c_digits = ''.join(c for c in container_num if c.isdigit())
                         same_serial = bool(len(d_digits) >= 6 and len(c_digits) >= 6 and d_digits[:6] == c_digits[:6])
-                        # Strictly require: draft must have matching container number or matching serial digits.
-                        # NEVER absorb snapshots of an unconfirmed/empty draft or distinct container!
-                        is_match = False
-                        if d_cntr and container_num:
-                            if not is_distinct_container(container_num, d_cntr) or same_serial:
-                                is_match = True
+                        # Strictly require: draft must not be a distinct container
+                        is_match = not is_distinct_container(container_num, d_cntr) or same_serial
                         if is_match:
                             o_draft.status = 'DUPLICATE'
                             o_draft.cloud_delivery_state = 'DUPLICATE'
@@ -887,7 +896,11 @@ class GateRepository:
 
                             # Distinct verified container numbers must NEVER be merged as duplicates by static camera background similarity.
                             if number and c_num and number != c_num:
-                                if is_distinct_container(number, c_num):
+                                is_cand_bic = bool(c_num and c_num[:4] in KNOWN_BIC_PREFIXES)
+                                is_num_bic = bool(number and number[:4] in KNOWN_BIC_PREFIXES)
+                                if is_cand_bic != is_num_bic and time_diff <= 35.0:
+                                    match_found = True
+                                elif is_distinct_container(number, c_num):
                                     continue  # Distinct physical containers! NEVER merge!
 
                             # 1. Matching serial digits (e.g. AXU1960888 vs AXIU1960888: both have 1960888)
@@ -1721,7 +1734,7 @@ class GateRepository:
         with self.db.sessions.begin() as session:
             session.execute(update(GateEvent).where(
                 GateEvent.status == 'CONFIRMED', GateEvent.cloud_synced == False,
-                GateEvent.cloud_delivery_state.in_(['REJECTED', 'BLOCKED'])
+                GateEvent.cloud_delivery_state.in_(['REJECTED', 'BLOCKED', 'CONFLICT'])
             ).values(cloud_delivery_state='PENDING', cloud_delivery_error=None))
 
     def cloud_delivery_counts(self):

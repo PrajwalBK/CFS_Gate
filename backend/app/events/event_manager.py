@@ -154,17 +154,32 @@ class EventManager:
         else:
             selected = consensus_val or validation
         proof = proof_job or job
-        slot_pos = getattr(job, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+        slot_pos_raw = getattr(job, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+        if str(slot_pos_raw).upper() in ('FRONT', 'SINGLE', 'CONTAINER_1', '1', 'NONE', ''):
+            slot_name = 'CONTAINER_1'
+        elif str(slot_pos_raw).upper() in ('REAR', 'CONTAINER_2', '2'):
+            slot_name = 'CONTAINER_2'
+        elif str(slot_pos_raw).upper() in ('CONTAINER_3', '3'):
+            slot_name = 'CONTAINER_3'
+        else:
+            slot_name = str(slot_pos_raw)
         proof_cntr = selected.normalized_text if selected and getattr(selected, 'valid_check_digit', False) else (validation.normalized_text if validation and validation.valid_check_digit else '')
         obs = Observation(job.origin_key, job.gate_id, job.track_id, proof.detection, selected,
                           job.direction, proof.frame.image, job.started_at, confirmed,
                           all_detections=list(getattr(proof, 'all_detections', [])),
-                          slot_position=slot_pos,
+                          slot_position=slot_name,
                           event_id=getattr(job, 'event_id', None),
                           is_twin=False, source_id=proof.frame.source_id, frame_sequence=proof.frame.sequence,
                           proof_container_number=proof_cntr)
 
         target_event_id = ongoing_event_id or evidence.event_id or getattr(job, 'event_id', None)
+        if not target_event_id and self.runtime and getattr(self.runtime, 'passage_sessions', None):
+            act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id, container_slot=slot_name)
+            if not act_sess and slot_name == 'CONTAINER_1':
+                act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id)
+            if act_sess and act_sess.event_id and not getattr(act_sess, 'finalized', False):
+                target_event_id = act_sess.event_id
+
         options = {'ongoing_event_id': target_event_id} if target_event_id else {}
         t_save0 = time.perf_counter()
         try:
@@ -191,9 +206,10 @@ class EventManager:
         # the single 100% consensus container event with clean multi-camera proof.
         has_active_passage_session = False
         recent_lane_finalized = False
-        slot_name = getattr(obs, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
         if self.runtime and getattr(self.runtime, 'passage_sessions', None):
             act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id, container_slot=slot_name)
+            if not act_sess and slot_name == 'CONTAINER_1':
+                act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id)
             if act_sess and not getattr(act_sess, 'finalized', False):
                 has_active_passage_session = True
 
@@ -266,8 +282,18 @@ class EventManager:
             )
         has_active_passage_session = False
         if self.runtime and getattr(self.runtime, 'passage_sessions', None):
-            slot_name = getattr(obs, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+            slot_pos_raw = getattr(obs, 'slot_position', 'CONTAINER_1') or 'CONTAINER_1'
+            if str(slot_pos_raw).upper() in ('FRONT', 'SINGLE', 'CONTAINER_1', '1', 'NONE', ''):
+                slot_name = 'CONTAINER_1'
+            elif str(slot_pos_raw).upper() in ('REAR', 'CONTAINER_2', '2'):
+                slot_name = 'CONTAINER_2'
+            elif str(slot_pos_raw).upper() in ('CONTAINER_3', '3'):
+                slot_name = 'CONTAINER_3'
+            else:
+                slot_name = str(slot_pos_raw)
             act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id, container_slot=slot_name)
+            if not act_sess and slot_name == 'CONTAINER_1':
+                act_sess = self.runtime.passage_sessions.get_active_session(obs.gate_id)
             if act_sess and not getattr(act_sess, 'finalized', False):
                 has_active_passage_session = True
 
