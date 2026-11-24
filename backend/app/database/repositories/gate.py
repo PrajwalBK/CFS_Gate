@@ -835,8 +835,8 @@ class GateRepository:
                                     break
                     # Same container window recovery:
                     # If the same validated container is seen on the same lane in the same direction
-                    # within same_container_window_seconds (default 45 mins), bind to the existing event instead of creating a second visit!
-                    dwell_window = float(same_container_window_seconds or 2700.0)
+                    # within same_container_window_seconds, bind to the existing event instead of creating a second visit!
+                    dwell_window = float(same_container_window_seconds or 0.0)
                     if not existing and is_valid_iso_6346(number) and dwell_window > dedup_seconds:
                         long_delta = timedelta(seconds=dwell_window)
                         existing = session.scalar(select(GateEvent).where(

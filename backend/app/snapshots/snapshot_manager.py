@@ -75,6 +75,8 @@ class SnapshotManager:
             all_dets = event_record.get('detections')
             if all_dets is None:
                 return True
+            if isinstance(all_dets, (list, tuple)) and len(all_dets) == 0:
+                return False
             prov = snapshot.get('provenance') or {}
             prov_dets = prov.get('container_detections') or []
             detections = [d for d in all_dets if d.get('camera_id') == camera] or prov_dets

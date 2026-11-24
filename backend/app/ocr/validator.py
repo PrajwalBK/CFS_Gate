@@ -90,7 +90,7 @@ def recover_boxed_check_digit(crop, raw_text: str) -> str:
     """
     Recover boxed or separated check digit from container crop.
     When OCR reads 10 characters [A-Z]{3}[UJZ][0-9]{6} (e.g. 'FANU 342338'),
-    and the crop contains a boxed check digit on the right, verify and append the digit.
+    and the crop physically contains a boxed check digit contour on the right, verify and append the digit.
     """
     if not raw_text or crop is None or getattr(crop, 'size', 0) == 0:
         return raw_text
@@ -105,10 +105,7 @@ def recover_boxed_check_digit(crop, raw_text: str) -> str:
         return raw_text
 
     h, w = crop.shape[:2]
-    # Check digit box recovery only applies to horizontal text strips where the check digit
-    # is positioned to the right of the serial digits. Never run on vertical corner post crops.
-    if w < 1.5 * h:
-        return raw_text
+    # Check digit is placed in the right ~35% of horizontal text crop
     right_roi = crop[:, int(w * 0.65):]
     if right_roi.size > 0:
         try:
